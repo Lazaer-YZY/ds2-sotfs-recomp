@@ -1,0 +1,5 @@
+// VK_KHR_pipeline_executable_properties (#270): shader statistics for diagnostics
+// (vulkan_pipeline_statistics).
+XE_UI_VULKAN_FUNCTION(vkGetPipelineExecutablePropertiesKHR)
+XE_UI_VULKAN_FUNCTION(vkGetPipelineExecutableStatisticsKHR)
+XE_UI_VULKAN_FUNCTION(vkGetPipelineExecutableInternalRepresentationsKHR)

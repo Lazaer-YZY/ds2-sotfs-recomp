@@ -1,0 +1,226 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+// ReXGlue: resolve_fast_32bpp_1x2xmsaa.xesli (xenia-canary 65d42843b6) reading
+// the samples straight from the host render target that owns the resolved
+// EDRAM range instead of from the EDRAM buffer, so the render target doesn't
+// have to be dumped to the EDRAM buffer first (one less full-size copy).
+// GLSL only. Variants:
+// - XE_RESOLVE_HOST_RT_UINT: 32-bit integer view (k_32_FLOAT as R32_UINT),
+//   otherwise a UNORM view of k_8_8_8_8 packed like the EDRAM dump does.
+// - XE_RESOLVE_HOST_RT_DEPTH: kD24S8 depth (binding 0) and stencil (binding 1)
+//   packed like the EDRAM dump (24-bit depth << 8 | stencil).
+//   With XE_RESOLVE_HOST_RT_DEPTH_FLOAT24: kD24FS8 instead (20e4 depth << 8 |
+//   stencil), XE_RESOLVE_HOST_RT_DEPTH_FLOAT24_ROUND when depth_float24_round.
+// - XE_RESOLVE_HOST_RT_7E3: a k_2_10_10_10_FLOAT render target (host
+//   R16G16B16A16_SFLOAT, float view) resolved as k_2_10_10_10 (the 7e3 bits
+//   reinterpreted, a bitwise fast copy), packed to 7e3 like the EDRAM dump.
+// - XE_RESOLVE_HOST_RT_MSAA: 4x MSAA source (2x isn't supported).
+// The host render target is laid out as in the EDRAM dump: its tile index
+// relative to its base tile, split by its pitch into tile columns and rows of
+// 80x16 samples; 4x MSAA samples are 2x2 per pixel.
+
+#ifdef XE_RESOLVE_HOST_RT_7E3
+  // GLSL.std.450 NClamp, as the EDRAM dump uses (NaN -> the lower bound).
+  #extension GL_EXT_spirv_intrinsics : require
+#endif
+
+#define XE_RESOLVE_HOST_RT
+#include "endian.xesli"
+#include "resolve.xesli"
+
+byte_buffer_align16_wo_declare_xe(xe_resolve_dest, set=0, binding=0, u0, space0)
+
+#ifdef XE_RESOLVE_HOST_RT_DEPTH
+  #ifdef XE_RESOLVE_HOST_RT_MSAA
+    layout(set=1, binding=0) uniform texture2DMS xe_resolve_host_rt;
+    layout(set=1, binding=1) uniform utexture2DMS xe_resolve_host_rt_stencil;
+  #else
+    layout(set=1, binding=0) uniform texture2D xe_resolve_host_rt;
+    layout(set=1, binding=1) uniform utexture2D xe_resolve_host_rt_stencil;
+  #endif
+#elif defined(XE_RESOLVE_HOST_RT_UINT)
+  #ifdef XE_RESOLVE_HOST_RT_MSAA
+    layout(set=1, binding=0) uniform utexture2DMS xe_resolve_host_rt;
+  #else
+    layout(set=1, binding=0) uniform utexture2D xe_resolve_host_rt;
+  #endif
+#else
+  #ifdef XE_RESOLVE_HOST_RT_MSAA
+    layout(set=1, binding=0) uniform texture2DMS xe_resolve_host_rt;
+  #else
+    layout(set=1, binding=0) uniform texture2D xe_resolve_host_rt;
+  #endif
+#endif
+
+#ifdef XE_RESOLVE_HOST_RT_DEPTH_FLOAT24
+// Host kD24FS8 depth (the guest 20e4 depth * 0.5, in [0, 0.5]) to 20e4 exactly
+// as the EDRAM dump converts it (VulkanRenderTargetCache::GetDumpPipeline:
+// SpirvShaderTranslator::PreClampedDepthTo20e4(depth, depth_float24_round(),
+// remap_from_0_to_0_5 = true)), the same integer operations step by step.
+uint XeResolveHostDepthTo20e4(float host_depth) {
+  uint f32 = floatBitsToUint(host_depth);
+  // ((f32 & 0x7FFFFF) | 0x800000) >> min(113 - 1 - (f32 >> 23), 24)
+  uint denormal_biased = bitfieldInsert(f32, 1u, 23, 9) >> min(112u - (f32 >> 23u), 24u);
+  // f32 - ((112 - 1) << 23)
+  uint normal_biased = f32 - (111u << 23u);
+  uint biased = (f32 < 0x38000000u) ? denormal_biased : normal_biased;
+  #ifdef XE_RESOLVE_HOST_RT_DEPTH_FLOAT24_ROUND
+    biased += 3u + bitfieldExtract(biased, 3, 1);
+  #endif
+  return bitfieldExtract(biased, 3, 24);
+}
+#endif
+
+#ifdef XE_RESOLVE_HOST_RT_7E3
+spirv_instruction(set = "GLSL.std.450", id = 81)
+float XeResolveHostNClamp(float x, float min_value, float max_value);
+
+// Float32 to 7e3 exactly as the EDRAM dump converts k_2_10_10_10_FLOAT
+// (VulkanRenderTargetCache::GetDumpPipeline ->
+// SpirvShaderTranslator::UnclampedFloat32To7e3 / PreClampedFloat32To7e3), the
+// same operations step by step.
+uint XeResolveHostFloat32To7e3(float f) {
+  uint f32 = floatBitsToUint(XeResolveHostNClamp(f, 0.0, 31.875));
+  // ((f32 & 0x7FFFFF) | 0x800000) >> min(125 - (f32 >> 23), 24)
+  uint denormal_biased = bitfieldInsert(f32, 1u, 23, 9) >> min(125u - (f32 >> 23u), 24u);
+  // f32 - (124 << 23)
+  uint normal_biased = f32 - (124u << 23u);
+  uint biased = (f32 < 0x3E800000u) ? denormal_biased : normal_biased;
+  // Round to the nearest even.
+  return bitfieldExtract(biased + 0x7FFFu + bitfieldExtract(biased, 16, 1), 16, 10);
+}
+#endif
+
+uint XeResolveHostRtLoad(ivec2 pixel, int sample_id) {
+  #ifdef XE_RESOLVE_HOST_RT_MSAA
+    #define XE_RESOLVE_HOST_RT_FETCH(texture) texelFetch(texture, pixel, sample_id)
+  #else
+    #define XE_RESOLVE_HOST_RT_FETCH(texture) texelFetch(texture, pixel, 0)
+  #endif
+  #ifdef XE_RESOLVE_HOST_RT_DEPTH
+    #ifdef XE_RESOLVE_HOST_RT_DEPTH_FLOAT24
+      uint depth24 = XeResolveHostDepthTo20e4(XE_RESOLVE_HOST_RT_FETCH(xe_resolve_host_rt).x);
+    #else
+      // Round to the nearest even like the dump (D24S8).
+      uint depth24 =
+          uint(roundEven(XE_RESOLVE_HOST_RT_FETCH(xe_resolve_host_rt).x * 16777215.0));
+    #endif
+    uint stencil = XE_RESOLVE_HOST_RT_FETCH(xe_resolve_host_rt_stencil).x;
+    return (depth24 << 8u) | (stencil & 0xFFu);
+  #elif defined(XE_RESOLVE_HOST_RT_UINT)
+    return XE_RESOLVE_HOST_RT_FETCH(xe_resolve_host_rt).x;
+  #elif defined(XE_RESOLVE_HOST_RT_UNORM_2101010)
+    // The A2B10G10R10_UNORM texture a 7e3 resolve fed (its texels are the
+    // resolved words): the lazy dump of that resolve (vulkan_resolve_feed_lazy_dump).
+    uvec4 unorm = uvec4(XE_RESOLVE_HOST_RT_FETCH(xe_resolve_host_rt) *
+                            vec4(1023.0, 1023.0, 1023.0, 3.0) +
+                        0.5);
+    return unorm.x | (unorm.y << 10u) | (unorm.z << 20u) | (unorm.w << 30u);
+  #elif defined(XE_RESOLVE_HOST_RT_7E3)
+    // As the dump: 7e3 RGB in bits 0, 10, 20; alpha NClamp(a, 0, 1) * 3 + 0.5
+    // truncated to 2 bits at 30.
+    vec4 color = XE_RESOLVE_HOST_RT_FETCH(xe_resolve_host_rt);
+    uint packed = XeResolveHostFloat32To7e3(color.x);
+    packed = bitfieldInsert(packed, XeResolveHostFloat32To7e3(color.y), 10, 10);
+    packed = bitfieldInsert(packed, XeResolveHostFloat32To7e3(color.z), 20, 10);
+    return bitfieldInsert(packed, uint(XeResolveHostNClamp(color.w, 0.0, 1.0) * 3.0 + 0.5), 30,
+                          2);
+  #else
+    uvec4 unorm = uvec4(XE_RESOLVE_HOST_RT_FETCH(xe_resolve_host_rt) * 255.0 + 0.5);
+    return unorm.x | (unorm.y << 8u) | (unorm.z << 16u) | (unorm.w << 24u);
+  #endif
+  #undef XE_RESOLVE_HOST_RT_FETCH
+}
+
+#define LOCAL_SIZE_X_XE 8
+#define LOCAL_SIZE_Y_XE 8
+#define LOCAL_SIZE_Z_XE 1
+entry_bindings_begin_compute_xe
+  XE_RESOLVE_PUSH_CONST_BINDING
+  entry_binding_next_xe
+  byte_buffer_wo_binding_xe(xe_resolve_dest, buffer(1))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+{
+  XeResolveInfo resolve_info = XeResolveGetInfo(pass_push_consts_xe);
+  dont_flatten_xe
+  if (in_global_thread_id_xe.x >= resolve_info.width_div_8_scaled) {
+    return;
+  }
+  uint2_xe pixel_index = in_global_thread_id_xe.xy << uint2_xe(3u, 0u);
+  // As XeEdramOffsetBytes, up to the tile index and the sample within it (8
+  // pixels at a multiple of 8 never cross an 80-sample tile column).
+  uint2_xe edram_pixel =
+      uint2_xe(pixel_index.x,
+               max(pixel_index.y, resolve_info.half_pixel_offset_fill_source.y)) +
+      resolve_info.edram_offset_scaled;
+  uint2_xe rt_sample_index =
+      edram_pixel <<
+      uint2_xe(greater_than_equal_xe(
+          uint_x2_xe(resolve_info.edram_msaa_samples),
+          uint2_xe(kXenosMsaaSamples_4X, kXenosMsaaSamples_2X)));
+  rt_sample_index +=
+      (uint_x2_xe(XeResolveFirstSampleIndex(resolve_info.sample_select)) >>
+       uint2_xe(1u, 0u)) & 1u;
+  uint2_xe tile_size_samples = uint2_xe(80u, 16u);
+  uint2_xe tile_offset_xy = rt_sample_index / tile_size_samples;
+  uint tile_index = resolve_info.edram_base_tiles +
+                    tile_offset_xy.y * resolve_info.edram_pitch_tiles +
+                    tile_offset_xy.x;
+  rt_sample_index -= tile_offset_xy * tile_size_samples;
+  // Tile in the host render target (EDRAM addressing is periodic).
+  uint rt_tile_index =
+      (tile_index - push_const_xe(xe_resolve_host_rt_base_tiles)) & 2047u;
+  uint rt_pitch_tiles = push_const_xe(xe_resolve_host_rt_pitch_tiles);
+  uint2_xe source_sample =
+      uint2_xe(rt_tile_index % rt_pitch_tiles, rt_tile_index / rt_pitch_tiles) *
+          tile_size_samples +
+      rt_sample_index;
+  #ifdef XE_RESOLVE_HOST_RT_MSAA
+    ivec2 source_pixel = ivec2(source_sample >> 1u);
+    int source_sample_id =
+        int((source_sample.x & 1u) | ((source_sample.y & 1u) << 1u));
+  #else
+    ivec2 source_pixel = ivec2(source_sample);
+    int source_sample_id = 0;
+  #endif
+  uint4_xe pixels_0123 = uint4_xe(
+      XeResolveHostRtLoad(source_pixel, source_sample_id),
+      XeResolveHostRtLoad(source_pixel + ivec2(1, 0), source_sample_id),
+      XeResolveHostRtLoad(source_pixel + ivec2(2, 0), source_sample_id),
+      XeResolveHostRtLoad(source_pixel + ivec2(3, 0), source_sample_id));
+  uint4_xe pixels_4567 = uint4_xe(
+      XeResolveHostRtLoad(source_pixel + ivec2(4, 0), source_sample_id),
+      XeResolveHostRtLoad(source_pixel + ivec2(5, 0), source_sample_id),
+      XeResolveHostRtLoad(source_pixel + ivec2(6, 0), source_sample_id),
+      XeResolveHostRtLoad(source_pixel + ivec2(7, 0), source_sample_id));
+  dont_flatten_xe
+  if (pixel_index.x == 0u &&
+      resolve_info.half_pixel_offset_fill_source.x != 0u) {
+    if (resolve_info.half_pixel_offset_fill_source.x >= 2u) {
+      if (resolve_info.half_pixel_offset_fill_source.x >= 3u) {
+        pixels_0123.z = pixels_0123.w;
+      }
+      pixels_0123.y = pixels_0123.z;
+    }
+    pixels_0123.x = pixels_0123.y;
+  }
+  XeResolveSwap8PixelsRedBlue32bpp(resolve_info, pixels_0123, pixels_4567);
+  uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index, 2u);
+  byte_buffer_align16_store16_xe(
+      xe_resolve_dest, dest_address,
+      XeEndianSwap32(pixels_0123, resolve_info.dest_endian_128));
+  dest_address += XeResolveLocalXAddressXor(4u, 2u);
+  byte_buffer_align16_store16_xe(
+      xe_resolve_dest, dest_address,
+      XeEndianSwap32(pixels_4567, resolve_info.dest_endian_128));
+}
+entry_code_end_compute_xe

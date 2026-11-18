@@ -1,0 +1,98 @@
+plugins {
+    id 'com.android.application'
+}
+
+apply from: '../sdl-java.gradle'
+
+// Native libraries are built separately (ReXGlue/CMake, NDK) and dropped into
+// app/src/main/jniLibs/arm64-v8a/ by a staging script; there is no
+// externalNativeBuild here. Pass -Pds2SkipNativeCheck=true to compile and
+// package the Java side without them.
+def jniLibsDir = file('src/main/jniLibs/arm64-v8a')
+def requiredLibraries = ['libmain.so', 'libSDL3.so', 'libc++_shared.so', 'librexruntime.so', 'librexgpu-xenos.so']
+// libadrenotools hook libraries: present only when the custom Vulkan driver loader is built.
+def optionalLibraries = ['libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so']
+def skipNativeCheck = (project.findProperty('ds2SkipNativeCheck') ?: 'false').toString().toBoolean()
+def checkNativeLibraries = tasks.register('checkNativeLibraries') {
+    onlyIf { !skipNativeCheck }
+    doLast {
+        def missing = requiredLibraries.findAll { !new File(jniLibsDir, it).isFile() }
+        if (!missing.isEmpty()) {
+            throw new GradleException("Missing native libraries in ${jniLibsDir}: ${missing.join(', ')}. " +
+                "Stage them with the native build script, or pass -Pds2SkipNativeCheck=true to build the Java side only.")
+        }
+        fileTree(jniLibsDir).matching { include '**/*.so' }.each { library ->
+            if (!requiredLibraries.contains(library.name) && !optionalLibraries.contains(library.name)) {
+                logger.warn("Unrecognised staged native library: ${library.name}")
+            }
+        }
+    }
+}
+
+// -Pds2VersionName=v0.8.0 gives versionName 0.8.0 and versionCode 80000
+// (major*1000000 + minor*10000 + patch), so updates install over each other.
+def ds2VersionName = (project.findProperty('ds2VersionName') ?: '0.1.0').toString().replaceFirst(/^v/, '')
+def ds2VersionMatch = ds2VersionName =~ /^(\d+)\.(\d+)\.(\d+)/
+def ds2VersionCode = ds2VersionMatch.find()
+    ? ds2VersionMatch.group(1).toInteger() * 1000000 + ds2VersionMatch.group(2).toInteger() * 10000 + ds2VersionMatch.group(3).toInteger()
+    : 1
+// Signing: the app is debug-signed, always, for both build types (as Lost
+// Odyssey Recomp does). There is no release keystore to guard: users sideload
+// the APK, and a stable key across releases only needs DS2_ANDROID_DEBUG_KEYSTORE
+// to point at the same keystore every time so updates install over each other;
+// unset, AGP's own debug keystore is used.
+def ds2DebugKeystore = System.getenv('DS2_ANDROID_DEBUG_KEYSTORE')
+// Fresh-install defaults (gradle.properties ds2PublicDefaults, or -Pds2PublicDefaults=true):
+// the public build starts with debug logging off; the development build starts with it on.
+def ds2PublicDefaults = (project.findProperty('ds2PublicDefaults') ?: 'false').toString().toBoolean()
+// -Pds2AppIdSuffix=.test installs beside the normal app with its own data folder (a first start).
+def ds2AppIdSuffix = (project.findProperty('ds2AppIdSuffix') ?: '').toString()
+// Launcher icon: out/branding/res when it exists (tools/android/make_icon.py; git-ignored: the release icon is
+// made from the game's logo and the repository holds no game artwork), else the placeholder in res/.
+def ds2BrandingRes = rootProject.file('../out/branding/res')
+def ds2Branded = new File(ds2BrandingRes, 'mipmap-anydpi-v26/ic_launcher_ds2.xml').isFile()
+
+android {
+    namespace 'com.ds2recomp.android'
+    compileSdk 35
+    buildToolsVersion '35.0.0'
+    ndkVersion '28.2.13676358'
+    defaultConfig {
+        applicationId 'com.ds2recomp.android'
+        minSdk 26
+        targetSdk 35
+        versionCode ds2VersionCode
+        versionName ds2VersionName
+        ndk { abiFilters 'arm64-v8a' }
+        buildConfigField 'boolean', 'PUBLIC_DEFAULTS', ds2PublicDefaults.toString()
+        if (ds2AppIdSuffix) applicationIdSuffix ds2AppIdSuffix
+        manifestPlaceholders = [ds2Icon: ds2Branded ? '@mipmap/ic_launcher_ds2' : '@mipmap/ic_launcher']
+    }
+    buildFeatures { buildConfig true }
+    if (ds2DebugKeystore) {
+        signingConfigs.debug.storeFile = file(ds2DebugKeystore)
+    }
+    sourceSets.main {
+        java.srcDir layout.buildDirectory.dir('generated/sdl-java')
+        if (ds2Branded) res.srcDir ds2BrandingRes
+    }
+    lint { lintConfig = file('../lint.xml') }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    // Extracted native libraries: libadrenotools opens its hook libraries by
+    // path from nativeLibraryDir when a custom Vulkan driver is loaded.
+    packaging { jniLibs { useLegacyPackaging = true } }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+}
+
+tasks.named('preBuild') { dependsOn checkNativeLibraries }
+dependencies {
+    implementation 'androidx.core:core:1.15.0'
+}

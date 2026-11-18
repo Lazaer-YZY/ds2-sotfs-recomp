@@ -1,0 +1,98 @@
+#pragma once
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ *
+ * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ */
+
+#include <algorithm>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <rex/graphics/shared_memory.h>
+#include <rex/memory.h>
+#include <rex/ui/vulkan/upload_buffer_pool.h>
+
+namespace rex::graphics::vulkan {
+
+class VulkanCommandProcessor;
+
+class VulkanSharedMemory : public SharedMemory {
+ public:
+  VulkanSharedMemory(VulkanCommandProcessor& command_processor, memory::Memory& memory,
+                     VkPipelineStageFlags guest_shader_pipeline_stages);
+  ~VulkanSharedMemory() override;
+
+  bool Initialize();
+  void Shutdown(bool from_destructor = false);
+
+  void CompletedSubmissionUpdated();
+  void EndSubmission();
+
+  enum class Usage {
+    // Index buffer, vfetch, compute read, transfer source.
+    kRead,
+    // Index buffer, vfetch, memexport.
+    kGuestDrawReadWrite,
+    kComputeWrite,
+    kTransferDestination,
+  };
+  // Inserts a pipeline barrier for the target usage, also ensuring consecutive
+  // read-write accesses are ordered with each other.
+  void Use(Usage usage, std::pair<uint32_t, uint32_t> written_range = {},
+           bool coalesce_writes = false);
+  // Guest draw writes (memexport) not yet made visible by a barrier.
+  std::pair<uint32_t, uint32_t> pending_written_range() const {
+    return last_usage_ == Usage::kGuestDrawReadWrite ? last_written_range_
+                                                    : std::pair<uint32_t, uint32_t>(0, 0);
+  }
+
+  VkBuffer buffer() const { return buffer_; }
+
+  // DS2 port (vulkan_shared_memory_hoist_uploads): records the current submission's hoisted uploads,
+  // with a barrier before (earlier submissions' accesses -> transfer write) and after (transfer
+  // write -> every shared memory access), into the command buffer. Must be called by every
+  // submission after vkBeginCommandBuffer and before the deferred command buffer is executed.
+  // Returns the number of bytes copied.
+  uint64_t RecordHoistedUploads(VkCommandBuffer command_buffer);
+
+ protected:
+  bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
+                                        uint32_t length_allocations) override;
+
+  bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
+  uint64_t UploadHoistEpoch() const override;
+  bool UploadRangesHoisted(
+      const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
+
+ private:
+  void GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
+                     VkAccessFlags& access_mask) const;
+
+  VulkanCommandProcessor& command_processor_;
+  VkPipelineStageFlags guest_shader_pipeline_stages_;
+
+  VkBuffer buffer_ = VK_NULL_HANDLE;
+  uint32_t buffer_memory_type_;
+  // Single for non-sparse, every allocation so far for sparse.
+  std::vector<VkDeviceMemory> buffer_memory_;
+
+  Usage last_usage_;
+  std::pair<uint32_t, uint32_t> last_written_range_;
+
+  std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
+  std::vector<VkBufferCopy> upload_regions_;
+  // Hoisted uploads of the submission hoisted_copies_submission_, in order (source buffer, copy).
+  // Entries of any other submission are stale and never recorded.
+  std::vector<std::pair<VkBuffer, VkBufferCopy>> hoisted_copies_;
+  uint64_t hoisted_copies_submission_ = 0;
+  mutable uint64_t hoist_enabled_since_submission_ = UINT64_MAX;
+};
+
+}  // namespace rex::graphics::vulkan

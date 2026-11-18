@@ -1,0 +1,7 @@
+// VK_EXT_extended_dynamic_state3 (#456) functions used in ReXGlue.
+XE_UI_VULKAN_FUNCTION(vkCmdSetPolygonModeEXT)
+XE_UI_VULKAN_FUNCTION(vkCmdSetDepthClampEnableEXT)
+XE_UI_VULKAN_FUNCTION(vkCmdSetColorBlendEnableEXT)
+XE_UI_VULKAN_FUNCTION(vkCmdSetColorBlendEquationEXT)
+XE_UI_VULKAN_FUNCTION(vkCmdSetColorWriteMaskEXT)
+XE_UI_VULKAN_FUNCTION(vkCmdSetRasterizationSamplesEXT)

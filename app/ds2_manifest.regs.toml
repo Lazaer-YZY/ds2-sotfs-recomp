@@ -1,0 +1,24 @@
+# Register-localised variant of ds2_manifest.diag-dataonly.toml (2026-11-17).
+# DIAGNOSTIC manifest (2026-10-19): diag-overrides + entry candidates from tools/ds2_find_dataonly_entries.py
+# (data-referenced: ds2_overrides.dataonly.toml; built in code by lis+addi: ds2_overrides.codeptr.toml).
+# Neither app/ds2_manifest.toml nor config/ds2_overrides.proposed.toml is changed. Output goes to its own directory.
+# `includes` must be inside [entrypoint]: the SDK passes only that table to RecompilerConfig::LoadFromTable
+# (sdk/src/codegen/manifest.cpp:115); a top-level `includes` is silently ignored.
+
+[project]
+name = "ds2"
+sdk_version = "0.10.0"
+game_root = "../assets/game_root"
+
+[entrypoint]
+file_path = "../assets/game_root/Default.xex"
+out_directory_path = "generated/regs"
+# Register localisation (the Lightning Returns port's settings, same MSVC-compiled 360 code generation): CTR, XER,
+# reserved, CR and the non-volatile registers r14-r31 / f14-f31 / v14-v31 as C locals (LR: game code -9 %).
+# Never non_argument_as_local (r0/r2/r11/r12 feed thunks and save/restore helpers: LR deadlocked at start).
+ctr_as_local = true
+xer_as_local = true
+reserved_as_local = true
+cr_as_local = true
+non_volatile_as_local = true
+includes = ["../config/ds2_overrides.proposed.toml", "../config/ds2_overrides.diag.toml", "../config/ds2_overrides.dataonly.toml", "../config/ds2_overrides.codeptr.toml", "../config/ds2_overrides.gaps.toml"]

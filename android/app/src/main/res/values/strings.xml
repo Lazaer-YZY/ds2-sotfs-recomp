@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DS2 Recomp</string>
+    <string name="touch_hide_all">Hide all touch controls</string>
+    <string name="touch_hide_all_help">Reveal the system bars or use Android Back to show CTRL for 4 seconds.</string>
+    <string name="touch_settings_title">Controller settings</string>
+    <string name="touch_show_controls">Show touch controls</string>
+    <string name="touch_controller_hint">Physical controller connected. Touch controls hide automatically; turn them on here to use both together.</string>
+    <string name="touch_control_size">Control size: %1$d%%</string>
+    <string name="touch_opacity">Opacity: %1$d%%</string>
+    <string name="touch_ctrl_auto_hide">Auto-hide CTRL button</string>
+    <string name="touch_gpu_driver">GPU driver: %1$s …</string>
+    <string name="touch_gpu_driver_system">System</string>
+    <string name="touch_game_folder">Game folder …</string>
+    <string name="touch_apply">Apply</string>
+    <string name="touch_edit_layout">Edit layout</string>
+    <string name="touch_perf_overlay">Performance overlay (frame rate, 1% low, frame time graph; can cost a few frames)</string>
+    <string name="touch_frame_rate">Frame rate</string>
+    <string name="touch_fps_30">30 fps (as on the Xbox 360; coolest)</string>
+    <string name="touch_fps_40">40 fps (120 Hz panel mode; from the next start)</string>
+    <string name="touch_fps_60">60 fps</string>
+    <string name="touch_panel120">Smoother 60 fps: 120 Hz panel mode (a frame that misses 16.7 ms shows after 25 ms instead of 33; from the next start)</string>
+    <string name="touch_depth_of_field">Depth of field (blur effect; off is sharper and faster)</string>
+    <string name="touch_eco_mode">Eco mode: less power and heat, lower image quality (the 3D scene is shaded at reduced detail and looks softer; HUD and text stay sharp)</string>
+    <string name="touch_debug_log">Debug logging (statistics for troubleshooting; slight extra load; from the next start)</string>
+    <string name="touch_cancel">Cancel</string>
+</resources>
