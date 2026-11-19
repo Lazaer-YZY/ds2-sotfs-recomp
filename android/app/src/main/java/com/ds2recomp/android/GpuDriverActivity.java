@@ -135,9 +135,9 @@ public final class GpuDriverActivity extends Activity {
     }
 
     private void launchGame() {
-        // Without game data the game folder page comes first.
-        Intent intent = new Intent(this, GameStorage.hasGame(this) ? RuntimeActivity.class
-                                                                   : GameFolderActivity.class);
+        // Without game data (disc 1, and disc 2's DLC) the game folder page comes first.
+        boolean ready = GameStorage.hasGame(this) && GameStorage.hasDlc(this);
+        Intent intent = new Intent(this, ready ? RuntimeActivity.class : GameFolderActivity.class);
         // Debug launches pass extras (cvars, DS2_DIAG, game_root, DS2_SUSTAINED) to the launcher activity:
         // hand them on, RuntimeActivity reads them (and only honours cvars in debuggable builds).
         if (getIntent() != null && getIntent().getExtras() != null) {

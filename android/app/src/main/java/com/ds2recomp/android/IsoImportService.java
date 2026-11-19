@@ -62,7 +62,7 @@ public final class IsoImportService extends Service {
         Intent open = new Intent(this, GameFolderActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         return b.setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("Importing the game")
+            .setContentTitle(job != null && job.kind == IsoImport.Kind.DLC ? "Importing disc 2 (DLC)" : "Importing disc 1 (game)")
             .setContentText(job == null ? "" : IsoImport.gigabytes(job.doneBytes) + " of " + IsoImport.gigabytes(job.totalBytes))
             .setProgress(100, pct, job == null)
             .setOngoing(true)

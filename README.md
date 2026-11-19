@@ -56,7 +56,7 @@ which the app ships and loads by itself.
   Compatibility Pack 4 with the three Crown DLC areas; the game does not start without it).
 - An arm64 Android device with Vulkan, Android 8 or newer (9 or newer for the bundled Turnip driver). Snapdragon
   (Adreno 6xx / 7xx) is the tested path; Mali and other GPUs use the system driver and are untested. About 8 GB free
-  for the game files.
+  for the game, plus room for one disc image (7.8 GB) while importing it.
 
 ## Install
 
@@ -66,9 +66,13 @@ Releases are numbered 0.x while they are test builds; 1.0 comes once they have b
    [`ds2-sotfs-android-arm64.apk`](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/releases/latest/download/ds2-sotfs-android-arm64.apk)
    from the [latest release](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/releases/latest) and open it to install
    (allow your browser or file manager to install apps when Android asks).
-2. **Start it once.** It creates its folders, including `Android/data/com.ds2recomp.android/files/game/`, and with no
-   game there yet it opens its game-folder page instead of the game. Close it.
-3. **Copy the game** (about 6.7 GB) into the device's internal storage, in `Android/data/com.ds2recomp.android/files/`:
+2. **Start it.** With no game yet it opens its game-folder page, which lists both discs.
+3. **Import the discs** from your own disc images (.iso) on the device (internal storage or SD card): tap
+   **Import disc 1…** and pick the disc 1 ISO (the game, about 5.5 GB, is extracted), then **Import disc 2…** and pick
+   the disc 2 ISO (only its DLC package, 1.2 GB, is copied). The page tells the discs apart by their contents and asks
+   for the other one when a disc is done; each ISO can be deleted once it is imported.
+
+   **Or copy from a PC** into the device's internal storage, in `Android/data/com.ds2recomp.android/files/`:
 
    | From your discs | To the device (`.../files/`) |
    |---|---|
@@ -77,9 +81,7 @@ Releases are numbered 0.x while they are test builds; 1.0 comes once they have b
 
    To unpack a disc image on a PC: `python tools/android/xdvdfs.py <disc.iso> extract <folder>` (Python 3, no other
    dependencies). Windows Explorer can browse `Android/data` on most phones over USB; if it can't, use
-   `adb push <folder>/. /sdcard/Android/data/com.ds2recomp.android/files/game/` (and the same for `dlc/`). The
-   game-folder page can also pick a folder elsewhere on the device or import disc 1 straight from its ISO; the disc 2
-   package always goes in `files/dlc/`.
+   `adb push <folder>/. /sdcard/Android/data/com.ds2recomp.android/files/game/` (and the same for `dlc/`).
 4. **Start the game.** The first start installs the DLC package and loads the bundled shader cache at the title screen
    (a minute or two); later starts are quick. The game asks for its "offline" confirmations at boot; that is normal.
 

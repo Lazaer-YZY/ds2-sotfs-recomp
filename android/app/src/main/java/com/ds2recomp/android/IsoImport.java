@@ -23,6 +23,12 @@ import java.util.Locale;
  * {@code default.xex} last: a cancelled or failed import never leaves a folder
  * the launcher would take for a game.
  *
+ * Disc 2 is told apart by its contents: it carries the DLC package the console
+ * installs from the disc (Compatibility Pack 4, an STFS package of this title
+ * under {@code content/}). Only that package is copied, into the app's
+ * {@code dlc/} folder ({@code dlc.import} first), where the game installs it at
+ * its next start (app/src/ds2_dlc.cpp).
+ *
  * The running import is process-wide ({@link #current}), so the game folder
  * page re-attaches to it when it is opened again.
  */
@@ -38,12 +44,35 @@ final class IsoImport {
     /** Free space kept beyond the game's size. */
     static final long SPACE_MARGIN = 256L << 20;
 
+    /** Disc 1 (the game) or disc 2 (its DLC package). */
+    enum Kind { GAME, DLC }
+
+    /**
+     * The display name of an STFS package of this title (CON / LIVE / PIRS header, title ID at
+     * 0x360, UTF-16 name at 0x411), or null for anything else.
+     */
+    static String dlcPackageName(byte[] head) {
+        if (head == null || head.length < 0x411 + 0x80) return null;
+        String magic = new String(head, 0, 4, java.nio.charset.StandardCharsets.US_ASCII);
+        if (!magic.equals("CON ") && !magic.equals("LIVE") && !magic.equals("PIRS")) return null;
+        long title = ByteBuffer.wrap(head, 0x360, 4).getInt() & 0xFFFFFFFFL;
+        if (title != TITLE_ID) return null;
+        String name = new String(head, 0x411, 0x80, java.nio.charset.StandardCharsets.UTF_16BE);
+        int end = name.indexOf('\0');
+        name = (end >= 0 ? name.substring(0, end) : name).trim();
+        return name.isEmpty() ? "DLC package" : name;
+    }
+
     /** A picked disc image, opened and listed, before the import starts. */
     static final class Disc implements AutoCloseable {
         final ParcelFileDescriptor descriptor;
         final FileInputStream stream;
         final XdvdfsReader reader;
+        /** Disc 1: every file to extract. Disc 2: only the DLC package(s). */
         final List<XdvdfsReader.Entry> entries;
+        final Kind kind;
+        /** Disc 2: the package's display name ("" for disc 1). */
+        final String packageName;
         final long totalBytes;
         final int fileCount;
         /** -1 when default.xex has no readable title ID. */
@@ -52,11 +81,13 @@ final class IsoImport {
         final String xexSha256;
 
         private Disc(ParcelFileDescriptor descriptor, FileInputStream stream, XdvdfsReader reader,
-                List<XdvdfsReader.Entry> entries, long titleId, String xexSha256) {
+                List<XdvdfsReader.Entry> entries, Kind kind, String packageName, long titleId, String xexSha256) {
             this.descriptor = descriptor;
             this.stream = stream;
             this.reader = reader;
             this.entries = entries;
+            this.kind = kind;
+            this.packageName = packageName;
             this.titleId = titleId;
             this.xexSha256 = xexSha256;
             long total = 0;
@@ -97,11 +128,31 @@ final class IsoImport {
             List<XdvdfsReader.Entry> entries = new java.util.ArrayList<>(reader.entries());
             entries.removeIf(e -> e.path.startsWith("$SystemUpdate"));
             XdvdfsReader.Entry xex = XdvdfsReader.find(entries, "default.xex");
-            if (xex == null || xex.isDir)
-                throw new IOException("This disc has no default.xex, so it is not a game disc.");
-            long titleId = XdvdfsReader.xexTitleId(reader.head(xex, 64 << 10));
-            String xexSha256 = xex.size <= MAX_XEX_BYTES ? sha256(reader.head(xex, (int) xex.size)) : "";
-            return new Disc(descriptor, stream, reader, entries, titleId, xexSha256);
+            boolean hasXex = xex != null && !xex.isDir;
+            long titleId = hasXex ? XdvdfsReader.xexTitleId(reader.head(xex, 64 << 10)) : -1;
+            if (titleId == TITLE_ID) {
+                String xexSha256 = xex.size <= MAX_XEX_BYTES ? sha256(reader.head(xex, (int) xex.size)) : "";
+                return new Disc(descriptor, stream, reader, entries, Kind.GAME, "", titleId, xexSha256);
+            }
+            // Disc 2: its default.xex is the console's disc installer (FFED2000); the DLC package is
+            // in content/0000000000000000/FFED2000/FFFFFFFF/.
+            List<XdvdfsReader.Entry> packages = new java.util.ArrayList<>();
+            String packageName = "";
+            for (XdvdfsReader.Entry entry : entries) {
+                if (entry.isDir || entry.size < (1L << 20)
+                        || !entry.path.toLowerCase(Locale.ROOT).startsWith("content/")) continue;
+                String name = dlcPackageName(reader.head(entry, 0x500));
+                if (name == null) continue;
+                packages.add(entry);
+                if (packageName.isEmpty()) packageName = name;
+            }
+            if (!packages.isEmpty())
+                return new Disc(descriptor, stream, reader, packages, Kind.DLC, packageName, titleId, "");
+            if (!hasXex)
+                throw new IOException("This disc has no default.xex and no Dark Souls II DLC package, so it is "
+                    + "neither disc 1 nor disc 2 of the game.");
+            // Another game: checkDisc names its title ID.
+            return new Disc(descriptor, stream, reader, entries, Kind.GAME, "", titleId, "");
         } catch (IOException | RuntimeException e) {
             try { stream.close(); } catch (IOException ignored) {}
             descriptor.close();
@@ -116,6 +167,7 @@ final class IsoImport {
     private static volatile IsoImport current;
 
     final File target;
+    final Kind kind;
     final long totalBytes;
     volatile State state = State.RUNNING;
     volatile long doneBytes;
@@ -128,6 +180,7 @@ final class IsoImport {
     private IsoImport(Disc disc, File target) {
         this.disc = disc;
         this.target = target;
+        this.kind = disc.kind;
         this.totalBytes = disc.totalBytes;
     }
 
@@ -172,7 +225,9 @@ final class IsoImport {
             ByteBuffer buffer = ByteBuffer.allocateDirect(8 << 20);
             for (XdvdfsReader.Entry entry : disc.entries) {
                 if (cancelRequested) break;
-                File destination = new File(staging, entry.path);
+                // Disc 2: the package alone, without the disc's content/... folders.
+                String name = kind == Kind.DLC ? entry.path.substring(entry.path.lastIndexOf('/') + 1) : entry.path;
+                File destination = new File(staging, name);
                 if (entry.isDir) {
                     if (!destination.isDirectory() && !destination.mkdirs())
                         throw new IOException("Cannot create " + destination);
@@ -197,8 +252,8 @@ final class IsoImport {
             }
             currentFile = "";
             // The disc's default.xex was checked before the import; this catches a bad read.
-            String sha = sha256(new File(staging, xexName(staging)));
-            if (!TESTED_XEX_SHA256.isEmpty() && !TESTED_XEX_SHA256.equals(sha)) {
+            String sha = kind == Kind.GAME ? sha256(new File(staging, xexName(staging))) : "";
+            if (kind == Kind.GAME && !TESTED_XEX_SHA256.isEmpty() && !TESTED_XEX_SHA256.equals(sha)) {
                 finishCleaning(staging, State.FAILED, "default.xex was not copied intact (sha256 "
                     + sha.substring(0, 16) + "…). Try again; if it fails again, copy the ISO to the "
                     + "device's internal storage and import it from there.");

@@ -40,8 +40,10 @@ import java.util.Objects;
  *
  * It opens instead of the game when no {@code default.xex} is found in the
  * game folder, and from the CTRL dialog while playing; changing the folder
- * then restarts. "Import from ISO" extracts the game from the player's disc
- * image on the device ({@link IsoImport}); DLC import is not supported.
+ * then restarts. "Import disc 1/2" reads the player's disc images on the
+ * device ({@link IsoImport}): disc 1 is extracted into the game folder, disc 2's
+ * DLC package (Compatibility Pack 4, which the game needs) is copied into the
+ * app's dlc/ folder. The launcher opens this page until both are there.
  */
 public final class GameFolderActivity extends Activity {
     static final String EXTRA_FROM_GAME = "from_game";
@@ -157,11 +159,35 @@ public final class GameFolderActivity extends Activity {
 
         File gameDir = GameStorage.gameDir(this);
         boolean found = GameStorage.hasDefaultXex(gameDir);
-        TextView status = text(found ? "Game found: " + gameDir
-            : "No game found. Put the extracted game (Default.xex and the disc files directly "
-                + "inside the folder) in one of the places below.", 15f, true);
+        TextView status = text(found ? "Disc 1 (game) found: " + gameDir
+            : "Disc 1 (game) missing. Import disc 1 below, or put the extracted game (Default.xex and the "
+                + "disc files directly inside the folder) in one of the places below.", 15f, true);
         status.setTextColor(found ? Color.rgb(140, 220, 140) : Color.rgb(255, 196, 80));
         page.addView(status);
+        boolean dlc = GameStorage.hasDlc(this);
+        File dlcDir = GameStorage.dlcDir(this);
+        File dlcPackage = GameStorage.dlcPackage(this);
+        TextView dlcStatus = text(dlc ? "Disc 2 (DLC) found: " + (dlcPackage != null ? dlcPackage : "installed")
+            : "Disc 2 (DLC) missing. The game does not start without disc 2's DLC package (Compatibility "
+                + "Pack 4). Import disc 2 below, or copy the one file in disc 2's "
+                + "content/0000000000000000/FFED2000/FFFFFFFF/ into " + dlcDir + ".", 15f, true);
+        dlcStatus.setTextColor(dlc ? Color.rgb(140, 220, 140) : Color.rgb(255, 196, 80));
+        page.addView(dlcStatus);
+
+        if (!fromGame) {
+            page.addView(text("Import from the discs", 18f, true));
+            page.addView(dim("Pick your Xbox 360 disc images (.iso), one at a time. Disc 1: the app extracts the "
+                + "game (about 5.5 GB) into the custom folder if one is set, else into the app folder. Disc 2: it "
+                + "copies the DLC package (1.2 GB) into " + dlcDir + "; the game's first start installs it (another "
+                + "1.2 GB). The ISOs can be deleted afterwards."));
+            LinearLayout imports = new LinearLayout(this);
+            imports.setOrientation(LinearLayout.HORIZONTAL);
+            imports.setPadding(0, dp(8), 0, dp(8));
+            // Not while playing: the running game has the current game files open.
+            imports.addView(button("Import disc 1…", v -> pickIso()));
+            imports.addView(button("Import disc 2…", v -> pickIso()));
+            page.addView(imports);
+        }
 
         page.addView(text("App folder", 18f, true));
         StringBuilder folders = new StringBuilder();
@@ -192,19 +218,10 @@ public final class GameFolderActivity extends Activity {
             + "filled with a file manager. Pick the folder that holds default.xex. "
             + "Needs the \"All files access\" permission."));
 
-        if (!fromGame) {
-            page.addView(text("Import from ISO", 18f, true));
-            page.addView(dim("Pick your Xbox 360 disc image (.iso) and the app extracts the game "
-                + "(about 7 GB) into the custom folder if one is set, else into the app folder. "
-                + "The ISO can be deleted afterwards."));
-        }
-
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setPadding(0, dp(8), 0, dp(8));
         actions.addView(button("Choose folder…", v -> chooseFolder()));
-        // Not while playing: the running game has the current game files open.
-        if (!fromGame) actions.addView(button("Import from ISO…", v -> pickIso()));
         if (custom != null) {
             actions.addView(button("Use app folder", v -> {
                 GameStorage.setCustomRoot(this, null);
@@ -220,8 +237,17 @@ public final class GameFolderActivity extends Activity {
         boolean changed = !Objects.equals(originalCustom, GameStorage.customRoot(this));
         if (!fromGame) {
             Button start = button("Start game", v -> {
-                startActivity(new Intent(this, RuntimeActivity.class));
-                finish();
+                if (!GameStorage.hasDlc(this)) {
+                    new AlertDialog.Builder(this).setTitle("Disc 2 is missing")
+                        .setMessage("The game does not start without disc 2's DLC package (Compatibility Pack 4). "
+                            + "Import disc 2 first.")
+                        .setPositiveButton("Import disc 2…", (dialog, which) -> pickIso())
+                        .setNeutralButton("Start anyway", (dialog, which) -> startGame())
+                        .setNegativeButton("Cancel", null)
+                        .show();
+                    return;
+                }
+                startGame();
             });
             start.setEnabled(found);
             return start;
@@ -243,6 +269,11 @@ public final class GameFolderActivity extends Activity {
         // Restarting without game data would only reach the missing-game error.
         apply.setEnabled(found);
         return apply;
+    }
+
+    private void startGame() {
+        startActivity(new Intent(this, RuntimeActivity.class));
+        finish();
     }
 
     // Permission and picker ---------------------------------------------------
@@ -378,6 +409,10 @@ public final class GameFolderActivity extends Activity {
      * byte for byte); any other disc is refused before anything is copied.
      */
     private void checkDisc(IsoImport.Disc disc) {
+        if (disc.kind == IsoImport.Kind.DLC) {
+            checkDlcTarget(disc);
+            return;
+        }
         if (disc.titleId == IsoImport.TITLE_ID
                 && (IsoImport.TESTED_XEX_SHA256.isEmpty() || IsoImport.TESTED_XEX_SHA256.equals(disc.xexSha256))) {
             checkTarget(disc);
@@ -387,7 +422,8 @@ public final class GameFolderActivity extends Activity {
         if (disc.titleId != IsoImport.TITLE_ID) {
             String id = disc.titleId < 0 ? "unknown" : String.format("%08X", disc.titleId);
             message("Not Dark Souls II", "This disc's title ID is " + id
-                + "; Dark Souls II: Scholar of the First Sin is 465307E4. Nothing was imported.");
+                + " and it carries no Dark Souls II DLC package; Dark Souls II: Scholar of the First Sin is "
+                + "465307E4 (disc 1) and its disc 2 carries Compatibility Pack 4. Nothing was imported.");
         } else {
             String sha = disc.xexSha256.isEmpty() ? "unknown" : disc.xexSha256.substring(0, 16) + "…";
             message("Different release of the game", "This app's game code was compiled from the USA "
@@ -427,7 +463,7 @@ public final class GameFolderActivity extends Activity {
         boolean hasFiles = false;
         if (existing != null) for (String name : existing) if (!name.equals(GameStorage.README)) hasFiles = true;
         File chosen = target;
-        new AlertDialog.Builder(this).setTitle("Import the game?")
+        new AlertDialog.Builder(this).setTitle("Import disc 1 (the game)?")
             .setMessage(disc.fileCount + " files, " + IsoImport.gigabytes(disc.totalBytes) + ", into\n"
                 + target.getAbsolutePath()
                 + (hasFiles ? "\n\nFiles with the same names already in this folder are replaced." : "")
@@ -442,6 +478,63 @@ public final class GameFolderActivity extends Activity {
             .show();
     }
 
+    /**
+     * Disc 2: its DLC package goes to the app's dlc/ folder, where the game installs it at the next
+     * start (into user/, as much again), so both copies must fit.
+     */
+    private void checkDlcTarget(IsoImport.Disc disc) {
+        File target = GameStorage.dlcDir(this);
+        long need = 2 * disc.totalBytes + IsoImport.SPACE_MARGIN;
+        File existing = target;
+        while (existing != null && !existing.exists()) existing = existing.getParentFile();
+        long free = existing != null ? existing.getUsableSpace() : 0;
+        if (free < need) {
+            disc.close();
+            message("Not enough space", "Disc 2's DLC package needs " + IsoImport.gigabytes(need)
+                + " (the package, and the game installs it once more at its first start).\n\n"
+                + target.getAbsolutePath() + ": " + IsoImport.gigabytes(free) + " free.\n\nFree some space first.");
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Import disc 2 (the DLC)?")
+            .setMessage(disc.packageName + ", " + IsoImport.gigabytes(disc.totalBytes) + ", into\n"
+                + target.getAbsolutePath()
+                + "\n\nThe game installs it at its next start. This takes a minute or two; you can leave the app: "
+                + "a notification shows the progress.")
+            .setPositiveButton("Import", (dialog, which) -> {
+                IsoImport.start(disc, target);
+                IsoImportService.start(this);  // keeps the copy alive if the user leaves the app
+                render();
+            })
+            .setNegativeButton("Cancel", (dialog, which) -> disc.close())
+            .setOnCancelListener(dialog -> disc.close())
+            .show();
+    }
+
+    /** After one disc: ask for the other one, or offer to start once both are there. */
+    private void importedNext(IsoImport job) {
+        boolean game = GameStorage.hasGame(this);
+        boolean dlc = GameStorage.hasDlc(this);
+        String done = job.kind == IsoImport.Kind.DLC ? "Disc 2 imported" : "Disc 1 imported";
+        String warning = job.message == null ? "" : "\n\nNote: " + job.message;
+        if (game && dlc) {
+            // The next step is starting the game (the page's Start button is below the fold).
+            new AlertDialog.Builder(this).setTitle(done)
+                .setMessage("The game is ready. Its first start installs the DLC and prepares the shaders for this "
+                    + "device, which takes a few minutes; later starts are quick." + warning)
+                .setPositiveButton("Start game", (dialog, which) -> startGame())
+                .setNegativeButton("Not now", null)
+                .show();
+        } else {
+            String next = game ? "Now import disc 2: the game needs its DLC package (Compatibility Pack 4)."
+                : "Now import disc 1 (the game).";
+            new AlertDialog.Builder(this).setTitle(done)
+                .setMessage(next + warning)
+                .setPositiveButton(game ? "Import disc 2…" : "Import disc 1…", (dialog, which) -> pickIso())
+                .setNegativeButton("Later", null)
+                .show();
+        }
+    }
+
     /** The import's progress page while one runs; returns false when there is none to show. */
     private boolean renderImport() {
         IsoImport job = IsoImport.current();
@@ -453,26 +546,18 @@ public final class GameFolderActivity extends Activity {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             IsoImport.clearFinished();
             if (job.state == IsoImport.State.DONE && !fromGame) {
-                // The next step is starting the game (the page's Start button is below the fold).
-                new AlertDialog.Builder(this).setTitle("Game imported")
-                    .setMessage("The game is ready. Its first start prepares the shaders for this device, "
-                        + "which takes a few minutes; later starts are quick.")
-                    .setPositiveButton("Start game", (dialog, which) -> {
-                        startActivity(new Intent(this, RuntimeActivity.class));
-                        finish();
-                    })
-                    .setNegativeButton("Not now", null)
-                    .show();
+                importedNext(job);
             } else if (job.state == IsoImport.State.DONE) {
                 message("Game imported", job.message == null ? "The game is ready."
                     : "The game is in place, but: " + job.message);
             } else if (job.state == IsoImport.State.FAILED) {
-                message("Import failed", job.message + "\n\nNothing was left in the game folder.");
+                message("Import failed", job.message + "\n\nNothing was left behind.");
             }
             return false;
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        page.addView(text("Importing the game", 18f, true));
+        page.addView(text(job.kind == IsoImport.Kind.DLC ? "Importing disc 2 (the DLC package)"
+            : "Importing disc 1 (the game)", 18f, true));
         page.addView(dim("Into " + job.target.getAbsolutePath()
             + ". Keep the app open; the screen stays on until it is done."));
         importBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);

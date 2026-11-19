@@ -93,7 +93,38 @@ final class GameStorage {
     }
 
     // The game folder is filled by copying an extracted game (Default.xex +
-    // data files) or by IsoImport from the player's disc image; no DLC import.
+    // data files) or by IsoImport from the player's disc 1 image; disc 2's DLC
+    // package goes to dlc/ (copied, or IsoImport from the disc 2 image).
+
+    /** The app files folder the runtime gets as REX_ANDROID_APP_DIR (RuntimeActivity: the logs' parent). */
+    private static File appRoot(Context context) {
+        File external = context.getExternalFilesDir(null);
+        return external != null ? external : context.getFilesDir();
+    }
+
+    /** Where the game looks for DLC packages to install at startup (app/src/ds2_dlc.cpp). */
+    static File dlcDir(Context context) {
+        return new File(appRoot(context), "dlc");
+    }
+
+    /** The first package waiting in dlc/ (regular, not hidden files, as the game takes them), or null. */
+    static File dlcPackage(Context context) {
+        File[] files = dlcDir(context).listFiles();
+        if (files == null) return null;
+        for (File file : files) if (file.isFile() && file.length() > 0 && !file.getName().startsWith(".")) return file;
+        return null;
+    }
+
+    /**
+     * Disc 2's DLC (Compatibility Pack 4) is there: a package in dlc/, or already installed by the
+     * game (user/0000000000000000/465307E4/00000002/), so a player who deleted the package after the
+     * first start is not sent back to this page.
+     */
+    static boolean hasDlc(Context context) {
+        if (dlcPackage(context) != null) return true;
+        String[] installed = new File(appRoot(context), "user/0000000000000000/465307E4/00000002").list();
+        return installed != null && installed.length > 0;
+    }
 
     static boolean hasDefaultXex(File gameDir) {
         File[] files = gameDir.listFiles();
