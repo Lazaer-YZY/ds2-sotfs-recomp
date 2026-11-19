@@ -261,6 +261,10 @@ void ApplyDefaults() {
       {"vulkan_shader_xenos_multiply_vertex", "false"},
       // Turnip exposes no sparse residency on Adreno: the non-sparse shared-memory path.
       {"vulkan_sparse_shared_memory", "false"},
+      // The save list (Continue / Load) draws each character's portrait on the GPU (128x76 resolve) and copies it on
+      // the CPU into the list's texture; without a readback the CPU read stale memory and the portraits were noise
+      // (a phone and the Thor, 2026-11-19). Only that size is read back: the menus pay one short GPU wait per portrait.
+      {"readback_resolve_sizes", "128x76"},
   };
   for (const auto& [name, value] : kDefaults) {
     if (rex::cvar::GetFlagInfo(name) == nullptr) {

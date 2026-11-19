@@ -81,6 +81,13 @@ namespace {
 constexpr bool kVulkanReadbackMemexportDefault = false;
 }  // namespace
 
+REXCVAR_DEFINE_STRING(readback_resolve_sizes, "", "GPU/Vulkan",
+                      "Resolves whose destination is one of these sizes (\"WxH\" in pixels, comma-separated) are "
+                      "copied back to guest memory at once, even with readback_resolve = none: for the few small "
+                      "render-to-texture results a game reads on the CPU (DS2: the 128x76 character portraits of "
+                      "the save list), without the cost of reading back every resolve")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, kVulkanReadbackMemexportDefault, "GPU/Vulkan",
                     "Read data written by memory export in shaders on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -6125,6 +6132,14 @@ bool VulkanCommandProcessor::IssueCopy() {
   gpu_timing_in_resolve_ = true;
   bool result;
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
+  if (readback_mode == ReadbackResolveMode::kDisabled && IsForcedReadbackResolveSize()) {
+    readback_mode = ReadbackResolveMode::kFull;
+    // Few by design (menus): logged so a per-frame match, which would stall every frame, shows up.
+    static uint64_t forced_count = 0;
+    if (++forced_count <= 3 || forced_count % 1000 == 0) {
+      REXGPU_INFO("readback_resolve_sizes: resolve read back ({} so far, frame {})", forced_count, frame_current_);
+    }
+  }
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     uint32_t written_address, written_length;
     result = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
@@ -6133,13 +6148,46 @@ bool VulkanCommandProcessor::IssueCopy() {
       DumpResolve(written_address, written_length);
     }
   } else {
-    result = IssueCopy_ReadbackResolvePath();
+    result = IssueCopy_ReadbackResolvePath(readback_mode);
   }
   gpu_timing_in_resolve_ = false;
   return result;
 }
 
-bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+bool VulkanCommandProcessor::IsForcedReadbackResolveSize() {
+  const std::string& sizes = REXCVAR_GET(readback_resolve_sizes);
+  if (sizes.empty()) {
+    return false;
+  }
+  // Parsed again only when the setting changes (it is hot-reloadable); resolves are a few dozen per frame.
+  static std::string parsed_from;
+  static std::vector<std::pair<uint32_t, uint32_t>> parsed;
+  if (sizes != parsed_from) {
+    parsed_from = sizes;
+    parsed.clear();
+    size_t start = 0;
+    while (start < sizes.size()) {
+      size_t end = sizes.find(',', start);
+      if (end == std::string::npos) end = sizes.size();
+      unsigned w = 0, h = 0;
+      if (std::sscanf(sizes.substr(start, end - start).c_str(), " %ux%u", &w, &h) == 2 && w && h) {
+        parsed.emplace_back(w, h);
+      } else {
+        REXGPU_WARN("readback_resolve_sizes: ignoring \"{}\" (expected WxH)", sizes.substr(start, end - start));
+      }
+      start = end + 1;
+    }
+  }
+  const auto pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+  for (const auto& [w, h] : parsed) {
+    if (pitch.copy_dest_pitch == w && pitch.copy_dest_height == h) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath(ReadbackResolveMode readback_mode) {
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
@@ -6161,7 +6209,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
     return true;
   }
 
-  ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     return true;
   }

@@ -576,7 +576,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool CanEndSubmissionImmediately() const;
 
   void ClearTransientDescriptorPools();
-  bool IssueCopy_ReadbackResolvePath();
+  // readback_mode: how the resolve result reaches guest memory (never kDisabled here).
+  bool IssueCopy_ReadbackResolvePath(ReadbackResolveMode readback_mode);
+  // readback_resolve_sizes: whether the resolve about to run (RB_COPY_DEST_PITCH) has one of the listed sizes.
+  bool IsForcedReadbackResolveSize();
   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
 
