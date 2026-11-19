@@ -21,4 +21,9 @@ xer_as_local = true
 reserved_as_local = true
 cr_as_local = true
 non_volatile_as_local = true
+# ...but not the vectors v14-v31 / v64-v127 (__savevmx / __restvmx stay real calls): the game's video decoder
+# (hand-written VMX) passes values between its functions in non-volatile vector registers, and as per-function locals
+# they were lost: the prologue movie played as purple/green stripes and blocks (a phone and the Thor, 2026-11-19;
+# DS2_switch v102 found the same).
+non_volatile_vector_as_local = false
 includes = ["../config/ds2_overrides.proposed.toml", "../config/ds2_overrides.diag.toml", "../config/ds2_overrides.dataonly.toml", "../config/ds2_overrides.codeptr.toml", "../config/ds2_overrides.gaps.toml"]
