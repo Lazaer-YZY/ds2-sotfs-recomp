@@ -387,8 +387,8 @@ class VulkanPresenter final : public Presenter {
     static VkSwapchainKHR CreateSwapchainForVulkanSurface(
         const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
         VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out,
-        VkFormat& image_format_out, VkExtent2D& image_extent_out, bool& is_fifo_out,
-        bool& ui_surface_unusable_out);
+        VkFormat& image_format_out, VkExtent2D& image_extent_out,
+        VkSurfaceTransformFlagBitsKHR& transform_out, bool& is_fifo_out, bool& ui_surface_unusable_out);
 
     // Destroys the swapchain and its derivatives, nulls `swapchain` and returns
     // the original swapchain object, if it existed, for use as oldSwapchain if
@@ -479,6 +479,27 @@ class VulkanPresenter final : public Presenter {
     bool swapchain_is_fifo = false;
     std::vector<VkImage> swapchain_images;
     std::vector<SwapchainFramebuffer> swapchain_framebuffers;
+
+    // present_pre_rotation. swapchain_transform is the swapchain's preTransform (identity when off);
+    // swapchain_extent stays the logical (unrotated) size the paint works in, and swapchain_physical_extent is the
+    // swapchain images' size in the display's native orientation. When rotated, the paint draws into one logical
+    // image per swapchain image and a final pass copies it, rotated, into the swapchain image.
+    struct PreRotationTarget {
+      VkImage image = VK_NULL_HANDLE;
+      VkDeviceMemory memory = VK_NULL_HANDLE;
+      VkImageView view = VK_NULL_HANDLE;
+      VkFramebuffer framebuffer = VK_NULL_HANDLE;
+      VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    };
+    VkSurfaceTransformFlagBitsKHR swapchain_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    VkExtent2D swapchain_physical_extent = {};
+    std::vector<PreRotationTarget> pre_rotation_targets;
+    // The logical images' render pass (compatible with swapchain_render_pass, ends in SHADER_READ_ONLY_OPTIMAL).
+    VkRenderPass pre_rotation_render_pass = VK_NULL_HANDLE;
+    VkDescriptorPool pre_rotation_descriptor_pool = VK_NULL_HANDLE;
+    VkPipelineLayout pre_rotation_pipeline_layout = VK_NULL_HANDLE;
+    VkPipeline pre_rotation_pipeline = VK_NULL_HANDLE;
+    void DestroyPreRotation();
   };
 
   explicit VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,
@@ -494,6 +515,9 @@ class VulkanPresenter final : public Presenter {
   }
 
   bool InitializeSurfaceIndependent();
+  // present_pre_rotation: the logical images, their render pass and the rotation pipeline for the current
+  // swapchain (paint_context_.swapchain_transform not identity).
+  bool CreatePreRotationResources(VkFormat swapchain_format);
 
   /*
    * Seals with an empty submission everything the refresh has sent to the queue since last time and

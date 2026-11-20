@@ -25,8 +25,14 @@
 #include <rex/cvar.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 // DS2 port diagnostic: does the game's audio callback produce fresh frames? Every 10 s: callbacks and their time,
 // frames submitted, frames byte-identical to one of the previous four (a mixer that is not keeping up resubmits
@@ -38,6 +44,9 @@ extern std::atomic<uint64_t> g_sdl_pull_calls, g_sdl_pull_frames, g_sdl_pull_max
 namespace {
 struct AudioDiag {
   std::atomic<uint64_t> callbacks{0}, callback_ns{0}, callback_max_ns{0}, submitted{0}, stale{0};
+  // Repeats by how far back the identical frame was (1-4 frames) and whether it is flat (peak-to-peak below
+  // 1e-4: a constant level, inaudible) or carries signal (a replayed block: an audible 5-21 ms echo).
+  std::atomic<uint64_t> stale_lag[4] = {}, stale_signal_lag[4] = {};
   // audio_pace_callbacks: dispatches that ran at once because the queue was low, and the driver
   // queue level seen at dispatch (min/max).
   std::atomic<uint64_t> catch_up{0}, level_min{~0ull}, level_max{0};
@@ -70,6 +79,14 @@ REXCVAR_DEFINE_INT32(
 // is about to run dry (fewer than audio_pace_low_frames queued); then it catches up, but never
 // closer than audio_pace_min_gap_us to the previous callback, so a mixer polling every ~1 ms still
 // sees each step (back-to-back catch-ups of 4-5 frames brought the static back, 2026-11-18).
+// Android: guest priorities are ignored (no SCHED_FIFO without root), so in busy scenes the audio threads competed
+// equally with the game's job workers on the same cores. They run little but late is audible: the SDK's audio worker
+// and XMA decoder get this nice value (Android's audio threads run at -16 / -19); the DS2 app does the same for FMOD's
+// threads (ds2_audio_threads.cpp). 0 = leave them at the default.
+REXCVAR_DEFINE_INT32(audio_thread_nice, -10, "Audio",
+                     "Scheduler nice value of the audio worker and XMA decoder threads (Android/Linux; 0 = unchanged)")
+    .range(-20, 19);
+
 REXCVAR_DEFINE_BOOL(audio_pace_callbacks, true, "Audio",
                     "Run the guest's audio callbacks one frame period (5.33 ms) apart, as on the "
                     "console, instead of in bursts when the host device takes several frames at once");
@@ -155,7 +172,23 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
   return X_STATUS_SUCCESS;
 }
 
+void RaiseAudioThreadPriority(const char* name) {
+#if defined(__linux__) || defined(__ANDROID__)
+  const int nice = REXCVAR_GET(audio_thread_nice);
+  if (nice == 0) return;
+  const int tid = int(syscall(SYS_gettid));
+  if (setpriority(PRIO_PROCESS, id_t(tid), nice) == 0) {
+    REXAPU_INFO("{} thread {}: nice {}", name, tid, nice);
+  } else {
+    REXAPU_WARN("{} thread {}: nice {} refused ({})", name, tid, nice, std::strerror(errno));
+  }
+#else
+  (void)name;
+#endif
+}
+
 void AudioSystem::WorkerThreadMain() {
+  RaiseAudioThreadPriority("audio worker");
   // Initialize driver and ringbuffer.
   Initialize();
 
@@ -385,10 +418,27 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
     const bool silent = std::memcmp(frame, kZero, sizeof(kZero)) == 0;
     AudioDiag& d = g_audio_diag;
     bool stale = false;
-    for (uint64_t r : d.recent) stale |= (r == h);
+    int lag = 0;
+    for (int back = 1; back <= 4 && !lag; ++back) {
+      if (d.recent[(d.recent_pos - back) & 3] == h) lag = back;
+    }
+    stale = lag != 0;
     d.recent[d.recent_pos++ & 3] = h;
     d.submitted.fetch_add(1, std::memory_order_relaxed);
-    if (stale && !silent) d.stale.fetch_add(1, std::memory_order_relaxed);
+    if (stale && !silent) {
+      d.stale.fetch_add(1, std::memory_order_relaxed);
+      d.stale_lag[lag - 1].fetch_add(1, std::memory_order_relaxed);
+      float lo = 1e30f, hi = -1e30f;
+      const auto* be = reinterpret_cast<const uint32_t*>(frame);
+      for (size_t i = 0; i < 256 * 6; ++i) {
+        const uint32_t u = __builtin_bswap32(be[i]);
+        float v;
+        std::memcpy(&v, &u, 4);
+        lo = v < lo ? v : lo;
+        hi = v > hi ? v : hi;
+      }
+      if (hi - lo >= 1e-4f) d.stale_signal_lag[lag - 1].fetch_add(1, std::memory_order_relaxed);
+    }
     const auto now = std::chrono::steady_clock::now();
     if (now - d.last >= std::chrono::seconds(10)) {
       const uint64_t cbs = d.callbacks.exchange(0), ns = d.callback_ns.exchange(0),
@@ -405,6 +455,15 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
                   cbs, cbs ? ns / 1e6 / cbs : 0.0, mx / 1e6, sub, st, sub ? 100.0 * st / sub : 0.0, pulls,
                   pulls ? pulled / pulls : 0, pmin == ~0ull ? 0 : pmin, pmax, silent_frames,
                   lmin == ~0ull ? 0 : lmin, lmax, cu);
+      if (st) {
+        uint64_t l[4], sg[4];
+        for (int i = 0; i < 4; ++i) {
+          l[i] = d.stale_lag[i].exchange(0);
+          sg[i] = d.stale_signal_lag[i].exchange(0);
+        }
+        REXAPU_INFO("[audio diag] repeats by lag 1/2/3/4: {}/{}/{}/{}, of them with signal (not flat): {}/{}/{}/{}",
+                    l[0], l[1], l[2], l[3], sg[0], sg[1], sg[2], sg[3]);
+      }
       d.last = now;
     }
   }

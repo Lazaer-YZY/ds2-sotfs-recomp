@@ -12,6 +12,7 @@ import android.view.Display;
 import android.view.KeyEvent;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.View;
 import android.widget.RelativeLayout;
 import android.widget.Toast;
 import androidx.core.view.ViewCompat;
@@ -28,13 +29,15 @@ public final class RuntimeActivity extends SDLActivity {
     /** A start that stays in the foreground this long counts as reached for the driver choice. */
     private static final long BOOT_SETTLED_MS = 15000;
     /**
-     * Presentation surface height cap (SDK cvar present_max_height): the game
-     * renders at 720p, so presenting into a larger swapchain only costs GPU time and heat.
-     * 0 = present at the display's size (A/B: flip to 0 and rebuild).
+     * Presentation surface height cap (SDK cvar present_max_height) without FSR: the game
+     * renders at 720p (or 540p), so presenting into a larger swapchain only costs GPU time and heat;
+     * the display hardware scales to the screen. With FSR the swapchain is the screen's size.
      */
     private static final int PRESENT_MAX_HEIGHT = 720;
 
     private TouchControlsView touchControls;
+
+    private PerfOverlayView perfOverlay;
     /** Why the renderer could not start with the selected driver; set from native code. */
     private volatile String graphicsFailure;
     private final Handler bootHandler = new Handler(Looper.getMainLooper());
@@ -51,6 +54,8 @@ public final class RuntimeActivity extends SDLActivity {
     static native int nativeBootProgress();
     /** Live render options (name, value); the native side ignores names it does not know. */
     static native void nativeSetOption(String name, String value);
+    /** The game's recent frame times (ms, oldest first) into out; returns how many (PerfOverlayView). */
+    static native int nativeFrameTimes(float[] out);
 
     /** Display settings of the CTRL dialog (frame rate, anti-aliasing, upscaling). */
     static SharedPreferences renderPrefs(Context context) {
@@ -59,9 +64,109 @@ public final class RuntimeActivity extends SDLActivity {
 
     /** Debug logging on a fresh install: off in the public build, on in the development build. */
     static final boolean DEFAULT_DEBUG_LOG = !BuildConfig.PUBLIC_DEFAULTS;
+    // CTRL dialog "Use the prime core" (ds2_affinity.cpp SetPrimeAssist).
+    static final boolean DEFAULT_PRIME = true;
     // Frame rate (CTRL dialog): "30", "40" (120 Hz panel, 3 refreshes per frame) or "60"; "panel120" runs 60 on
     // the 120 Hz panel mode (2 refreshes per frame). The native side caps the game's swaps in vertical blanks.
     static final String DEFAULT_FPS = "60";
+
+    // Display (CTRL dialog, from the next start): "render_height" "540" (the game's own screen made 960x540,
+    // ds2_render_size.cpp), "720" (the console's) or "1440" (the renderer draws 720p at 2x, 2560x1440: very sharp,
+    // about 24 fps on the AYN Thor); "fsr": the image is upscaled to the screen with AMD FSR 1 (sharper) instead of
+    // the display's own scaler. The video mode stays 1280x720: the game ignores it, the presenter takes the shape.
+    static final String DEFAULT_RENDER_HEIGHT = "720";
+
+    // Game language (CTRL dialog, from the next start): one of LANGUAGE_IDS, English by default (the owner,
+    // 2026-11-20), or "auto": the device's language when the game has it, English otherwise. The game reads the console's language setting (user_language: Xbox 360
+    // language ids) and picks its texts by language and game region (gameRegion; checked on the Thor, DECISIONS.md,
+    // 2026-11-20). The disc has no Simplified Chinese (id 10 shows English in every region).
+    static final String DEFAULT_LANGUAGE = "1";
+    static final String[] LANGUAGE_IDS = { "auto", "1", "4", "3", "6", "5", "9", "11", "12", "2", "7", "8" };
+    // Each language in its own words (the dialog's list), in the order of LANGUAGE_IDS; index 0 is "auto".
+    static final String[] LANGUAGE_NAMES = { null, "English", "Français", "Deutsch", "Italiano", "Español",
+        "Português (Brasil)", "Polski", "Русский", "日本語", "한국어", "中文 (繁體)" };
+
+    /** The Xbox 360 language id the device's own language maps to (1 = English when the game lacks it). */
+    static int deviceLanguageId() {
+        java.util.Locale locale = java.util.Locale.getDefault();
+        switch (locale.getLanguage()) {
+            case "ja": return 2;
+            case "de": return 3;
+            case "fr": return 4;
+            case "es": return 5;
+            case "it": return 6;
+            case "ko": return 7;
+            case "zh": return 8;  // the game's only Chinese is Traditional
+            case "pt": return 9;
+            case "pl": return 11;
+            case "ru": return 12;
+            default: return 1;
+        }
+    }
+
+    /** The dialog's name for a language id (LANGUAGE_NAMES), English for an unknown one. */
+    static String languageName(int id) {
+        for (int i = 1; i < LANGUAGE_IDS.length; ++i) {
+            if (LANGUAGE_IDS[i].equals(Integer.toString(id))) return LANGUAGE_NAMES[i];
+        }
+        return LANGUAGE_NAMES[1];
+    }
+
+    /** The language id this start uses (the CTRL choice, or the device's language for "auto"). */
+    static int languageId(SharedPreferences render) {
+        String choice = render.getString("language", DEFAULT_LANGUAGE);
+        if ("auto".equals(choice)) return deviceLanguageId();
+        try {
+            return Integer.parseInt(choice);
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
+
+    /**
+     * The game region a language needs (XGetGameRegion), 0 = the runtime's default (North America). Each edition
+     * has its own languages: the European one French, German, Italian, Spanish, Polish and Russian; the American one
+     * English and Brazilian Portuguese; the Asian ones Japanese (Japan), Korean and Traditional Chinese (rest of Asia).
+     */
+    static int gameRegion(int language) {
+        switch (language) {
+            case 1: case 9: return 0;       // English, Portuguese (Brazil): North America, as before
+            case 2: return 0x0101;          // Japanese: Japan
+            case 7: case 8: return 0x01FC;  // Korean, Traditional Chinese: rest of Asia
+            default: return 0x02FE;         // French, German, Italian, Spanish, Polish, Russian: Europe
+        }
+    }
+
+    /** The language's runtime arguments (unless a debug launch's cvars set them). */
+    static void addLanguageArguments(java.util.List<String> args, SharedPreferences render, String debugCvars) {
+        if (debugCvars != null && debugCvars.contains("--user_language")) return;
+        int language = languageId(render);
+        int region = gameRegion(language);
+        args.add("--user_language=" + language);
+        if (region != 0) args.add("--user_game_region=" + region);
+        android.util.Log.i("ds2recomp", "language " + language + " (" + render.getString("language", DEFAULT_LANGUAGE)
+            + ", device " + java.util.Locale.getDefault().toLanguageTag() + "), game region " + region);
+    }
+
+    /** The display options' runtime arguments (render size, presentation). */
+    static void addDisplayArguments(java.util.List<String> args, SharedPreferences render) {
+        String height = render.getString("render_height", DEFAULT_RENDER_HEIGHT);
+        boolean fsr = render.getBoolean("fsr", false);
+        // Without FSR the swapchain is the game's height and the display hardware scales it to the screen (cheapest);
+        // with FSR, or a picture larger than the screen, it is the screen's own size and the presenter scales.
+        int presentHeight = PRESENT_MAX_HEIGHT;
+        if ("540".equals(height)) {
+            args.add("--ds2_render_height=540");
+            presentHeight = 540;
+        } else if ("1440".equals(height)) {
+            args.add("--draw_resolution_scale_x=2");
+            args.add("--draw_resolution_scale_y=2");
+            presentHeight = 0;
+        }
+        args.add("--present_max_height=" + (fsr ? 0 : presentHeight));
+        args.add("--present_effect=" + (fsr ? "fsr" : "bilinear"));
+        android.util.Log.i("ds2recomp", "display: render height " + height + ", " + (fsr ? "FSR upscaling" : "display scaling"));
+    }
 
     /** Whether this start runs the panel (and the emulated vertical blank) at 120 Hz. */
     static boolean panel120Wanted(SharedPreferences render) {
@@ -142,6 +247,15 @@ public final class RuntimeActivity extends SDLActivity {
             mLayout.addView(bootOverlay, new RelativeLayout.LayoutParams(
                 RelativeLayout.LayoutParams.MATCH_PARENT,
                 RelativeLayout.LayoutParams.MATCH_PARENT));
+            // Performance overlay (CTRL dialog), drawn by Android over the game, under the touch controls.
+            perfOverlay = new PerfOverlayView(this);
+            perfOverlay.setVisibility(View.GONE);
+            mLayout.addView(perfOverlay, new RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT,
+                RelativeLayout.LayoutParams.MATCH_PARENT));
+            boolean debugOverlay = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && "1".equals(getIntent().getStringExtra("DS2_PERF_VIEW"));
+            setPerfOverlay(debugOverlay || renderPrefs(this).getBoolean("overlay", false));
             touchControls = new TouchControlsView(this);
             mLayout.addView(touchControls, new RelativeLayout.LayoutParams(
                 RelativeLayout.LayoutParams.MATCH_PARENT,
@@ -172,6 +286,11 @@ public final class RuntimeActivity extends SDLActivity {
         if (touchControls != null) touchControls.revealCtrl();
         // Preserve SDL's fallback behavior on Android versions that call this directly.
         super.onBackPressed();
+    }
+
+    /** Shows or hides the performance overlay (UI thread; CTRL dialog). */
+    void setPerfOverlay(boolean shown) {
+        if (perfOverlay != null) perfOverlay.setShown(shown);
     }
 
     /** Opens the GPU driver page over the game (CTRL dialog). */
@@ -352,9 +471,14 @@ public final class RuntimeActivity extends SDLActivity {
         // "Debug logging" (CTRL dialog): DS2_DIAG=1 enables the native side's diagnostics.
         // On by default in the development build; scripted launches use `--es DS2_DIAG 1`.
         SharedPreferences render = renderPrefs(this);
-        nativeSetenv("DS2_FRAME_OVERLAY", render.getBoolean("overlay", false) ? "1" : "0");
+        // The CTRL dialog's overlay is PerfOverlayView now; the native ImGui one only for debug launches
+        // (`--es DS2_FRAME_OVERLAY 1`, forwarded below): while it exists the presenter paints every frame from the
+        // UI thread, which cost frames in play (2026-11-20).
+        nativeSetenv("DS2_FRAME_OVERLAY", "0");
         nativeSetenv("DS2_DEPTH_OF_FIELD", render.getBoolean("dof", false) ? "1" : "0");
-        nativeSetenv("DS2_ECO", render.getBoolean("eco", false) ? "1" : "0");
+        if (!debuggable || getIntent().getStringExtra("DS2_PRIME_ASSIST") == null) {
+            nativeSetenv("DS2_PRIME_ASSIST", render.getBoolean("prime", DEFAULT_PRIME) ? "1" : "0");
+        }
         nativeSetenv("DS2_FPS", render.getString("fps", DEFAULT_FPS));
         nativeSetenv("DS2_VBLANK120", panel120Wanted(render) ? "1" : "0");
         if (!BuildConfig.PUBLIC_DEFAULTS && !render.getBoolean("debug_log_default_on", false)) {
@@ -366,6 +490,7 @@ public final class RuntimeActivity extends SDLActivity {
             diag = !"0".equals(getIntent().getStringExtra("DS2_DIAG"));
         }
         nativeSetenv("DS2_DIAG", diag ? "1" : "0");
+        // DS2_DIAG=0 also turns the GPU command thread's timers and statistics off (ds2_android.cpp ApplyDefaults).
         // Development builds only: periodic copies of the save for benches in other areas (ds2_save_snapshots.cpp);
         // never in a public build. Bench launches turn it off with --es DS2_SAVE_SNAPSHOTS 0.
         nativeSetenv("DS2_SAVE_SNAPSHOTS", debuggable && !BuildConfig.PUBLIC_DEFAULTS ? "1" : "0");
@@ -403,10 +528,12 @@ public final class RuntimeActivity extends SDLActivity {
             "--cache_root=" + cacheRoot.getAbsolutePath(),
             "--metadata_root=" + metadataRoot.getAbsolutePath(),
             "--log_file=" + new File(logDir, "ds2.log").getAbsolutePath(),
-            "--gpu_plugin=xenos",
-            "--present_max_height=" + PRESENT_MAX_HEIGHT));
+            "--gpu_plugin=xenos"));
+        addDisplayArguments(args, render);
+        boolean debuggableBuild = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        addLanguageArguments(args, render, debuggableBuild ? getIntent().getStringExtra("cvars") : null);
         // Debug launches can add runtime cvars: `am start ... --es cvars "--dump_shaders=/sdcard/... --log_level=debug"`.
-        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+        if (debuggableBuild) {
             String extra = getIntent().getStringExtra("cvars");
             if (extra != null) {
                 for (String token : extra.trim().split("\\s+")) {

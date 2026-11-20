@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -26,7 +27,7 @@ REXCVAR_DEFINE_STRING(ds2_input_script, "", "DS2",
                       "Tests: virtual pad script in seconds since start, e.g. \"60:start,70:a,80-82:down\" "
                       "(T:button = short press, T1-T2:button = hold). Buttons: a b x y lb rb lt rt up down "
                       "left right start back lstick_up lstick_down lstick_left lstick_right rstick_up rstick_down rstick_left "
-                      "rstick_right lthumb rthumb. Times are guest seconds (= real seconds unless ds2_guest_time_scalar is set)")
+                      "rstick_right lthumb rthumb; a stick at part of its range: rstick_right@0.3. Times are guest seconds (= real seconds unless ds2_guest_time_scalar is set)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(ds2_input_live, false, "DS2",
@@ -87,6 +88,8 @@ struct Step {
   double begin;
   double end;
   uint32_t bits;
+  // Stick deflection while held (the stick steps; "rstick_right@0.3" = 30 % of full scale, default 30000 / 32767).
+  int16_t value = 30000;
   // Polls that saw this step held: a step stays held past its end until the game has read it twice, so a slow
   // game (a few frames per second on a software-Vulkan PC) never misses a press.
   uint32_t polls = 0;
@@ -112,21 +115,31 @@ std::vector<Step> Parse(std::string_view text) {
     i = j;
     const size_t colon = step.find(':');
     const std::string_view times = step.substr(0, colon);
-    const std::string_view name = colon == std::string_view::npos ? std::string_view() : step.substr(colon + 1);
+    std::string_view name = colon == std::string_view::npos ? std::string_view() : step.substr(colon + 1);
+    // "name@amount": a stick direction at part of its range (0-1), for slow camera pans.
+    double amount = -1.0;
+    const size_t at = name.find('@');
+    if (at != std::string_view::npos) {
+      if (!Number(name.substr(at + 1), amount) || amount > 1.0) amount = -2.0;
+      name = name.substr(0, at);
+    }
     const Button* button = nullptr;
     for (const Button& b : kButtons) {
       if (b.name == name) button = &b;
     }
     const size_t dash = times.find('-');
     double begin = 0.0, end = 0.0;
-    const bool ok = button && Number(times.substr(0, dash), begin) &&
+    const bool ok = button && amount != -2.0 && (amount < 0.0 || (button->bits >> 18) != 0) &&
+                    Number(times.substr(0, dash), begin) &&
                     (dash == std::string_view::npos ? (end = begin + kPress, true)
                                                     : (Number(times.substr(dash + 1), end) && end > begin));
     if (!ok) {
       REXLOG_WARN("[ds2 input] invalid step \"{}\", ignored", step);
       continue;
     }
-    steps.push_back({begin, end, button->bits});
+    Step parsed{begin, end, button->bits};
+    if (amount >= 0.0) parsed.value = int16_t(amount * 32767.0 + 0.5);
+    steps.push_back(parsed);
   }
   return steps;
 }
@@ -158,17 +171,22 @@ class ScriptPad final : public in::InputDriver {
   X_RESULT GetDeviceState(in::DeviceId id, in::X_INPUT_STATE* out_state) override {
     if (id != kScriptPad) return X_ERROR_DEVICE_NOT_CONNECTED;
     uint32_t packet = 0;
-    const uint32_t bits = Update(packet);
+    int16_t sticks[8];
+    const uint32_t bits = Update(packet, sticks);
+    // Stick directions (bits 18-25: L up/down/right/left, R up/down/right/left) at their held deflection.
+    const auto axis = [&](int plus, int minus) -> int16_t {
+      return ((bits >> (18 + plus)) & 1) ? sticks[plus] : ((bits >> (18 + minus)) & 1) ? int16_t(-sticks[minus]) : 0;
+    };
     if (out_state) {
       std::memset(out_state, 0, sizeof(*out_state));
       out_state->packet_number = packet;
       out_state->gamepad.buttons = uint16_t(bits & 0xFFFF);
       out_state->gamepad.left_trigger = ((bits >> 16) & 1) ? 0xFF : 0;
       out_state->gamepad.right_trigger = ((bits >> 17) & 1) ? 0xFF : 0;
-      out_state->gamepad.thumb_ly = ((bits >> 18) & 1) ? 30000 : ((bits >> 19) & 1) ? -30000 : 0;
-      out_state->gamepad.thumb_lx = ((bits >> 20) & 1) ? 30000 : ((bits >> 21) & 1) ? -30000 : 0;
-      out_state->gamepad.thumb_ry = ((bits >> 22) & 1) ? 30000 : ((bits >> 23) & 1) ? -30000 : 0;
-      out_state->gamepad.thumb_rx = ((bits >> 24) & 1) ? 30000 : ((bits >> 25) & 1) ? -30000 : 0;
+      out_state->gamepad.thumb_ly = axis(0, 1);
+      out_state->gamepad.thumb_lx = axis(2, 3);
+      out_state->gamepad.thumb_ry = axis(4, 5);
+      out_state->gamepad.thumb_rx = axis(6, 7);
     }
     return X_ERROR_SUCCESS;
   }
@@ -200,7 +218,8 @@ class ScriptPad final : public in::InputDriver {
     (void)flags;
     if (id != kScriptPad) return X_ERROR_DEVICE_NOT_CONNECTED;
     uint32_t packet = 0;
-    Update(packet);
+    int16_t sticks[8];
+    Update(packet, sticks);
     std::lock_guard<std::mutex> lock(mutex_);
     if (keys_.empty()) return X_ERROR_EMPTY;
     if (out_keystroke) *out_keystroke = keys_.front();
@@ -209,7 +228,7 @@ class ScriptPad final : public in::InputDriver {
   }
 
  private:
-  uint32_t Update(uint32_t& packet) {
+  uint32_t Update(uint32_t& packet, int16_t (&sticks)[8]) {
     std::lock_guard<std::mutex> lock(mutex_);
     // Guest seconds since the first poll: the same as real seconds unless ds2_guest_time_scalar slows the game
     // down (PC runs), so a script written for normal speed still lines up with what the game does.
@@ -221,11 +240,20 @@ class ScriptPad final : public in::InputDriver {
     }
     PollLiveFile(t);
     uint32_t bits = 0;
+    int16_t values[8] = {};
     for (Step& s : steps_) {
       if (t >= s.begin && (t < s.end || s.polls < 2)) {
         bits |= s.bits;
         ++s.polls;
+        for (int i = 0; i < 8; ++i) {
+          if ((s.bits >> (18 + i)) & 1) values[i] = std::max(values[i], s.value);
+        }
       }
+    }
+    std::memcpy(sticks, values, sizeof(values));
+    if (std::memcmp(values, sticks_, sizeof(values)) != 0) {  // a new deflection is a new packet too
+      std::memcpy(sticks_, values, sizeof(values));
+      if (bits == current_) ++packet_;
     }
     if (bits != current_) {
       for (const Button& b : kButtons) {
@@ -273,6 +301,7 @@ class ScriptPad final : public in::InputDriver {
   const Clock::time_point start_;
   std::mutex mutex_;
   uint32_t current_ = 0;
+  int16_t sticks_[8] = {};  // deflections last reported (Update)
   uint32_t packet_ = 1;
   bool scalar_applied_ = false;
   std::deque<in::X_INPUT_KEYSTROKE> keys_;

@@ -293,7 +293,7 @@ public final class GameFolderActivity extends Activity {
             .setTitle("Allow file access")
             .setMessage("The game reads its files directly, so folders outside "
                 + "the app folder need the \"All files access\" permission. Android opens the "
-                + "setting now; turn it on for DS2 Recomp and come back.")
+                + "setting now; turn it on for Dark Souls II and come back.")
             .setPositiveButton("Open setting", (dialog, which) -> requestStorage(next))
             .setNegativeButton("Cancel", null)
             .show();

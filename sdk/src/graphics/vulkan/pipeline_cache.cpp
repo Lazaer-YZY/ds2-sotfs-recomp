@@ -73,6 +73,13 @@ REXCVAR_DECLARE(bool, vulkan_texture_fetch_implicit_lod);
 REXCVAR_DECLARE(bool, vulkan_shared_memory_texel_buffer);
 REXCVAR_DECLARE(bool, spirv_structured_forward_jumps);
 
+// Test: the game's user clip planes become gl_ClipDistance outputs (a vertex shader variant); on Adreno a clip
+// distance can send every primitive through the clipper instead of the guard band. Dropping them shows their cost
+// (wrong only where a plane really clips something, e.g. a reflection pass). New shader variants on change.
+REXCVAR_DEFINE_BOOL(gpu_debug_drop_user_clip_planes, false, "GPU/Vulkan",
+                    "Test only: ignore the game's user clip planes (no clip distances in vertex shaders)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(vulkan_pipeline_libraries, true, "GPU/Vulkan",
                     "Link guest pipelines from per-stage libraries (VK_EXT_graphics_pipeline_"
                     "library with fast linking, extended dynamic state 1/2/3, dynamic rendering): "
@@ -1657,7 +1664,13 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
   }
 
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  // Without the host's depth clamp, disabled guest clipping is emulated in the vertex shader (the pipeline's
+  // depth_clamp_enable needs the feature); a full-screen pass otherwise lost its bottom edge under Mali emulation.
+  modification.vertex.clamp_depth = !device_properties.depthClamp && pa_cl_clip_cntl.clip_disable ? 1 : 0;
   uint32_t user_clip_planes = pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+  if (REXCVAR_GET(gpu_debug_drop_user_clip_planes)) {
+    user_clip_planes = 0;
+  }
   if (user_clip_planes) {
     if (pa_cl_clip_cntl.ucp_cull_only_ena && device_properties.shaderCullDistance) {
       modification.vertex.user_clip_plane_cull = 1;
@@ -1666,6 +1679,12 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
       modification.vertex.user_clip_plane_cull = 1;
     } else if (!device_properties.shaderClipDistance) {
       // No supported clip/cull built-in for user clip planes.
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        REXGPU_WARN("User clip planes (mask {:X}) dropped: no clip or cull distances on this device (logged once)",
+                    user_clip_planes);
+      }
       user_clip_planes = 0;
       modification.vertex.user_clip_plane_cull = 0;
     } else {
@@ -1751,25 +1770,27 @@ bool VulkanPipelineCache::EnsureShadersTranslated(VulkanShader::VulkanTranslatio
               register_file_.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode !=
                   xenos::VertexShaderExportMode::kPosition2VectorsEdgeKill);
   assert_false(register_file_.Get<reg::SQ_PROGRAM_CNTL>().gen_index_vtx);
-  auto translation_start = std::chrono::steady_clock::now();
+  // The clock is read only when a shader is translated (this runs for every draw).
   bool translated_any = false;
+  std::chrono::steady_clock::time_point translation_start;
   struct TranslationCounter {
     VulkanPipelineCache* cache;
-    std::chrono::steady_clock::time_point start;
+    const std::chrono::steady_clock::time_point* start;
     bool* translated_any;
     ~TranslationCounter() {
       if (*translated_any) {
         cache->counter_translations_.fetch_add(1, std::memory_order_relaxed);
         cache->counter_translations_us_.fetch_add(
             uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::steady_clock::now() - start)
+                         std::chrono::steady_clock::now() - *start)
                          .count()),
             std::memory_order_relaxed);
       }
     }
-  } translation_counter{this, translation_start, &translated_any};
+  } translation_counter{this, &translation_start, &translated_any};
   if (!vertex_shader->is_translated()) {
     translated_any = true;
+    translation_start = std::chrono::steady_clock::now();
     vertex_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
     if (!TranslateAnalyzedShader(*shader_translator_, *vertex_shader)) {
       REXGPU_ERROR("Failed to translate the vertex shader!");
@@ -1782,6 +1803,9 @@ bool VulkanPipelineCache::EnsureShadersTranslated(VulkanShader::VulkanTranslatio
   }
   if (pixel_shader != nullptr) {
     if (!pixel_shader->is_translated()) {
+      if (!translated_any) {
+        translation_start = std::chrono::steady_clock::now();
+      }
       translated_any = true;
       pixel_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
       if (!TranslateAnalyzedShader(*shader_translator_, *pixel_shader)) {
@@ -2550,6 +2574,18 @@ bool VulkanPipelineCache::ArePipelineRequirementsMet(const PipelineDescription& 
   if (!device_properties.geometryShader &&
       description.geometry_shader != PipelineGeometryShader::kNone) {
     return false;
+  }
+
+  // Stored pipelines made on another GPU (the shader cache bundled with the Android app comes from an Adreno) may
+  // clip or cull with distances this device lacks (Arm's Mali driver has neither); such a draw is made again with
+  // what the device has when it comes.
+  {
+    const SpirvShaderTranslator::Modification vertex_modification(description.vertex_shader_modification);
+    if (vertex_modification.vertex.user_clip_plane_count &&
+        !(vertex_modification.vertex.user_clip_plane_cull ? device_properties.shaderCullDistance
+                                                          : device_properties.shaderClipDistance)) {
+      return false;
+    }
   }
 
   // Keep fan handling consistent with D3D12 by always using primitive

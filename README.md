@@ -26,18 +26,20 @@ The game's PowerPC code (`Default.xex` v0.0.0.22, title `465307E4`) is translate
 kernel, XAM, audio) and a Xenia-derived Vulkan renderer. It runs natively; it is not an emulator of the CPU.
 
 Developed and measured on an **AYN Thor** (Snapdragon 8 Gen 2, Adreno 740) with the Mesa **Turnip** Vulkan driver,
-which the app ships and loads by itself.
+which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Snapdragon 8 Elite).
 
 ## Status
 
 - Playable from the start of the game through Majula, with saves, cutscenes, audio and the Scholar DLC data.
 - **Performance (AYN Thor, 60 fps setting, a walk through Majula):** 60 fps average, 1% low 48-56 fps, no frame over
   26 ms; GPU ~13.6 ms per frame at ~640 MHz; about 7.7 W for the whole device, CPU ~79 C and GPU ~68 C.
-- Frame-rate options: 30, 40 and 60 fps, and "Smoother 60" on 120 Hz panels.
-- **Eco mode** (off by default): the 3D scene is shaded at reduced detail for less power and heat; HUD and text stay
-  sharp. The picture is softer.
+- Frame-rate options: 30, 40 and 60 fps, and "Smoother 60" on 120 Hz panels. Render resolution 540p / 720p / 1440p
+  and AMD FSR 1 upscaling.
+- The game's own languages: English, French, German, Italian, Spanish, Brazilian Portuguese, Polish, Russian,
+  Japanese, Korean and Traditional Chinese (CTRL, "Game language").
 - Touch controls (or any game controller), a GPU driver manager, a performance overlay.
-- Known issues: short frame-time dips while new areas stream in; see the issue list.
+- Known issues: short frame-time dips while new areas stream in; the heaviest views (the burning gate in the Forest
+  of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. See the issue list.
 
 ## Gallery
 
@@ -66,7 +68,8 @@ Releases are numbered 0.x while they are test builds; 1.0 comes once they have b
    [`ds2-sotfs-android-arm64.apk`](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/releases/latest/download/ds2-sotfs-android-arm64.apk)
    from the [latest release](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/releases/latest) and open it to install
    (allow your browser or file manager to install apps when Android asks).
-2. **Start it.** With no game yet it opens its game-folder page, which lists both discs.
+2. **Start it** (the icon is called **Dark Souls II**). With no game yet it opens its game-folder page, which lists
+   both discs.
 3. **Import the discs** from your own disc images (.iso) on the device (internal storage or SD card): tap
    **Import disc 1…** and pick the disc 1 ISO (the game, about 5.5 GB, is extracted), then **Import disc 2…** and pick
    the disc 2 ISO (only its DLC package, 1.2 GB, is copied). The page tells the discs apart by their contents and asks
@@ -87,7 +90,7 @@ Releases are numbered 0.x while they are test builds; 1.0 comes once they have b
 
 Snapdragon (Adreno) devices use the Turnip driver the app ships. Other GPUs (Mali, Xclipse, PowerVR) use the device's
 own Vulkan driver: untested, and the game may not start. The **CTRL** button (top centre) has the frame rate (30 / 40 /
-60), Eco mode, depth of field, the performance overlay and the touch layout. If the game crashes, the newest
+60), render resolution, game language, depth of field, the performance overlay and the touch layout. If the game crashes, the newest
 `ds2*.log` in `Android/data/com.ds2recomp.android/files/logs/` helps in an issue.
 
 You can also build the APK yourself (below).

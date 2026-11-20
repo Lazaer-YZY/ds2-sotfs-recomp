@@ -22,10 +22,21 @@ REXCVAR_DEFINE_BOOL(vulkan_texture_eager_transition, false, "GPU/Vulkan",
                     "on tile-based GPUs a barrier at bind time ends the render pass the draw is "
                     "in, costing an attachment store and reload.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_UINT32(vulkan_texture_memory_block_mb, 64, "GPU/Vulkan",
+                      "Textures are allocated from a pool of memory blocks of this many MB (0 = VMA's default "
+                      "pools, whose blocks grow to 256 MB). A new block is a kernel allocation that zeroes its pages "
+                      "on the GPU command thread (a 256 MB block stalled a frame for ~15 ms while Majula's textures "
+                      "streamed in).")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_UINT32(vulkan_texture_memory_reserve_mb, 256, "GPU/Vulkan",
+                      "With vulkan_texture_memory_block_mb: this many MB of texture blocks are allocated at start "
+                      "(before the game runs) and never freed, so streaming within them allocates nothing.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(vulkan_resolve_feed_textures_no_mutable, false, "GPU/Vulkan",
                     "Experiment: textures fed by resolves get no mutable-format signed view")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <utility>
@@ -501,6 +512,10 @@ VulkanTextureCache::~VulkanTextureCache() {
   // textures before destroying VMA.
   DestroyAllTextures(true);
 
+  if (texture_pool_ != VK_NULL_HANDLE) {
+    vmaDestroyPool(vma_allocator_, texture_pool_);
+    texture_pool_ = VK_NULL_HANDLE;
+  }
   if (vma_allocator_ != VK_NULL_HANDLE) {
     vmaDestroyAllocator(vma_allocator_);
   }
@@ -1226,13 +1241,9 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
     image_format_list_create_info.pViewFormats = formats;
   }
 
-  VmaAllocationCreateInfo allocation_create_info = {};
-  allocation_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-
   VkImage image;
   VmaAllocation allocation;
-  if (vmaCreateImage(vma_allocator_, &image_create_info, &allocation_create_info, &image,
-                     &allocation, nullptr)) {
+  if (CreateTextureImage(image_create_info, image, allocation) != VK_SUCCESS) {
     return nullptr;
   }
 
@@ -2092,13 +2103,9 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
     image_create_info.pQueueFamilyIndices = nullptr;
     image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    VmaAllocationCreateInfo allocation_create_info = {};
-    allocation_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-
     VkImage image_2d;
     VmaAllocation allocation_2d;
-    if (vmaCreateImage(vulkan_texture_cache.vma_allocator_, &image_create_info,
-                       &allocation_create_info, &image_2d, &allocation_2d, nullptr) != VK_SUCCESS) {
+    if (vulkan_texture_cache.CreateTextureImage(image_create_info, image_2d, allocation_2d) != VK_SUCCESS) {
       REXGPU_ERROR("VulkanTextureCache: Failed to create 3D-as-2D wrapper image");
       return VK_NULL_HANDLE;
     }
@@ -2501,7 +2508,14 @@ bool VulkanTextureCache::PrepareResolveFeed(const draw_util::ResolveInfo& resolv
   } else {
     return reject("dest format", dest_info.value);
   }
-  if (dest_info.copy_dest_exp_bias || dest_info.copy_dest_array ||
+  // A 7e3 render target resolved to k_8_8_8_8 (vulkan_direct_resolve_7e3_to_8888): its feed shader applies the
+  // exponent bias like the resolve.
+  const bool converted_7e3_to_8888 =
+      source == ResolveFeed::Source::kColor8888 &&
+      (resolve_info.color_edram_info.format == uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) ||
+       resolve_info.color_edram_info.format ==
+           uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16));
+  if ((dest_info.copy_dest_exp_bias && !converted_7e3_to_8888) || dest_info.copy_dest_array ||
       uint32_t(dest_info.copy_dest_endian) > uint32_t(xenos::Endian128::k16in32)) {
     return reject("dest info", dest_info.value);
   }
@@ -2658,6 +2672,57 @@ void VulkanTextureCache::TransitionTextureForComputeRead(VulkanTexture& texture)
       dst_stage_mask, src_access_mask, dst_access_mask, old_layout, new_layout);
 }
 
+VkResult VulkanTextureCache::CreateTextureImage(const VkImageCreateInfo& image_create_info, VkImage& image,
+                                                VmaAllocation& allocation) {
+  const auto t0 = std::chrono::steady_clock::now();
+  VmaAllocationCreateInfo allocation_create_info = {};
+  allocation_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+  allocation_create_info.pool = texture_pool_;
+  VkResult result =
+      vmaCreateImage(vma_allocator_, &image_create_info, &allocation_create_info, &image, &allocation, nullptr);
+  bool fallback = false;
+  if (result != VK_SUCCESS && texture_pool_ != VK_NULL_HANDLE) {
+    // Not in the pool's memory type, or larger than a block: VMA's default pools.
+    allocation_create_info.pool = VK_NULL_HANDLE;
+    result =
+        vmaCreateImage(vma_allocator_, &image_create_info, &allocation_create_info, &image, &allocation, nullptr);
+    fallback = true;
+  }
+  const double ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  static uint32_t slow_logged = 0;
+  if ((ms >= 1.0 || fallback) && slow_logged < 200) {
+    ++slow_logged;
+    VmaAllocationInfo info = {};
+    if (result == VK_SUCCESS) vmaGetAllocationInfo(vma_allocator_, allocation, &info);
+    REXGPU_INFO("VulkanTextureCache: texture image {}x{}x{} ({} levels, format {}) took {:.2f} ms, {:.2f} MB{}{}",
+                image_create_info.extent.width, image_create_info.extent.height,
+                image_create_info.extent.depth * image_create_info.arrayLayers, image_create_info.mipLevels,
+                uint32_t(image_create_info.format), ms, info.size / 1048576.0,
+                fallback ? ", outside the texture pool" : "", result != VK_SUCCESS ? ", FAILED" : "");
+  }
+  return result;
+}
+
+void VulkanTextureCache::LogMemoryStats() {
+  VmaBudget budgets[VK_MAX_MEMORY_HEAPS] = {};
+  vmaGetHeapBudgets(vma_allocator_, budgets);
+  VkDeviceSize block_bytes = 0, allocation_bytes = 0;
+  for (const VmaBudget& b : budgets) {
+    block_bytes += b.statistics.blockBytes;
+    allocation_bytes += b.statistics.allocationBytes;
+  }
+  std::string pool;
+  if (texture_pool_ != VK_NULL_HANDLE) {
+    VmaStatistics s = {};
+    vmaGetPoolStatistics(vma_allocator_, texture_pool_, &s);
+    pool = fmt::format("; pool {} blocks {:.0f} MB, {} textures {:.0f} MB", s.blockCount, s.blockBytes / 1048576.0,
+                       s.allocationCount, s.allocationBytes / 1048576.0);
+  }
+  REXGPU_INFO("Texture memory: {:.0f} MB in blocks, {:.0f} MB used{}", block_bytes / 1048576.0,
+              allocation_bytes / 1048576.0, pool);
+}
+
 bool VulkanTextureCache::Initialize() {
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanInstance::Functions& ifn = vulkan_device->vulkan_instance()->functions();
@@ -2671,6 +2736,38 @@ bool VulkanTextureCache::Initialize() {
   vma_allocator_ = ui::vulkan::CreateVmaAllocator(vulkan_device, true);
   if (vma_allocator_ == VK_NULL_HANDLE) {
     return false;
+  }
+  if (const uint32_t block_mb = REXCVAR_GET(vulkan_texture_memory_block_mb)) {
+    // The memory type of an ordinary sampled texture; textures that cannot use it fall back to the default pools.
+    VkImageCreateInfo probe = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    probe.imageType = VK_IMAGE_TYPE_2D;
+    probe.format = VK_FORMAT_R8G8B8A8_UNORM;
+    probe.extent = {256, 256, 1};
+    probe.mipLevels = 1;
+    probe.arrayLayers = 1;
+    probe.samples = VK_SAMPLE_COUNT_1_BIT;
+    probe.tiling = VK_IMAGE_TILING_OPTIMAL;
+    probe.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VmaAllocationCreateInfo probe_allocation = {};
+    probe_allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    uint32_t memory_type = 0;
+    if (vmaFindMemoryTypeIndexForImageInfo(vma_allocator_, &probe, &probe_allocation, &memory_type) ==
+        VK_SUCCESS) {
+      VmaPoolCreateInfo pool_create_info = {};
+      pool_create_info.memoryTypeIndex = memory_type;
+      pool_create_info.blockSize = VkDeviceSize(block_mb) << 20;
+      pool_create_info.minBlockCount = REXCVAR_GET(vulkan_texture_memory_reserve_mb) / block_mb;
+      const auto t0 = std::chrono::steady_clock::now();
+      if (vmaCreatePool(vma_allocator_, &pool_create_info, &texture_pool_) != VK_SUCCESS) {
+        texture_pool_ = VK_NULL_HANDLE;
+        REXGPU_WARN("VulkanTextureCache: no texture memory pool (VMA's default pools)");
+      } else {
+        REXGPU_INFO("VulkanTextureCache: texture memory pool: {} MB blocks in memory type {}, {} allocated at start "
+                    "in {:.1f} ms",
+                    block_mb, memory_type, pool_create_info.minBlockCount,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+      }
+    }
   }
 
   if (IsDrawResolutionScaled() && !InitializeScaledResolveBuffer()) {

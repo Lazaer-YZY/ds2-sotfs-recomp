@@ -34,6 +34,7 @@
 #include <rex/system/xevent.h>
 #include <rex/system/xmutant.h>
 #include <rex/system/xthread.h>
+#include <rex/system/frame_breakdown.h>
 #include <rex/thread.h>
 #include <rex/vec128.h>
 
@@ -1054,6 +1055,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
   }
   timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
   CheckTitleTermination();
+  rex::system::frame_breakdown::ScopedWait breakdown_wait(true);
   if (alertable) {
     auto result = rex::thread::AlertableSleep(std::chrono::milliseconds(timeout_ms));
     CheckTitleTermination();

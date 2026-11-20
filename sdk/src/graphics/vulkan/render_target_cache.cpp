@@ -109,6 +109,19 @@ REXCVAR_DEFINE_BOOL(vulkan_resolve_feed_lazy_dump_7e3, true, "GPU/Vulkan",
                     "guest memory either until something requests it; the write then repacks "
                     "the texture's 10:10:10:2 fields (they are the resolved words).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(vulkan_resolve_feed_lazy_dump_float24, true, "GPU/Vulkan",
+                    "With vulkan_resolve_feed_lazy_dump: a direct 1x kD24FS8 resolve fed into its k_24_8_FLOAT "
+                    "texture also keeps its stencil bytes in a side image of that texture and doesn't write guest "
+                    "memory until something requests it (the write then packs 20e4 depth and stencil from the two "
+                    "images). Dark Souls II resolves its 1280x720 depth to the same address 3 times a frame.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(vulkan_direct_resolve_7e3_to_8888, true, "GPU/Vulkan",
+                    "With direct_host_resolve: a 1x k_2_10_10_10_FLOAT (7e3) render target resolved to k_8_8_8_8 "
+                    "(a format-converting resolve: 7e3 -> float, exponent bias, red/blue swap, UNORM8, as the full "
+                    "resolve does on the EDRAM dump) is read straight from the host render target, fed into the "
+                    "k_8_8_8_8 texture and written to guest memory lazily. Dark Souls II converts its HDR scene to "
+                    "an 8888 texture this way every frame (dump + full resolve + texture reload, ~0.5 ms).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(vulkan_direct_resolve_4x_as_1x, true, "GPU/Vulkan",
                     "With direct_host_resolve: a 1x resolve of EDRAM owned by a 4x render target "
                     "(same EDRAM layout: a 1x resolve reads the samples as pixels) is read straight "
@@ -167,6 +180,10 @@ namespace shaders {
 #include "../shaders/vulkan_spirv/resolve_fast_32bpp_host_rt_1x_unorm2101010_cs.h"
 #include "../shaders/vulkan_spirv/resolve_fast_32bpp_host_rt_4x_7e3_cs.h"
 #include "../shaders/vulkan_spirv/resolve_feed_7e3_ps.h"
+#include "../shaders/vulkan_spirv/resolve_feed_7e3_8888_ps.h"
+#include "../shaders/vulkan_spirv/resolve_feed_depth_float24_stencil_ps.h"
+#include "../shaders/vulkan_spirv/resolve_fast_32bpp_host_rt_1x_d24fs8_fed_cs.h"
+#include "../shaders/vulkan_spirv/resolve_fast_32bpp_host_rt_1x_7e3_to_8888_cs.h"
 #include "../shaders/vulkan_spirv/resolve_feed_depth_float24_ps.h"
 #include "../shaders/vulkan_spirv/resolve_feed_depth_8888_ps.h"
 #include "../shaders/vulkan_spirv/resolve_feed_depth_ps.h"
@@ -443,11 +460,15 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
           "fragment shader interlock path for D3D12 parity");
       path_ = Path::kPixelShaderInterlock;
     } else {
-      REXGPU_ERROR(
+      // Neither (Mali, and Turnip has no interlock either): gamma render targets in 8 bits per channel with the
+      // Xenos gamma curve applied in the shaders, as with gamma_render_target_as_unorm16 off (less precise blending
+      // than linear 16-bit storage, but the renderer starts; failing here ended the game at startup).
+      REXGPU_WARN(
           "VulkanRenderTargetCache: R16G16B16A16_UNORM render target support "
           "is unavailable for k_8_8_8_8_GAMMA linear storage, and fragment "
-          "shader interlock fallback is unavailable");
-      return false;
+          "shader interlock fallback is unavailable; gamma render targets use 8 bits "
+          "with the gamma curve in the shaders");
+      gamma_render_target_as_unorm16_requested = false;
     }
   }
   VkFormatProperties color_rg16_uint_properties;
@@ -757,6 +778,10 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         vulkan_device, direct_resolve_pipeline_layout_color_,
         shaders::resolve_fast_32bpp_host_rt_4x_7e3_cs,
         sizeof(shaders::resolve_fast_32bpp_host_rt_4x_7e3_cs));
+    direct_host_resolve_7e3_to_8888_pipeline_ = ui::vulkan::util::CreateComputePipeline(
+        vulkan_device, direct_resolve_pipeline_layout_color_,
+        shaders::resolve_fast_32bpp_host_rt_1x_7e3_to_8888_cs,
+        sizeof(shaders::resolve_fast_32bpp_host_rt_1x_7e3_to_8888_cs));
     // The lazy dump of a fed 7e3 resolve, from its A2B10G10R10_UNORM texture.
     direct_host_resolve_unorm2101010_pipeline_ = ui::vulkan::util::CreateComputePipeline(
         vulkan_device, direct_resolve_pipeline_layout_color_,
@@ -932,6 +957,32 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
           }
           dfn.vkDestroyShaderModule(device, feed_depth_float24_ps, nullptr);
         }
+        // The same with the stencil byte in an R8_UINT side image (vulkan_resolve_feed_lazy_dump_float24).
+        VkShaderModule feed_depth_float24_stencil_ps = ui::vulkan::util::CreateShaderModule(
+            vulkan_device, shaders::resolve_feed_depth_float24_stencil_ps,
+            sizeof(shaders::resolve_feed_depth_float24_stencil_ps));
+        if (feed_depth_float24_stencil_ps != VK_NULL_HANDLE) {
+          feed_stages[1].module = feed_depth_float24_stencil_ps;
+          VkFormat feed_float24_stencil_formats[2] = {VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8_UINT};
+          VkPipelineColorBlendAttachmentState feed_float24_stencil_blend[2] = {feed_blend_attachment,
+                                                                              feed_blend_attachment};
+          feed_float24_stencil_blend[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+          feed_rendering.colorAttachmentCount = 2;
+          feed_rendering.pColorAttachmentFormats = feed_float24_stencil_formats;
+          feed_blend.attachmentCount = 2;
+          feed_blend.pAttachments = feed_float24_stencil_blend;
+          feed_pipeline_create_info.layout = resolve_feed_pipeline_layout_depth_;
+          if (dfn.vkCreateGraphicsPipelines(device, vulkan_device->pipeline_cache(), 1,
+                                            &feed_pipeline_create_info, nullptr,
+                                            &resolve_feed_pipeline_depth_float24_stencil_) != VK_SUCCESS) {
+            resolve_feed_pipeline_depth_float24_stencil_ = VK_NULL_HANDLE;
+          }
+          feed_rendering.colorAttachmentCount = 1;
+          feed_rendering.pColorAttachmentFormats = &feed_color_format;
+          feed_blend.attachmentCount = 1;
+          feed_blend.pAttachments = &feed_blend_attachment;
+          dfn.vkDestroyShaderModule(device, feed_depth_float24_stencil_ps, nullptr);
+        }
       }
       // k_2_10_10_10_FLOAT (7e3) resolved as k_2_10_10_10 -> A2B10G10R10_UNORM
       // (the 7e3 / 2-bit alpha fields as UNORM; vulkan_resolve_feed_7e3).
@@ -947,6 +998,20 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
           resolve_feed_pipeline_7e3_ = VK_NULL_HANDLE;
         }
         dfn.vkDestroyShaderModule(device, feed_7e3_ps, nullptr);
+      }
+      // k_2_10_10_10_FLOAT (7e3) resolved to k_8_8_8_8 -> R8G8B8A8_UNORM (vulkan_direct_resolve_7e3_to_8888).
+      VkShaderModule feed_7e3_8888_ps = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_feed_7e3_8888_ps, sizeof(shaders::resolve_feed_7e3_8888_ps));
+      if (feed_7e3_8888_ps != VK_NULL_HANDLE) {
+        feed_stages[1].module = feed_7e3_8888_ps;
+        feed_color_format = VK_FORMAT_R8G8B8A8_UNORM;
+        feed_pipeline_create_info.layout = resolve_feed_pipeline_layout_;
+        if (dfn.vkCreateGraphicsPipelines(device, vulkan_device->pipeline_cache(), 1,
+                                          &feed_pipeline_create_info, nullptr,
+                                          &resolve_feed_pipeline_7e3_8888_) != VK_SUCCESS) {
+          resolve_feed_pipeline_7e3_8888_ = VK_NULL_HANDLE;
+        }
+        dfn.vkDestroyShaderModule(device, feed_7e3_8888_ps, nullptr);
       }
     }
     if (feed_vs != VK_NULL_HANDLE) {
@@ -1039,6 +1104,11 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
                     vulkan_device, direct_resolve_pipeline_layout_depth_,
                     shaders::resolve_fast_32bpp_host_rt_4x_d24fs8_cs,
                     sizeof(shaders::resolve_fast_32bpp_host_rt_4x_d24fs8_cs));
+      // The lazy dump of a fed float24 resolve (vulkan_resolve_feed_lazy_dump_float24).
+      direct_host_resolve_float24_fed_pipeline_ = ui::vulkan::util::CreateComputePipeline(
+          vulkan_device, direct_resolve_pipeline_layout_depth_,
+          shaders::resolve_fast_32bpp_host_rt_1x_d24fs8_fed_cs,
+          sizeof(shaders::resolve_fast_32bpp_host_rt_1x_d24fs8_fed_cs));
       REXGPU_INFO("VulkanRenderTargetCache: direct kD24FS8 resolves 1x {} 4x {} ({}), cvar {}",
                   direct_host_resolve_depth_float24_pipelines_[0] != VK_NULL_HANDLE,
                   direct_host_resolve_depth_float24_pipelines_[1] != VK_NULL_HANDLE,
@@ -1424,6 +1494,16 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
                                          resolve_feed_pipeline_depth_float24_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
                                          resolve_feed_pipeline_7e3_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
+                                         resolve_feed_pipeline_7e3_8888_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
+                                         resolve_feed_pipeline_depth_float24_stencil_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
+                                         direct_host_resolve_float24_fed_pipeline_);
+  for (auto& side : float24_stencil_sides_) {
+    DestroyFloat24StencilSide(side.second);
+  }
+  float24_stencil_sides_.clear();
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                          resolve_feed_pipeline_layout_depth_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
@@ -1443,6 +1523,8 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   }
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
                                          direct_host_resolve_unorm2101010_pipeline_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
+                                         direct_host_resolve_7e3_to_8888_pipeline_);
   for (auto& direct_host_resolve_pipelines_msaa : direct_host_resolve_pipelines_) {
     for (VkPipeline& direct_host_resolve_pipeline : direct_host_resolve_pipelines_msaa) {
       ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
@@ -1570,6 +1652,8 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                       uint32_t& written_address_out, uint32_t& written_length_out) {
   written_address_out = 0;
   written_length_out = 0;
+  last_resolve_7e3_to_8888_ = false;
+  last_resolve_lazy_ = false;
 
   bool draw_resolution_scaled = IsDrawResolutionScaled();
 
@@ -1702,6 +1786,14 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                          xenos::DepthRenderTargetFormat::kD24FS8) {
                 if (resolve_feed.source == FeedSource::kDepth24Float) {
                   feed_pipeline = resolve_feed_pipeline_depth_float24_;
+                  // The stencil too, for a lazy dump (vulkan_resolve_feed_lazy_dump_float24).
+                  if (REXCVAR_GET(vulkan_resolve_feed_lazy_dump_float24) &&
+                      REXCVAR_GET(vulkan_resolve_feed_lazy_dump) &&
+                      resolve_feed_pipeline_depth_float24_stencil_ != VK_NULL_HANDLE &&
+                      direct_host_resolve_float24_fed_pipeline_ != VK_NULL_HANDLE &&
+                      GetFloat24StencilSide(resolve_feed.texture)) {
+                    feed_pipeline = resolve_feed_pipeline_depth_float24_stencil_;
+                  }
                 }
                 feed_layout = resolve_feed_pipeline_layout_depth_;
               }
@@ -1722,6 +1814,12 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
               // The direct resolve packed this render target to 7e3 as the dump
               // does (PrepareDirectHostResolve); the feed packs it the same way.
               feed_pipeline = resolve_feed_pipeline_7e3_;
+            } else if (resolve_feed.source == FeedSource::kColor8888 &&
+                       feed_rt_key.GetColorFormat() ==
+                           xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT &&
+                       direct_host_resolve.pipeline == direct_host_resolve_7e3_to_8888_pipeline_) {
+              // Converted like the direct resolve (vulkan_direct_resolve_7e3_to_8888).
+              feed_pipeline = resolve_feed_pipeline_7e3_8888_;
             }
             if (feed_pipeline == VK_NULL_HANDLE) {
               continue;
@@ -1766,6 +1864,16 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
             direct_host_resolve.pipeline == direct_host_resolve_pipelines_[0][0]) {
           lazy_dump_pipeline = direct_host_resolve.pipeline;
         } else if (resolve_feeds[0].source ==
+                       VulkanTextureCache::ResolveFeed::Source::kColor8888 &&
+                   direct_host_resolve.pipeline == direct_host_resolve_7e3_to_8888_pipeline_) {
+          // The texels are the resolved bytes after the swap and the bias: the 8888 copy without a swap.
+          lazy_dump_pipeline = direct_host_resolve_pipelines_[0][0];
+        } else if (resolve_feeds[0].source ==
+                       VulkanTextureCache::ResolveFeed::Source::kDepth24Float &&
+                   resolve_feed_pipelines[0] == resolve_feed_pipeline_depth_float24_stencil_) {
+          // Depth from the R32_SFLOAT texture, stencil from its side image.
+          lazy_dump_pipeline = direct_host_resolve_float24_fed_pipeline_;
+        } else if (resolve_feeds[0].source ==
                        VulkanTextureCache::ResolveFeed::Source::kColor7e3 &&
                    direct_host_resolve.pipeline == direct_host_resolve_7e3_pipelines_[0] &&
                    REXCVAR_GET(vulkan_resolve_feed_lazy_dump_7e3)) {
@@ -1774,7 +1882,9 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
       }
       const bool lazy_dump =
           REXCVAR_GET(vulkan_resolve_feed_lazy_dump) && !REXCVAR_GET(vulkan_readback_resolve) &&
-          direct_resolved && !direct_host_resolve.is_depth && !draw_resolution_scaled &&
+          direct_resolved &&
+          (!direct_host_resolve.is_depth || lazy_dump_pipeline == direct_host_resolve_float24_fed_pipeline_) &&
+          !draw_resolution_scaled &&
           lazy_dump_pipeline != VK_NULL_HANDLE &&
           resolve_feeds[0].dest_x ==
               int32_t(resolve_info.coordinate_info.edram_offset_x_div_8 * 8) &&
@@ -1783,6 +1893,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           resolve_feeds[0].width == resolve_info.coordinate_info.width_div_8 * 8 &&
           resolve_feeds[0].height == resolve_info.height_div_8 * 8 &&
           (!resolve_feeds[0].swap_red_blue ||
+           direct_host_resolve.pipeline == direct_host_resolve_7e3_to_8888_pipeline_ ||
            vulkan_device->properties().imageViewFormatSwizzle);
       lazy_shared_memory_ = &shared_memory;
       lazy_texture_cache_ = &texture_cache;
@@ -1867,16 +1978,26 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
             dump.dest_base = uint32_t(copy_dest_base);
             dump.dest_range_length = uint32_t(copy_dest_range_length);
             dump.constants.resolve = copy_shader_constants;
-            dump.constants.source_base_tiles = resolve_info.color_edram_info.base_tiles;
-            dump.constants.source_pitch_tiles = resolve_info.color_edram_info.pitch_tiles;
+            const draw_util::ResolveEdramInfo& dump_edram_info =
+                direct_host_resolve.is_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+            dump.constants.source_base_tiles = dump_edram_info.base_tiles;
+            dump.constants.source_pitch_tiles = dump_edram_info.pitch_tiles;
+            dump.float24 = lazy_dump_pipeline == direct_host_resolve_float24_fed_pipeline_;
             dump.constants.dispatch_first_tile = 0;
             dump.group_count_x = copy_group_count_x;
             dump.group_count_y = copy_group_count_y;
             dump.pipeline = lazy_dump_pipeline;
             dump.swap_red_blue = resolve_feeds[0].swap_red_blue;
+            if (direct_host_resolve.pipeline == direct_host_resolve_7e3_to_8888_pipeline_) {
+              // The feed already swapped and biased: the texture is read as is, the copy swaps nothing (its swap
+              // would act on 10:10:10:2 fields of the 7e3 EDRAM format).
+              dump.swap_red_blue = false;
+              dump.constants.resolve.dest_relative.dest_info.copy_dest_swap = 0;
+            }
             dump.op_tag = resolve_op_tag;
             dump.texture->AddPendingGpuDump();
             ++lazy_dumps_deferred_;
+            last_resolve_lazy_ = true;
             command_processor_.GpuTrace("lazy");
           } else {
           // Submit the resolve.
@@ -2018,6 +2139,24 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 feed_rt.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             feed_rt.SetUsage(kFeedSourceStages, VK_ACCESS_SHADER_READ_BIT,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            // The stencil side image (vulkan_resolve_feed_lazy_dump_float24), kept in the general layout: after
+            // earlier feeds (write) and lazy dumps (compute read).
+            Float24StencilSide* feed_stencil_side = nullptr;
+            if (resolve_feed_pipelines[feed_index] == resolve_feed_pipeline_depth_float24_stencil_) {
+              feed_stencil_side = GetFloat24StencilSide(resolve_feed.texture);
+              if (!feed_stencil_side) {
+                continue;
+              }
+              command_processor_.PushImageMemoryBarrier(
+                  feed_stencil_side->image,
+                  ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT),
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                  feed_stencil_side->initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                  VK_IMAGE_LAYOUT_GENERAL);
+              feed_stencil_side->initialized = true;
+            }
             VkImageView feed_view = texture_cache.BeginResolveFeedDraw(resolve_feed);
             if (feed_view == VK_NULL_HANDLE) {
               continue;
@@ -2035,8 +2174,15 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
             VkRenderingInfo feed_rendering_info = {VK_STRUCTURE_TYPE_RENDERING_INFO};
             feed_rendering_info.renderArea = feed_rect;
             feed_rendering_info.layerCount = 1;
+            VkRenderingAttachmentInfo feed_attachments[2] = {feed_attachment, feed_attachment};
             feed_rendering_info.colorAttachmentCount = 1;
             feed_rendering_info.pColorAttachments = &feed_attachment;
+            if (feed_stencil_side) {
+              feed_attachments[1].imageView = feed_stencil_side->view;
+              feed_attachments[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+              feed_rendering_info.colorAttachmentCount = 2;
+              feed_rendering_info.pColorAttachments = feed_attachments;
+            }
             command_buffer.CmdVkBeginRendering(&feed_rendering_info);
             command_processor_.BindExternalGraphicsPipeline(resolve_feed_pipelines[feed_index]);
             VkViewport feed_viewport;
@@ -2065,6 +2211,10 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                           VulkanTextureCache::ResolveFeed::Source::kDepth24Float &&
                       depth_float24_round())
                          ? 4
+                         : 0) |
+                    // The 7e3 -> k_8_8_8_8 feed: the signed 6-bit exponent bias in bits 8-13.
+                    ((resolve_feed_pipelines[feed_index] == resolve_feed_pipeline_7e3_8888_)
+                         ? int32_t((uint32_t(resolve_info.copy_dest_info.copy_dest_exp_bias) & 63u) << 8)
                          : 0)};
             command_buffer.CmdVkPushConstants(resolve_feed_layouts[feed_index],
                                               VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -6878,12 +7028,27 @@ bool VulkanRenderTargetCache::PrepareDirectHostResolve(
   }
   xenos::MsaaSamples msaa_samples = edram_info.msaa_samples;
   bool msaa_4x;
+  // vulkan_direct_resolve_7e3_to_8888: a 1x 7e3 render target resolved to k_8_8_8_8 through the full 32bpp shader.
+  // Its group size (32 pixels) is half the direct shader's (64), so the full shader's dispatch covers every pixel
+  // (the direct shader skips the threads past the width).
+  bool convert_7e3_to_8888 = false;
   if (copy_shader == draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA &&
       msaa_samples == xenos::MsaaSamples::k1X) {
     msaa_4x = false;
   } else if (copy_shader == draw_util::ResolveCopyShaderIndex::kFast32bpp4xMSAA &&
              msaa_samples == xenos::MsaaSamples::k4X) {
     msaa_4x = true;
+  } else if (copy_shader == draw_util::ResolveCopyShaderIndex::kFull32bpp &&
+             msaa_samples == xenos::MsaaSamples::k1X && !is_depth &&
+             REXCVAR_GET(vulkan_direct_resolve_7e3_to_8888) &&
+             direct_host_resolve_7e3_to_8888_pipeline_ != VK_NULL_HANDLE &&
+             (edram_info.format == uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) ||
+              edram_info.format ==
+                  uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16)) &&
+             resolve_info.copy_dest_info.copy_dest_format == xenos::ColorFormat::k_8_8_8_8 &&
+             !resolve_info.copy_dest_info.copy_dest_array) {
+    msaa_4x = false;
+    convert_7e3_to_8888 = true;
   } else {
     return false;
   }
@@ -6945,6 +7110,31 @@ bool VulkanRenderTargetCache::PrepareDirectHostResolve(
     direct_out.render_target = render_target;
     direct_out.pipeline = depth_pipeline;
     direct_out.is_depth = true;
+    return true;
+  }
+  if (convert_7e3_to_8888) {
+    if (key.GetColorFormat() != xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
+        key.msaa_samples != xenos::MsaaSamples::k1X) {
+      return false;
+    }
+    bool is_7e3_uint = false;
+    GetColorOwnershipTransferVulkanFormat(key.GetColorFormat(), key.msaa_samples, &is_7e3_uint);
+    if (is_7e3_uint ||
+        GetColorVulkanFormat(key.GetColorFormat()) != VK_FORMAT_R16G16B16A16_SFLOAT) {
+      return false;
+    }
+    static uint32_t convert_logs = 0;
+    if (convert_logs < 4) {
+      ++convert_logs;
+      REXGPU_INFO("Direct 7e3 -> k_8_8_8_8 resolve @{:08X}: swap {} exp bias {} endian {}",
+                  resolve_info.copy_dest_base, uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+                  int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_endian));
+    }
+    last_resolve_7e3_to_8888_ = true;
+    direct_out.render_target = render_target;
+    direct_out.pipeline = direct_host_resolve_7e3_to_8888_pipeline_;
+    direct_out.is_depth = false;
     return true;
   }
   if (key.GetColorFormat() == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) {
@@ -7088,6 +7278,11 @@ void VulkanRenderTargetCache::OnTextureDestroyed(VulkanTextureCache::VulkanTextu
       ++i;
     }
   }
+  auto side_it = float24_stencil_sides_.find(texture);
+  if (side_it != float24_stencil_sides_.end()) {
+    DestroyFloat24StencilSide(side_it->second);
+    float24_stencil_sides_.erase(side_it);
+  }
   auto source_it = lazy_dump_sources_.find(texture);
   if (source_it != lazy_dump_sources_.end()) {
     if (descriptor_set_pool_sampled_image_) {
@@ -7099,6 +7294,64 @@ void VulkanRenderTargetCache::OnTextureDestroyed(VulkanTextureCache::VulkanTextu
     }
     lazy_dump_sources_.erase(source_it);
   }
+}
+
+VulkanRenderTargetCache::Float24StencilSide* VulkanRenderTargetCache::GetFloat24StencilSide(
+    const VulkanTextureCache::VulkanTexture* texture) {
+  if (!texture) {
+    return nullptr;
+  }
+  Float24StencilSide& side = float24_stencil_sides_[texture];
+  if (side.view != VK_NULL_HANDLE) {
+    return &side;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  VkImageCreateInfo image_create_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  image_create_info.imageType = VK_IMAGE_TYPE_2D;
+  image_create_info.format = VK_FORMAT_R8_UINT;
+  image_create_info.extent = {texture->key().GetWidth(), texture->key().GetHeight(), 1};
+  image_create_info.mipLevels = 1;
+  image_create_info.arrayLayers = 1;
+  image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_create_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (!ui::vulkan::util::CreateDedicatedAllocationImage(vulkan_device, image_create_info,
+                                                        ui::vulkan::util::MemoryPurpose::kDeviceLocal,
+                                                        side.image, side.memory)) {
+    side = Float24StencilSide();
+    float24_stencil_sides_.erase(texture);
+    return nullptr;
+  }
+  VkImageViewCreateInfo view_create_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  view_create_info.image = side.image;
+  view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_create_info.format = VK_FORMAT_R8_UINT;
+  view_create_info.subresourceRange =
+      ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+  if (dfn.vkCreateImageView(device, &view_create_info, nullptr, &side.view) != VK_SUCCESS) {
+    side.view = VK_NULL_HANDLE;
+    DestroyFloat24StencilSide(side);
+    float24_stencil_sides_.erase(texture);
+    return nullptr;
+  }
+  return &side;
+}
+
+void VulkanRenderTargetCache::DestroyFloat24StencilSide(Float24StencilSide& side) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  if (side.dump_descriptor_index != SIZE_MAX && descriptor_set_pool_sampled_image_x2_) {
+    descriptor_set_pool_sampled_image_x2_->Free(side.dump_descriptor_index);
+  }
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImageView, device, side.view);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImage, device, side.image);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, side.memory);
+  side = Float24StencilSide();
 }
 
 void VulkanRenderTargetCache::LogAndResetLazyDumpStats(double frames) {
@@ -7133,6 +7386,92 @@ void VulkanRenderTargetCache::PerformPendingResolveDump(const PendingResolveDump
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+
+  // A float24 depth resolve: the R32_SFLOAT texture and the stencil side image through the depth layout.
+  if (dump.float24) {
+    auto side_it = float24_stencil_sides_.find(dump.texture);
+    if (side_it == float24_stencil_sides_.end() || side_it->second.view == VK_NULL_HANDLE) {
+      lost("no stencil side image");
+      return;
+    }
+    Float24StencilSide& side = side_it->second;
+    if (side.dump_descriptor_index == SIZE_MAX) {
+      VkImageView depth_view =
+          dump.texture->GetView(false, uint32_t(xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA), false);
+      if (depth_view == VK_NULL_HANDLE) {
+        lost("no texture view");
+        return;
+      }
+      side.dump_descriptor_index = descriptor_set_pool_sampled_image_x2_->Allocate();
+      if (side.dump_descriptor_index == SIZE_MAX) {
+        lost("no descriptor");
+        return;
+      }
+      VkDescriptorImageInfo image_infos[2] = {};
+      image_infos[0].imageView = depth_view;
+      image_infos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      image_infos[1].imageView = side.view;
+      image_infos[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      VkWriteDescriptorSet writes[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET},
+                                        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+      for (uint32_t i = 0; i < 2; ++i) {
+        writes[i].dstSet = descriptor_set_pool_sampled_image_x2_->Get(side.dump_descriptor_index);
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        writes[i].pImageInfo = &image_infos[i];
+      }
+      dfn.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+    }
+    VkDescriptorSet descriptor_set_dest = command_processor_.AllocateSingleTransientDescriptor(
+        VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageBufferCompute);
+    if (descriptor_set_dest == VK_NULL_HANDLE) {
+      lost("no destination descriptor");
+      return;
+    }
+    VkDescriptorBufferInfo dest_buffer_info;
+    dest_buffer_info.buffer = lazy_shared_memory_->buffer();
+    dest_buffer_info.offset = dump.dest_base;
+    dest_buffer_info.range = dump.dest_range_length;
+    VkWriteDescriptorSet dest_write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    dest_write.dstSet = descriptor_set_dest;
+    dest_write.dstBinding = 0;
+    dest_write.descriptorCount = 1;
+    dest_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    dest_write.pBufferInfo = &dest_buffer_info;
+    dfn.vkUpdateDescriptorSets(device, 1, &dest_write, 0, nullptr);
+    lazy_shared_memory_->Use(VulkanSharedMemory::Usage::kComputeWrite,
+                             std::make_pair(dump.dest_start, dump.dest_length));
+    lazy_texture_cache_->TransitionTextureForComputeRead(*dump.texture);
+    command_processor_.PushImageMemoryBarrier(
+        side.image, ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT),
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+    command_processor_.BindExternalComputePipeline(dump.pipeline);
+    VkDescriptorSet descriptor_sets[] = {
+        descriptor_set_dest, descriptor_set_pool_sampled_image_x2_->Get(side.dump_descriptor_index)};
+    command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+                                           direct_resolve_pipeline_layout_depth_, 0,
+                                           uint32_t(rex::countof(descriptor_sets)), descriptor_sets, 0,
+                                           nullptr);
+    DirectResolvePushConstants constants = dump.constants;
+    constants.resolve.dest_base -= dump.dest_base;
+    command_buffer.CmdVkPushConstants(direct_resolve_pipeline_layout_depth_,
+                                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), &constants);
+    command_processor_.GpuTimingRestoreOpTag(dump.op_tag);
+    command_processor_.SubmitBarriers(true);
+    command_processor_.GpuTimingMark(VulkanCommandProcessor::GpuTimingCategory::kResolves);
+    command_buffer.CmdVkDispatch(dump.group_count_x, dump.group_count_y, 1);
+    command_processor_.GpuTrace("Rlazy24");
+    ++lazy_dumps_flushed_;
+    if (lazy_dump_flush_logs_ < 40) {
+      ++lazy_dump_flush_logs_;
+      REXGPU_INFO("Lazy float24 resolve dump written: @{:08X} ({:X} bytes) because {}", dump.dest_start,
+                  dump.dest_length, reason);
+    }
+    return;
+  }
 
   // The fed texture as the compute shader's source. The feed applied the
   // red/blue swap; a swapped view undoes it so the shader swaps again like the

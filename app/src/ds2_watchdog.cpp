@@ -1,6 +1,9 @@
 // ds2 - load/hang telemetry, see ds2_watchdog.h.
 
 #include "ds2_watchdog.h"
+#if defined(__ANDROID__)
+#include "android/ds2_android.h"
+#endif
 
 #include <rex/cvar.h>
 #include <rex/graphics/command_processor.h>
@@ -97,7 +100,78 @@ void WriteDurable(const std::string& heartbeat) {
 
 // One line: is the process alive (this line keeps coming), does the guest see vblanks, and is the GPU command
 // processor still moving (the shaders it binds change while it executes the game's draws).
+// Every 10 s: the CPU clusters' current and capped clocks, the hottest CPU and GPU sensors and the charging state, so a
+// session's late frames can be checked against thermal / on-battery clock limits (the benches run on USB power).
+// Sensors the app may not read are left out.
+long ReadLong(const char* path) {
+  FILE* f = std::fopen(path, "r");
+  if (!f) return -1;
+  long v = -1;
+  if (std::fscanf(f, "%ld", &v) != 1) v = -1;
+  std::fclose(f);
+  return v;
+}
+std::string ReadWord(const char* path) {
+  FILE* f = std::fopen(path, "r");
+  if (!f) return "?";
+  char buf[32] = {};
+  if (std::fscanf(f, "%31s", buf) != 1) buf[0] = 0;
+  std::fclose(f);
+  return buf;
+}
+void LogCpuState(int seconds) {
+  static std::vector<std::string> cpu_zones, gpu_zones;
+  static bool scanned = false;
+  if (!scanned) {
+    scanned = true;
+    for (int z = 0; z < 128; ++z) {
+      char path[96];
+      std::snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/type", z);
+      const std::string type = ReadWord(path);
+      if (type == "?") continue;
+      std::snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", z);
+      if (type.rfind("cpu-", 0) == 0 || type.rfind("cpuss-", 0) == 0) cpu_zones.push_back(path);
+      if (type.rfind("gpuss-", 0) == 0) gpu_zones.push_back(path);
+    }
+  }
+  std::string clocks;
+  for (int cpu : {0, 3, 7}) {
+    char cur[96], max[96];
+    std::snprintf(cur, sizeof(cur), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+    std::snprintf(max, sizeof(max), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_max_freq", cpu);
+    const long c = ReadLong(cur), m = ReadLong(max);
+    clocks += fmt::format(" cpu{} {}/{}", cpu, c < 0 ? -1 : c / 1000, m < 0 ? -1 : m / 1000);
+  }
+  auto hottest = [](const std::vector<std::string>& zones) {
+    long t = -1;
+    for (const std::string& z : zones) t = std::max(t, ReadLong(z.c_str()));
+    return t < 0 ? -1.0 : t / 1000.0;
+  };
+  // The GPU: current clock, the devfreq cap (thermal or power limits lower it) and the thermal power level (0 = no
+  // thermal limit), so a session's GPU clock drop shows whether a cap or the governor's own choice set it.
+  {
+    const long g = ReadLong("/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq");
+    const long gm = ReadLong("/sys/class/kgsl/kgsl-3d0/devfreq/max_freq");
+    const long tp = ReadLong("/sys/class/kgsl/kgsl-3d0/thermal_pwrlevel");
+    if (g >= 0 || gm >= 0) {
+      clocks += fmt::format(" gpu {}/{} thermal level {}", g < 0 ? -1 : g / 1000000, gm < 0 ? -1 : gm / 1000000, tp);
+    }
+  }
+  const long ua = ReadLong("/sys/class/power_supply/battery/current_now");
+  REXLOG_INFO("[ds2 wd] t={}s cpu MHz now/cap:{}; hottest cpu {:.1f} C, gpu {:.1f} C; battery {} {} mA", seconds,
+              clocks, hottest(cpu_zones), hottest(gpu_zones), ReadWord("/sys/class/power_supply/battery/status"),
+              ua == -1 ? 0 : ua / 1000);
+#if defined(__ANDROID__)
+  REXLOG_INFO("[ds2 wd] t={}s placement: {}", seconds, ds2::android::PlacementReport());
+#endif
+}
+
 void LogHeartbeat(int seconds, size_t threads, size_t files) {
+  static const bool diag = [] {
+    const char* v = std::getenv("DS2_DIAG");
+    return v && v[0] == '1';
+  }();
+  if (diag && seconds % 10 == 0) LogCpuState(seconds);  // with debug logging (DS2_DIAG=1) only
   uint32_t vblank = 0;
   uint64_t vs = 0, ps = 0;
   bool paused = false;
@@ -195,6 +269,44 @@ void LogThreads(const Threads& threads, bool error) {
   }
 }
 
+// Live settings for debugging a running session (debug logging on only): <REX_ANDROID_APP_DIR>live_cvars.txt (the
+// app's external files folder, writable over adb) with "--name=value" tokens is applied once and deleted, so a
+// player's session can be traced where its slowdown happens (vulkan_gpu_trace_frame,
+// vulkan_gpu_trace_all_pixel_shaders, gpu_debug_* ...) without a restart that would lose the camera angle. Only
+// settings that take effect live (hot reload) change anything.
+void ApplyLiveCvars() {
+  static const std::string path = [] {
+    const char* diag = std::getenv("DS2_DIAG");
+    const char* dir = std::getenv("REX_ANDROID_APP_DIR");
+    if (!diag || diag[0] != '1' || !dir || !*dir) return std::string();
+    return std::string(dir) + "live_cvars.txt";
+  }();
+  if (path.empty()) return;
+  FILE* f = std::fopen(path.c_str(), "r");
+  if (!f) return;
+  std::string text;
+  char buf[512];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < 8192) text.append(buf, n);
+  std::fclose(f);
+  std::remove(path.c_str());
+  size_t pos = 0;
+  while (pos < text.size()) {
+    const size_t start = text.find("--", pos);
+    if (start == std::string::npos) break;
+    size_t end = text.find_first_of(" \t\r\n", start);
+    if (end == std::string::npos) end = text.size();
+    const std::string token = text.substr(start + 2, end - start - 2);
+    pos = end;
+    const size_t eq = token.find('=');
+    const std::string name = token.substr(0, eq);
+    const std::string value = eq == std::string::npos ? "true" : token.substr(eq + 1);
+    const bool ok = rex::cvar::SetFlagByName(name, value);
+    REXLOG_INFO("[ds2 wd] live setting {}={}: {}", name, value, ok ? "applied" : "refused");
+  }
+  rex::FlushLogging();
+}
+
 void Main() {
   const int every = REXCVAR_GET(ds2_watchdog_snapshot_s);
   const int heartbeat = REXCVAR_GET(ds2_watchdog_heartbeat_s);
@@ -210,6 +322,7 @@ void Main() {
     std::this_thread::sleep_for(std::chrono::seconds(1));
     if (!g_run.load()) break;
     ++seconds;
+    if (seconds % 2 == 0) ApplyLiveCvars();
     auto* kernel = rex::system::kernel_state();
     if (!kernel) continue;
 

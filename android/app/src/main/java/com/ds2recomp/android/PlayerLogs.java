@@ -37,7 +37,7 @@ final class PlayerLogs {
     static final String README = "README.txt";
     static final int JAVA_CRASHES_KEPT = 5;
     private static final String README_TEXT =
-        "DS2 Recomp logs. For a bug report, attach the newest runtime-*.log,\n"
+        "Dark Souls II (Android port) logs. For a bug report, attach the newest runtime-*.log,\n"
         + "native-stderr.log and any java-crash-*.txt. Open the app once after a crash\n"
         + "so a PC sees the complete files.\n";
     private static final Pattern LOG_FILE = Pattern.compile(

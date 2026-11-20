@@ -389,8 +389,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   struct CpFrameStats {
     uint64_t start_ns = 0, translate_ns = 0, textures_ns = 0, pipeline_ns = 0, rt_update_ns = 0,
              copy_ns = 0, submit_ns = 0, fence_us = 0, regmem_us_start = 0, primitives_ns = 0,
-             vertex_buffers_ns = 0, vertex_buffer_bytes = 0, memexport_ns = 0, memexport_bytes = 0;
+             vertex_buffers_ns = 0, vertex_buffer_bytes = 0, memexport_ns = 0, memexport_bytes = 0,
+             present_ns = 0;
     uint32_t draws = 0, copies = 0, memexport_draws = 0, memexport_unknown_draws = 0;
+    // The thread's own clocks at the frame start: stall (waiting for the game's commands), CPU time, run queue.
+    uint64_t stall_ns_start = 0, cpu_ns_start = 0, run_ns_start = 0, queue_ns_start = 0;
   };
   CpFrameStats cp_frame_;
   void CpFrameOnSwap();
@@ -769,6 +772,18 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Temporary storage with reusable memory for writing image and sampler
   // descriptors.
   std::vector<VkDescriptorImageInfo> descriptor_write_image_info_;
+  // vulkan_reuse_texture_descriptor_sets: the texture/sampler descriptor set written last for each stage (0 vertex,
+  // 1 pixel) in this frame and what it holds, so a draw with the same bindings reuses it.
+  struct TextureSetCache {
+    uint64_t frame = 0;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    uint32_t texture_count = 0;
+    std::vector<VkDescriptorImageInfo> infos;
+  };
+  TextureSetCache texture_set_cache_[2];
+  uint64_t texture_set_cache_hits_ = 0;
+  uint64_t texture_set_cache_misses_ = 0;
 
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
 
@@ -961,6 +976,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   // declared as dynamic in the pipeline) invalidates such dynamic state.
   VkViewport dynamic_viewport_;
   VkRect2D dynamic_scissor_;
+  // gpu_debug_zero_scissor_vertex_shader matched the current draw (diagnostics).
+  bool debug_zero_scissor_ = false;
+  // Submissions ended by vulkan_submit_every_draws (statistics).
+  uint64_t draw_count_submissions_ = 0;
   // Dynamic fixed-function depth bias, blend constants, stencil state are
   // applicable only to the render target implementations where they are
   // actually involved.
@@ -1101,6 +1120,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint64_t gpu_timing_frame_index_ = 0;
   uint64_t gpu_frame_accum_frame_ = 0;
   double gpu_frame_accum_ns_[size_t(GpuTimingCategory::kCount)] = {};
+  // The last frame whose GPU time is complete (vulkan_gpu_timing): its index and ms, for the slow-frame line.
+  uint64_t gpu_last_frame_index_ = 0;
+  double gpu_last_frame_ms_ = 0.0;
   void GpuTimingFlushFrame();
   void GpuTimingWriteTimestamp(GpuTimingCategory category);
   void GpuTimingBeginSubmission();

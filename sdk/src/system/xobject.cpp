@@ -16,6 +16,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
 #include <rex/system/xobject.h>
+#include <rex/system/frame_breakdown.h>
 // #include <rex/kernel/xboxkrnl/private.h>  // TODO: JIT only
 #include <rex/system/xenumerator.h>
 #include <rex/system/xevent.h>
@@ -213,6 +214,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  rex::system::frame_breakdown::ScopedWait breakdown_wait;
   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
   XThread::CheckTitleTermination();
   switch (result) {
@@ -239,6 +241,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
                                       TimeoutTicksToMs(*opt_timeout)))
                                 : std::chrono::milliseconds::max();
 
+  rex::system::frame_breakdown::ScopedWait breakdown_wait;
   auto result =
       rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
                                  alertable ? true : false, timeout_ms);
@@ -273,6 +276,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  rex::system::frame_breakdown::ScopedWait breakdown_wait;
   if (wait_type) {
     auto result =
         rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);

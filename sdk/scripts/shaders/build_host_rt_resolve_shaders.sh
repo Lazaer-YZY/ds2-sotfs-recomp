@@ -51,6 +51,8 @@ build resolve_fast_32bpp_host_rt_4x_d24fs8_round_cs $E $F24 -DXE_RESOLVE_HOST_RT
 build resolve_fast_32bpp_host_rt_1x_7e3_cs $E -DXE_RESOLVE_HOST_RT_7E3
 build resolve_fast_32bpp_host_rt_4x_7e3_cs $E -DXE_RESOLVE_HOST_RT_7E3 -DXE_RESOLVE_HOST_RT_MSAA
 build resolve_fast_32bpp_host_rt_1x_unorm2101010_cs $E -DXE_RESOLVE_HOST_RT_UNORM_2101010
+build resolve_fast_32bpp_host_rt_1x_7e3_to_8888_cs $E -DXE_RESOLVE_HOST_RT_7E3 -DXE_RESOLVE_HOST_RT_7E3_TO_8888
+build resolve_fast_32bpp_host_rt_1x_d24fs8_fed_cs $E $F24 -DXE_RESOLVE_HOST_RT_DEPTH_FLOAT24_FED
 build_glsl resolve_feed_vs resolve_feed.vert vertex
 build_glsl resolve_feed_ps resolve_feed.frag fragment
 build_glsl resolve_feed_uint_ps resolve_feed_uint.frag fragment
@@ -58,5 +60,7 @@ build_glsl resolve_feed_depth_ps resolve_feed_depth.frag fragment
 build_glsl resolve_feed_depth_ms_ps resolve_feed_depth_ms.frag fragment
 build_glsl resolve_feed_depth_8888_ps resolve_feed_depth_8888.frag fragment
 build_glsl resolve_feed_depth_float24_ps resolve_feed_depth_float24.frag fragment
+build_glsl resolve_feed_depth_float24_stencil_ps resolve_feed_depth_float24_stencil.frag fragment
 build_glsl resolve_feed_7e3_ps resolve_feed_7e3.frag fragment
+build_glsl resolve_feed_7e3_8888_ps resolve_feed_7e3_8888.frag fragment
 rm -rf "$TMP"

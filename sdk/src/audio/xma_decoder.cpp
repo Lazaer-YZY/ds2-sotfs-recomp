@@ -21,6 +21,7 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/xthread.h>
+#include <rex/audio/audio_system.h>
 
 extern "C" {
 #include "libavutil/log.h"
@@ -138,6 +139,7 @@ X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
 }
 
 void XmaDecoder::WorkerThreadMain() {
+  RaiseAudioThreadPriority("XMA decoder");
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;

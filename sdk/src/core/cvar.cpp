@@ -592,10 +592,13 @@ std::vector<std::string> Init(int argc, char** argv) {
           },
           entry.description);
     } else {
+      // A setting given twice takes the last value (CLI11 throws by default, and one parse error dropped every
+      // argument: an app default followed by a debug override of the same setting lost --game_data_root).
       app.add_option_function<std::string>(
-          "--" + entry.name,
-          [&entry](const std::string& val) { ApplyFromSource(entry, val, Source::kCommandLine); },
-          entry.description);
+             "--" + entry.name,
+             [&entry](const std::string& val) { ApplyFromSource(entry, val, Source::kCommandLine); },
+             entry.description)
+          ->multi_option_policy(CLI::MultiOptionPolicy::TakeLast);
     }
   }
 

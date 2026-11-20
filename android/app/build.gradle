@@ -66,6 +66,9 @@ android {
         ndk { abiFilters 'arm64-v8a' }
         buildConfigField 'boolean', 'PUBLIC_DEFAULTS', ds2PublicDefaults.toString()
         if (ds2AppIdSuffix) applicationIdSuffix ds2AppIdSuffix
+        // The launcher name (the owner, 2026-11-20: "Dark Souls II" rather than "DS2 Recomp"); the side-by-side test
+        // package says so, to tell the two icons apart.
+        resValue 'string', 'app_name', ds2AppIdSuffix ? 'Dark Souls II (test)' : 'Dark Souls II'
         manifestPlaceholders = [ds2Icon: ds2Branded ? '@mipmap/ic_launcher_ds2' : '@mipmap/ic_launcher']
     }
     buildFeatures { buildConfig true }

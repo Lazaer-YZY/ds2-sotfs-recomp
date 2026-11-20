@@ -121,6 +121,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
       Shader::HostVertexShaderType host_vertex_shader_type : Shader::kHostVertexShaderTypeBitCount;
       // For domain host vertex shader types only, xenos::TessellationMode.
       uint32_t tessellation_mode : 2;
+      // The device has no depthClamp (older Arm Mali drivers) and the guest disabled clipping
+      // (PA_CL_CLIP_CNTL::clip_disable): clamp the host clip-space depth to [0, w] in the shader instead, so nothing
+      // is clipped at the near and far planes. Zero in descriptions stored before it existed, which is right for
+      // devices with depthClamp (never set there).
+      uint32_t clamp_depth : 1;
     } vertex;
     struct PixelShaderModification {
       // uint32_t 0.
@@ -559,6 +564,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
   void ProcessAllocInstruction(const ParsedAllocInstruction& instr, uint8_t export_eM) override;
 
   void ProcessVertexFetchInstruction(const ParsedVertexFetchInstruction& instr) override;
+  // gpu_debug_trivial_vertex_shader matches the shader being translated (diagnostics).
+  bool IsDebugTrivialShader() const;
   void ProcessTextureFetchInstruction(const ParsedTextureFetchInstruction& instr) override;
   void ProcessAluInstruction(const ParsedAluInstruction& instr,
                              uint8_t memexport_eM_potentially_written_before) override;

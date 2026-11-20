@@ -28,14 +28,19 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <csignal>
 #include <jni.h>
 
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_system.h>
 
 #include <rex/cvar.h>
 #include <rex/input/input.h>
 #include <rex/input/input_driver.h>
 #include <rex/input/input_system.h>
+#include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/ui/vulkan/loader_override.h>
@@ -49,6 +54,9 @@
 namespace in = rex::input;
 using rex::X_RESULT;
 using rex::X_STATUS;
+
+// "<GPU name>: <reason>" when the Vulkan device or renderer could not be set up (sdk/src/ui/vulkan/vulkan_device.cpp).
+extern "C" char rex_vulkan_failure_reason[256];
 
 namespace ds2::android {
 
@@ -183,6 +191,65 @@ int64_t NowMs() {
 
 }  // namespace
 
+namespace {
+char g_failure_file[512] = {};
+struct sigaction g_previous_abort {};
+
+void OnAbort(int sig, siginfo_t* info, void* context) {
+  if (rex_vulkan_failure_reason[0] && g_failure_file[0]) {
+    const int fd = open(g_failure_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
+    if (fd >= 0) {
+      size_t n = 0;
+      while (n < sizeof(rex_vulkan_failure_reason) && rex_vulkan_failure_reason[n]) ++n;
+      (void)!write(fd, rex_vulkan_failure_reason, n);
+      close(fd);
+    }
+  }
+  // Hand over to the previous handler (the runtime's or the system's crash reporting).
+  sigaction(SIGABRT, &g_previous_abort, nullptr);
+  if (g_previous_abort.sa_flags & SA_SIGINFO) {
+    if (g_previous_abort.sa_sigaction) g_previous_abort.sa_sigaction(sig, info, context);
+  } else if (g_previous_abort.sa_handler != SIG_DFL && g_previous_abort.sa_handler != SIG_IGN &&
+             g_previous_abort.sa_handler) {
+    g_previous_abort.sa_handler(sig);
+  }
+  raise(SIGABRT);
+}
+}  // namespace
+
+void InstallGraphicsFailureSaver() {
+  // The renderer's setup ends in rex::FatalError (abort) when it fails on the GPU thread, before any activity
+  // callback can run: save the noted reason where GpuDriverStore.takeGraphicsFailure reads it on the next start.
+  const char* dir = std::getenv("REX_ANDROID_APP_DIR");
+  if (!dir || !*dir) return;
+  std::snprintf(g_failure_file, sizeof(g_failure_file), "%sgraphics_failure.txt", dir);
+  struct sigaction action {};
+  action.sa_sigaction = OnAbort;
+  action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&action.sa_mask);
+  sigaction(SIGABRT, &action, &g_previous_abort);
+}
+
+void ReportGraphicsFailure() {
+  const char* reason = rex_vulkan_failure_reason;
+  if (!reason[0]) return;  // not a graphics failure (game files, memory): the log tells
+  REXLOG_ERROR("ds2 android: the renderer could not start: {}", reason);
+  auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+  auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
+  if (!env || !activity) return;
+  jclass type = env->GetObjectClass(activity);
+  jmethodID method = type ? env->GetMethodID(type, "reportGraphicsFailure", "(Ljava/lang/String;)V") : nullptr;
+  if (method) {
+    if (jstring text = env->NewStringUTF(reason)) {
+      env->CallVoidMethod(activity, method, text);
+      env->DeleteLocalRef(text);
+    }
+  }
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  if (type) env->DeleteLocalRef(type);
+  env->DeleteLocalRef(activity);
+}
+
 bool LoadCustomVulkanDriver() {
   const char* driver = std::getenv("DS2_VK_CUSTOM_DRIVER");
   if (!driver || !*driver) {
@@ -265,6 +332,33 @@ void ApplyDefaults() {
       // the CPU into the list's texture; without a readback the CPU read stale memory and the portraits were noise
       // (a phone and the Thor, 2026-11-19). Only that size is read back: the menus pay one short GPU wait per portrait.
       {"readback_resolve_sizes", "128x76"},
+      // Present on its own thread (strict hand-off: no frame dropped, the GPU command thread waits only if the
+      // previous frame is still unpainted) with the swapchain image waited for on the CPU there, so the GPU command
+      // thread never blocks on the display and the paint carries no display dependency into the single GPU queue.
+      // The owner's 41 fps bonfire-room state (2026-11-20): no free swapchain image on any gameplay frame, that thread
+      // blocked ~20 ms per frame, the GPU 67 % busy and its clock lowered to 615 MHz. Measured: neutral at a GPU-bound
+      // view (57.9 fps; 0.0 % of frames over 21 ms against 0.1-0.3 %), every frame under 18 ms at a lighter view with a
+      // starved swapchain (DECISIONS.md, 2026-11-20 evening). The give-up safety net (DS2_switch's, built for 9-11 fps)
+      // would fire in ordinary GPU-bound play, where waiting for the presenter is simply the throttle: off.
+      {"present_hilo_propio", "true"},
+      {"present_hilo_espera_media_max_us", "0"},
+      {"present_esperar_adquisicion_en_cpu", "true"},
+      // ReXGlue's default invalidates every guest page uploaded to the GPU at each frame end, so every vertex page a
+      // frame draws was copied again (memcpy) and re-protected (mprotect) every frame. The write watches (the game's
+      // stores fault, file reads / allocations / protection changes trigger the callbacks) keep the copies coherent;
+      // the LR port runs this way. Gate view, live A/B: GPU command thread 10.0 -> 8.8 ms CPU per frame, process
+      // -2.2 ms, GPU 16.32 -> 16.23 ms, 57.9 -> 59.7 fps (DECISIONS.md, 2026-11-20 evening).
+      {"clear_memory_page_state", "false"},
+      // Pre-rotation: the swapchain in the panel's native orientation (portrait on the Thor's top screen and on
+      // phones) and the image rotated while painting, so the compositor has nothing to rotate. In the owner's sessions the
+      // display driver refused the rotated game layer and SurfaceFlinger rotated it on the GPU every frame (burning
+      // gate 41 fps); pre-rotated, the layer goes to the display hardware unrotated (gate view 58.5 fps, no frame over
+      // 21 ms; DECISIONS.md, 2026-11-20 night).
+      {"present_pre_rotation", "true"},
+      // No fragment shading rate state in the guest pipelines: Eco mode (its only user) is gone. A player's phone
+      // (Snapdragon 8s Gen 4) flickered with Eco on and, together with the performance overlay, crashed at a bonfire
+      // and a fog wall; the saving was small anyway (-5.7 % GPU time on the Thor). DECISIONS.md, 2026-11-20.
+      {"vulkan_dynamic_fragment_shading_rate", "false"},
   };
   for (const auto& [name, value] : kDefaults) {
     if (rex::cvar::GetFlagInfo(name) == nullptr) {
@@ -277,6 +371,44 @@ void ApplyDefaults() {
     rex::cvar::SetFlagByName(name, value);
   }
   REXLOG_INFO("ds2 android: {} defaults applied", std::size(kDefaults));
+  // "Debug logging" off in the CTRL dialog (DS2_DIAG=0, the public build's default): the GPU command thread's
+  // per-draw timers and slow-frame lines and the WAIT_REG_MEM statistics are off (Majula arch view: that thread
+  // 9.52 -> 9.34 ms per frame over four interleaved pairs). The switch existed but nothing native read DS2_DIAG
+  // until 2026-11-19. Info-level log lines stay (the heartbeats are what a crash report needs).
+  if (const char* diag = std::getenv("DS2_DIAG"); diag && diag[0] == '0') {
+    static const std::pair<const char*, const char*> kQuiet[] = {
+        {"vulkan_slow_frame_ms", "0"},
+        {"gpu_log_wait_reg_mem", "false"},
+    };
+    for (const auto& [name, value] : kQuiet) {
+      if (rex::cvar::GetFlagInfo(name) == nullptr ||
+          rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault) {
+        continue;
+      }
+      rex::cvar::SetFlagByName(name, value);
+    }
+    REXLOG_INFO("ds2 android: debug logging off (GPU timers and wait statistics off)");
+  } else if (diag && diag[0] == '1') {
+    // Debug logging on (the development build's default; never the public build's): the owner's play sessions also
+    // record the frame-pacing timeline and per-frame breakdowns of late frames (the pacing jitter mode shows up in
+    // real play far more often than in scripted runs; DECISIONS.md 2026-11-19 night).
+    static const std::pair<const char*, const char*> kSessionDiagnostics[] = {
+        {"frame_timeline", "true"},
+        {"frame_breakdown_ms", "20"},
+        {"vulkan_slow_frame_ms", "20"},
+        // GPU time per frame by kind (draws, transfers, resolves, ...) and pass / draw counts every 10 s: the late frames
+        // in the owner's busy fights are GPU-bound (2026-11-20). Costs ~0.4 ms of GPU time per frame.
+        {"vulkan_gpu_timing", "true"},
+    };
+    for (const auto& [name, value] : kSessionDiagnostics) {
+      if (rex::cvar::GetFlagInfo(name) == nullptr ||
+          rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault) {
+        continue;
+      }
+      rex::cvar::SetFlagByName(name, value);
+    }
+    REXLOG_INFO("ds2 android: debug logging on (frame timeline and late-frame breakdowns on)");
+  }
 }
 
 }  // namespace ds2::android
@@ -319,7 +451,19 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeHasConnectedController(JNIEnv*,
   return SDL_HasGamepad() ? JNI_TRUE : JNI_FALSE;
 }
 
-// Options from the app's CTRL dialog. None are wired yet; they are logged so the plumbing can be checked.
+// The game's recent frame times for the app's performance overlay (PerfOverlayView, four times a second).
+extern "C" __attribute__((visibility("default"))) JNIEXPORT jint JNICALL
+Java_com_ds2recomp_android_RuntimeActivity_nativeFrameTimes(JNIEnv* env, jclass, jfloatArray out) {
+  if (!out) return 0;
+  const jsize capacity = env->GetArrayLength(out);
+  if (capacity <= 0) return 0;
+  std::vector<float> ms(size_t(std::min<jsize>(capacity, 512)));
+  const int n = rex::kernel::xboxkrnl::RecentGuestFrameTimesMs(ms.data(), int(ms.size()));
+  if (n > 0) env->SetFloatArrayRegion(out, 0, n, ms.data());
+  return n > 0 ? n : 0;
+}
+
+// Options from the app's CTRL dialog (applied at once; unknown ones are logged).
 extern "C" __attribute__((visibility("default"))) JNIEXPORT void JNICALL
 Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, jstring name, jstring value) {
   const char* n = name ? env->GetStringUTFChars(name, nullptr) : nullptr;
@@ -332,8 +476,8 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, 
     ds2::framerate::SetFrameRate(val);
   } else if (key == "dof") {
     ds2::effects::SetDepthOfField(val == "1" || val == "true");
-  } else if (key == "eco") {
-    ds2::effects::SetEcoMode(val == "1" || val == "true");
+  } else if (key == "prime") {
+    ds2::android::SetPrimeGovernor(val == "1" || val == "true");
   } else {
     REXLOG_INFO("ds2: option {} = {} (not wired)", key, val);
   }

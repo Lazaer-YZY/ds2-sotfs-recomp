@@ -96,12 +96,33 @@ void AfterSetup() {
   std::thread([sixty = fps == "60"] {
     std::this_thread::sleep_for(std::chrono::seconds(30));
     ds2::android::PlaceMainThread(sixty);
+    // DS2_PRIME_ASSIST: 1 = the governor (default), 2 = always allowed (A/B), 0 = never.
+    const char* prime = std::getenv("DS2_PRIME_ASSIST");
+    const char* affinity = std::getenv("DS2_AFFINITY");
+    const char* main_prime = std::getenv("DS2_MAIN_PRIME");
+    if ((affinity && affinity[0]) || (main_prime && main_prime[0] && main_prime[0] != '0')) {
+      REXLOG_INFO("ds2 prime core: left to DS2_AFFINITY / DS2_MAIN_PRIME");
+    } else if (prime && prime[0] == '2') {
+      ds2::android::SetPrimeAssist(true);
+    } else {
+      ds2::android::SetPrimeGovernor(prime && prime[0] == '1');
+    }
     ds2::android::BoostCriticalThreads();
+    ds2::android::ApplySchedHints();
+    ds2::android::StartAffinityKeeper();
   }).detach();
 #endif
 }
 
+namespace {
+std::atomic<double> g_target_period_ms{1000.0 / 60.0};
+}  // namespace
+
+double TargetPeriodMs() { return g_target_period_ms.load(std::memory_order_relaxed); }
+
 void SetFrameRate(std::string_view fps) {
+  g_target_period_ms.store(fps == "30" ? 1000.0 / 30.0 : fps == "40" ? 1000.0 / 40.0 : 1000.0 / 60.0,
+                           std::memory_order_relaxed);
   const int vblanks = VblanksFor(fps, g_vblank120.load());
   if (!rex::cvar::SetFlagByName("swap_min_vblanks", std::to_string(vblanks))) {
     REXLOG_WARN("ds2 frame rate: no swap_min_vblanks in this runtime; frame rate {} not applied", fps);

@@ -16,9 +16,5 @@ namespace ds2::effects {
 void Apply();
 // Any thread.
 void SetDepthOfField(bool on);
-// Eco mode (CTRL dialog, off by default; DS2_ECO=1 at start, nativeSetOption("eco") while running): the 3D
-// scene is shaded once per 2x2 pixel block (VK_KHR_fragment_shading_rate), HUD and post-processing at full rate.
-// Lower GPU load, power and heat; the picture is softer. Any thread.
-void SetEcoMode(bool on);
 
 }  // namespace ds2::effects

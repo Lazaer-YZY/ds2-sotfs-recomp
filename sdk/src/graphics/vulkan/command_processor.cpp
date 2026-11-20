@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -43,6 +44,8 @@
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/frame_breakdown.h>
+#include <time.h>
 #include <rex/graphics/vulkan/pipeline_cache.h>
 #include <rex/graphics/vulkan/render_target_cache.h>
 #include <rex/graphics/vulkan/shader.h>
@@ -58,10 +61,23 @@
 // Legacy backend compatibility aliases for shared readback controls.
 REXCVAR_DECLARE(bool, store_shaders);
 
+REXCVAR_DEFINE_BOOL(vulkan_reuse_texture_descriptor_sets, false, "GPU/Vulkan",
+                    "Reuse a texture/sampler descriptor set written earlier in the frame when a draw binds the same "
+                    "views and samplers (upstream wrote both sets for every draw)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_STRING(resolve_dump_dir, "", "GPU/Vulkan",
                       "DIAGNOSTIC: folder (relative to the executable) where every resolve of one frame is written "
                       "as raw guest memory, with index.txt. Empty = off");
 REXCVAR_DEFINE_INT32(resolve_dump_every_s, 30, "GPU/Vulkan", "DIAGNOSTIC: seconds between resolve dumps");
+REXCVAR_DEFINE_BOOL(vulkan_resolve_verify_lazy, false, "GPU/Vulkan",
+                    "DIAGNOSTIC: with resolve_dump_dir, every lazy resolve of the dumped frame is written at once "
+                    "from its fed texture and dumped, then done again eagerly and dumped right after, to compare "
+                    "the two byte for byte.");
+REXCVAR_DEFINE_BOOL(vulkan_direct_resolve_7e3_to_8888_verify, false, "GPU/Vulkan",
+                    "DIAGNOSTIC: with resolve_dump_dir (and vulkan_resolve_feed_lazy_dump off), every direct "
+                    "7e3 -> k_8_8_8_8 resolve of the dumped frame is done again the old way (EDRAM dump + full "
+                    "resolve) and dumped right after it, to compare the two byte for byte.");
 REXCVAR_DEFINE_INT32(resolve_dump_start_s, 0, "GPU/Vulkan",
                      "DIAGNOSTIC: no resolve dump before this many seconds after the first frame");
 REXCVAR_DEFINE_INT32(resolve_dump_max, 10, "GPU/Vulkan", "DIAGNOSTIC: maximum number of resolve dumps");
@@ -102,6 +118,13 @@ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
                     "frame before its end (on Turnip: steadier frame pacing, less GPU busy time). "
                     "Qualcomm's v819.2 driver showed a black title frame every 8-16 frames with "
                     "it; the Android app always runs Turnip on Adreno.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_UINT32(vulkan_submit_every_draws, 0, "GPU/Vulkan",
+                      "Submit the commands recorded so far after this many draws in one submission, so the GPU "
+                      "starts on a frame while the command thread is still translating the rest of it (DS2 submits "
+                      "~1.6 times a frame otherwise, and the GPU idled a third of a heavy frame). 0 = only at the "
+                      "game's primary buffer ends and before waits.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_UINT32(vulkan_submit_before_wait_min_draws, 1, "GPU/Vulkan",
@@ -175,13 +198,21 @@ REXCVAR_DEFINE_BOOL(vulkan_gpu_timing, false, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_STRING(gpu_debug_skip_vertex_shader, "", "GPU/Vulkan",
-                      "Diagnostics: skip every draw whose vertex shader has this ucode hash (hex)")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+                      "Diagnostics: skip every draw whose vertex shader has one of these ucode hashes (hex, "
+                      "comma-separated). Can change while running")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(gpu_debug_zero_scissor_vertex_shader, "", "GPU/Vulkan",
+                      "Diagnostics: draws whose vertex shader has one of these ucode hashes (hex, comma-separated) "
+                      "run with a zero-area scissor: vertex fetch, vertex shading and primitive assembly still happen, "
+                      "rasterization and pixel shading do not (vertex side vs pixel side of an effect's cost). Can "
+                      "change while running")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_STRING(gpu_debug_skip_pixel_shader, "", "GPU/Vulkan",
                       "Diagnostics: skip every draw whose pixel shader has one of these ucode hashes (hex, "
-                      "comma-separated)")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+                      "comma-separated). Can change while running")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(vulkan_vertex_buffer_skip_same_range, false, "GPU/Vulkan",
                     "A vertex fetch whose address and size match what that fetch constant used "
                     "last (in any earlier frame) is not requested from the shared memory again. "
@@ -214,6 +245,65 @@ REXCVAR_DEFINE_UINT32(vulkan_slow_frame_ms, 30, "GPU",
                       "every frame whose time between swaps exceeds this many ms; 0 = off")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 namespace {
+// gpu_debug_skip_vertex_shader / gpu_debug_skip_pixel_shader, changeable while running (to attribute GPU time to an
+// effect in one session at one view): the setter's thread parses a new value in the change callback and publishes it
+// under a mutex with a generation number; the command thread copies it when the generation moved (it never reads the
+// setting's string itself, which the setter may be rewriting).
+struct DebugSkipLists {
+  std::vector<uint64_t> vertex, pixel, zero_scissor_vertex;
+};
+std::mutex g_debug_skip_mutex;
+DebugSkipLists g_debug_skip_pending;
+std::atomic<uint32_t> g_debug_skip_generation{0};
+std::vector<uint64_t> ParseHexList(std::string_view list) {
+  std::vector<uint64_t> hashes;
+  for (size_t i = 0; i < list.size();) {
+    size_t j = list.find(',', i);
+    if (j == std::string_view::npos) j = list.size();
+    if (uint64_t h = std::strtoull(std::string(list.substr(i, j - i)).c_str(), nullptr, 16)) hashes.push_back(h);
+    i = j + 1;
+  }
+  return hashes;
+}
+const DebugSkipLists& CurrentDebugSkipLists() {
+  static const bool registered = [] {
+    {
+      std::lock_guard<std::mutex> lock(g_debug_skip_mutex);
+      g_debug_skip_pending.vertex = ParseHexList(REXCVAR_GET(gpu_debug_skip_vertex_shader));
+      g_debug_skip_pending.pixel = ParseHexList(REXCVAR_GET(gpu_debug_skip_pixel_shader));
+      g_debug_skip_pending.zero_scissor_vertex = ParseHexList(REXCVAR_GET(gpu_debug_zero_scissor_vertex_shader));
+      g_debug_skip_generation.fetch_add(1, std::memory_order_release);
+    }
+    rex::cvar::RegisterChangeCallback("gpu_debug_zero_scissor_vertex_shader",
+                                      [](std::string_view, std::string_view value) {
+                                        std::lock_guard<std::mutex> lock(g_debug_skip_mutex);
+                                        g_debug_skip_pending.zero_scissor_vertex = ParseHexList(value);
+                                        g_debug_skip_generation.fetch_add(1, std::memory_order_release);
+                                      });
+    rex::cvar::RegisterChangeCallback("gpu_debug_skip_vertex_shader", [](std::string_view, std::string_view value) {
+      std::lock_guard<std::mutex> lock(g_debug_skip_mutex);
+      g_debug_skip_pending.vertex = ParseHexList(value);
+      g_debug_skip_generation.fetch_add(1, std::memory_order_release);
+    });
+    rex::cvar::RegisterChangeCallback("gpu_debug_skip_pixel_shader", [](std::string_view, std::string_view value) {
+      std::lock_guard<std::mutex> lock(g_debug_skip_mutex);
+      g_debug_skip_pending.pixel = ParseHexList(value);
+      g_debug_skip_generation.fetch_add(1, std::memory_order_release);
+    });
+    return true;
+  }();
+  (void)registered;
+  static DebugSkipLists current;
+  static uint32_t seen = 0;
+  const uint32_t generation = g_debug_skip_generation.load(std::memory_order_acquire);
+  if (generation != seen) {
+    std::lock_guard<std::mutex> lock(g_debug_skip_mutex);
+    current = g_debug_skip_pending;
+    seen = generation;
+  }
+  return current;
+}
+
 inline uint64_t CpNowNs() {
 #if defined(__aarch64__)
   // The architected counter directly (a few ns): the vdso clock_gettime was ~10% of the command
@@ -263,6 +353,9 @@ REXCVAR_DEFINE_BOOL(vulkan_render_area_restrict, false, "GPU",
                     "union of the scissors and rectangles their commands write, instead of the "
                     "whole EDRAM-tall framebuffer, so tile-based GPUs load and store less")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+// Set by the Vulkan device code (sdk/src/ui/vulkan/vulkan_device.cpp) for the Android app's GPU driver page.
+extern "C" char rex_vulkan_failure_reason[256];
 
 namespace rex::graphics::vulkan {
 
@@ -1013,6 +1106,18 @@ bool VulkanCommandProcessor::CompileGlslToSpirv(VkShaderStageFlagBits stage,
 }
 
 bool VulkanCommandProcessor::SetupContext() {
+  // A failed setup ends in rex::FatalError (an abort) on this thread: leave a reason for the Android app, whose abort
+  // handler saves it for the GPU driver page of the next start, unless a more specific one was noted already.
+  struct SetupFailureNote {
+    VulkanCommandProcessor* self;
+    bool ok = false;
+    ~SetupFailureNote() {
+      if (ok || rex_vulkan_failure_reason[0]) return;
+      const ui::vulkan::VulkanDevice* device = self->GetVulkanDevice();
+      std::snprintf(rex_vulkan_failure_reason, sizeof(rex_vulkan_failure_reason),
+                    "%s: the renderer could not be set up", device ? device->properties().deviceName : "Vulkan");
+    }
+  } setup_failure_note{this};
   // Boot time per setup stage (one line, once), to see what grows with caches.
   const auto setup_start_time = std::chrono::steady_clock::now();
   auto setup_ms_since_start = [&setup_start_time]() {
@@ -1217,13 +1322,22 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR(
         "Vulkan fragmentStoresAndAtomics is required for GPU emulation and "
         "D3D12 parity, but unsupported by the selected device");
+    std::snprintf(rex_vulkan_failure_reason, sizeof(rex_vulkan_failure_reason), "%s: no fragmentStoresAndAtomics",
+                  device_properties.deviceName);
     return false;
   }
   if (!device_properties.vertexPipelineStoresAndAtomics) {
-    REXGPU_ERROR(
-        "Vulkan vertexPipelineStoresAndAtomics is required for GPU emulation and "
-        "D3D12 parity, but unsupported by the selected device");
-    return false;
+    if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics)) {
+      REXGPU_ERROR(
+          "Vulkan vertexPipelineStoresAndAtomics is required "
+          "(vulkan_require_vertex_pipeline_stores_and_atomics=true), but unsupported by the selected device");
+      std::snprintf(rex_vulkan_failure_reason, sizeof(rex_vulkan_failure_reason),
+                    "%s: no vertexPipelineStoresAndAtomics", device_properties.deviceName);
+      return false;
+    }
+    REXGPU_WARN(
+        "Vulkan vertexPipelineStoresAndAtomics is not supported by the device; draws whose vertex shader "
+        "exports to memory will be left out");
   }
   if (!device_properties.geometryShader) {
     if (REXCVAR_GET(vulkan_require_geometry_shader)) {
@@ -2239,6 +2353,7 @@ bool VulkanCommandProcessor::SetupContext() {
       setup_ms_render_targets - setup_ms_shared_memory,
       setup_ms_pipelines - setup_ms_render_targets, setup_ms_textures - setup_ms_pipelines,
       setup_ms_total - setup_ms_textures);
+  setup_failure_note.ok = true;
   return true;
 }
 
@@ -2781,6 +2896,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
 
+  // The present (guest output refresh: acquire, paint, queue present) runs on this thread: its time is logged with
+  // the next frame's thread breakdown ("present"), to tell a blocking present from translation work.
+  const uint64_t present_start_ns = CpNowNs();
+  rex::system::frame_breakdown::TimelineMark('q');
   presenter->RefreshGuestOutput(
       guest_output_width, guest_output_height, display_width, display_height,
       [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
@@ -3303,6 +3422,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   // End the frame even if did not present for any reason (the image refresher
   // was not called), to prevent leaking per-frame resources.
   EndSubmission(true);
+  cp_frame_.present_ns += CpNowNs() - present_start_ns;
+  rex::system::frame_breakdown::TimelineMark('Q');
 }
 
 bool VulkanCommandProcessor::PushBufferMemoryBarrier(
@@ -3990,6 +4111,8 @@ void VulkanCommandProcessor::GpuTimingReadCompleted() {
 void VulkanCommandProcessor::GpuTimingFlushFrame() {
   double total = 0.0;
   for (double ns : gpu_frame_accum_ns_) total += ns;
+  gpu_last_frame_index_ = gpu_frame_accum_frame_;
+  gpu_last_frame_ms_ = total * 1e-6;
   const uint32_t threshold_ms = REXCVAR_GET(vulkan_slow_frame_ms);
   if (threshold_ms && total > double(threshold_ms) * 1e6) {
     auto ms = [&](GpuTimingCategory c) { return gpu_frame_accum_ns_[size_t(c)] * 1e-6; };
@@ -4130,6 +4253,9 @@ void VulkanCommandProcessor::GpuTimingOnSwap() {
     GpuTimingLogPasses(frames);
     if (render_target_cache_) {
       render_target_cache_->LogAndResetLazyDumpStats(frames);
+    }
+    if (texture_cache_) {
+      texture_cache_->LogMemoryStats();
     }
     GpuTraceLogDraws();
     gpu_trace_armed_ = REXCVAR_GET(vulkan_gpu_trace_frame);
@@ -4823,7 +4949,24 @@ void VulkanCommandProcessor::CpFrameOnSwap() {
   const uint64_t now = CpNowNs();
   auto& f = cp_frame_;
   const uint32_t threshold_ms = REXCVAR_GET(vulkan_slow_frame_ms);
+  uint64_t cpu_ns = 0, run_ns = 0, queue_ns = 0;
+  if (threshold_ms) {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    cpu_ns = uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+    rex::system::frame_breakdown::ThreadSchedStat(run_ns, queue_ns);
+  }
   if (f.start_ns && threshold_ms && now - f.start_ns > uint64_t(threshold_ms) * 1000000) {
+    // The thread's view (frame_breakdown): CPU time, time waiting for a core, time waiting for the game's commands;
+    // at = steady clock (s) to line it up with the game thread's "frame breakdown" lines.
+    REXGPU_INFO("GPU slow frame (thread): {:.1f} ms between swaps at={:.3f}: cpu {:.1f} + run queue {:.1f} + "
+                "waiting for commands {:.1f} + WAIT_REG_MEM {:.1f} + fence waits {:.1f}; present (wall) {:.1f}; "
+                "last GPU frame {} {:.1f} ms (frame {})",
+                (now - f.start_ns) / 1e6, rex::system::frame_breakdown::NowNs() / 1e9,
+                (cpu_ns - f.cpu_ns_start) / 1e6, (queue_ns - f.queue_ns_start) / 1e6,
+                (stall_ns_total_ - f.stall_ns_start) / 1e6,
+                (wait_reg_mem_us_total_ - f.regmem_us_start) / 1e3, f.fence_us / 1e3, f.present_ns / 1e6,
+                gpu_last_frame_index_, gpu_last_frame_ms_, gpu_timing_frame_index_);
     const double total = (now - f.start_ns) / 1e6;
     const double regmem = (wait_reg_mem_us_total_ - f.regmem_us_start) / 1e3;
     const double known = (f.translate_ns + f.textures_ns + f.pipeline_ns + f.rt_update_ns +
@@ -4844,6 +4987,10 @@ void VulkanCommandProcessor::CpFrameOnSwap() {
   f = CpFrameStats();
   f.start_ns = now;
   f.regmem_us_start = wait_reg_mem_us_total_;
+  f.stall_ns_start = stall_ns_total_;
+  f.cpu_ns_start = cpu_ns;
+  f.run_ns_start = run_ns;
+  f.queue_ns_start = queue_ns;
 }
 
 void VulkanCommandProcessor::NoteFenceWait(void* caller, uint64_t us) {
@@ -4988,10 +5135,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
   if (memexport_used_vertex) {
     if (!device_properties.vertexPipelineStoresAndAtomics) {
-      REXGPU_ERROR(
-          "Vertex shader memexport draw encountered without "
-          "vertexPipelineStoresAndAtomics support");
-      return false;
+      // Left out (logged once): the device cannot write memory from vertex shaders (Arm's Mali driver).
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        REXGPU_WARN(
+            "Vertex shader memexport draw left out: no vertexPipelineStoresAndAtomics on this device "
+            "(further ones are left out silently)");
+      }
+      return true;
     }
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
   }
@@ -5028,26 +5180,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // Diagnostics: skip every draw with the given vertex shader ucode hash
   // (gpu_debug_skip_vertex_shader, hex), to measure what those draws cost.
   {
-    static const uint64_t skip_vertex_shader_hash =
-        std::strtoull(REXCVAR_GET(gpu_debug_skip_vertex_shader).c_str(), nullptr, 16);
-    if (skip_vertex_shader_hash && vertex_shader->ucode_data_hash() == skip_vertex_shader_hash) {
-      return true;
-    }
-    static const std::vector<uint64_t> skip_pixel_shader_hashes = [] {
-      std::vector<uint64_t> hashes;
-      const std::string list = REXCVAR_GET(gpu_debug_skip_pixel_shader);
-      for (size_t i = 0; i < list.size();) {
-        size_t j = list.find(',', i);
-        if (j == std::string::npos) j = list.size();
-        if (uint64_t h = std::strtoull(list.substr(i, j - i).c_str(), nullptr, 16)) hashes.push_back(h);
-        i = j + 1;
+    const DebugSkipLists& skip_lists = CurrentDebugSkipLists();
+    if (!skip_lists.vertex.empty()) {
+      const uint64_t h = vertex_shader->ucode_data_hash();
+      for (uint64_t skip : skip_lists.vertex) {
+        if (h == skip) return true;
       }
-      return hashes;
-    }();
+    }
     if (Shader* ps = active_pixel_shader()) {
       const uint64_t h = ps->ucode_data_hash();
       if (IsPixelShaderSkipped(h)) return true;
-      for (uint64_t skip : skip_pixel_shader_hashes) {
+      for (uint64_t skip : skip_lists.pixel) {
         if (h == skip) return true;
       }
     }
@@ -5527,6 +5670,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   }
 
   // Update dynamic graphics pipeline state.
+  {
+    // gpu_debug_zero_scissor_vertex_shader (diagnostics): the vertex side of these draws only.
+    const DebugSkipLists& skip_lists = CurrentDebugSkipLists();
+    debug_zero_scissor_ = false;
+    if (!skip_lists.zero_scissor_vertex.empty()) {
+      const uint64_t h = vertex_shader->ucode_data_hash();
+      for (uint64_t hash : skip_lists.zero_scissor_vertex) debug_zero_scissor_ |= h == hash;
+    }
+  }
   UpdateDynamicState(viewport_info, primitive_polygonal, normalized_depth_control);
 
   // Eco mode (gpu_eco_shading_rate): coarse shading only for the 3D scene - depth-tested draws with
@@ -5917,6 +6069,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
+  // vulkan_submit_every_draws: hand the GPU what is recorded so far once a submission holds that many draws.
+  if (const uint32_t every = REXCVAR_GET(vulkan_submit_every_draws);
+      every && submission_open_ && submission_draws_ >= every && CanEndSubmissionImmediately()) {
+    EndSubmission(false);
+    ++draw_count_submissions_;
+  }
+
   return true;
 }
 
@@ -6145,7 +6304,37 @@ bool VulkanCommandProcessor::IssueCopy() {
     result = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                            written_address, written_length);
     if (result && resolve_dump_active_ && written_length) {
+      // vulkan_resolve_verify_lazy: a lazy resolve is written now (from its fed texture), dumped, then done again
+      // eagerly and dumped right after, to compare the two byte for byte.
+      const bool verify_lazy =
+          REXCVAR_GET(vulkan_resolve_verify_lazy) && render_target_cache_->last_resolve_lazy();
+      if (verify_lazy) {
+        render_target_cache_->FlushPendingResolveDumpsForVerify(written_address, written_length);
+      }
       DumpResolve(written_address, written_length);
+      if (verify_lazy) {
+        rex::cvar::SetFlagByName("vulkan_resolve_feed_lazy_dump", "false");
+        uint32_t verify_address, verify_length;
+        if (render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, verify_address,
+                                          verify_length) &&
+            verify_length) {
+          DumpResolve(verify_address, verify_length);
+        }
+        rex::cvar::SetFlagByName("vulkan_resolve_feed_lazy_dump", "true");
+      }
+      // vulkan_direct_resolve_7e3_to_8888_verify: the same resolve again through the EDRAM dump and the full
+      // resolve shader, dumped right after, so the two outputs of one frame can be compared byte for byte.
+      if (REXCVAR_GET(vulkan_direct_resolve_7e3_to_8888_verify) &&
+          render_target_cache_->last_resolve_7e3_to_8888()) {
+        rex::cvar::SetFlagByName("vulkan_direct_resolve_7e3_to_8888", "false");
+        uint32_t verify_address, verify_length;
+        if (render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, verify_address,
+                                          verify_length) &&
+            verify_length) {
+          DumpResolve(verify_address, verify_length);
+        }
+        rex::cvar::SetFlagByName("vulkan_direct_resolve_7e3_to_8888", "true");
+      }
     }
   } else {
     result = IssueCopy_ReadbackResolvePath(readback_mode);
@@ -7744,6 +7933,10 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
   scissor_rect.offset.y = int32_t(scissor.offset[1]);
   scissor_rect.extent.width = scissor.extent[0];
   scissor_rect.extent.height = scissor.extent[1];
+  if (debug_zero_scissor_) {
+    scissor_rect.extent.width = 0;
+    scissor_rect.extent.height = 0;
+  }
   SetScissor(scissor_rect);
 
   if (render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
@@ -8407,6 +8600,24 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   }
 }
 
+namespace {
+// The float constants a shader uses (the set bits of its 4 x 64-bit map, in order), packed into a uniform buffer:
+// each run of consecutive constants in one copy (one 16-byte copy per constant took ~6 % of the command thread).
+void CopyUsedFloatConstants(uint8_t* mapping, const uint32_t* constants, const uint64_t map[4]) {
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint64_t entry = map[i];
+    while (entry) {
+      const uint32_t first = uint32_t(__builtin_ctzll(entry));
+      const uint64_t shifted = entry >> first;
+      const uint32_t count = ~shifted ? uint32_t(__builtin_ctzll(~shifted)) : 64 - first;
+      std::memcpy(mapping, constants + (i << 8) + (first << 2), sizeof(float) * 4 * count);
+      mapping += sizeof(float) * 4 * count;
+      entry = first + count >= 64 ? 0 : entry & ~(((uint64_t(1) << count) - 1) << first);
+    }
+  }
+}
+}  // namespace
+
 bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                             const VulkanShader* pixel_shader) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -8506,18 +8717,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         return false;
       }
       buffer_info.range = VkDeviceSize(float_constants_size);
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint64_t float_constant_map_entry = current_float_constant_map_vertex_[i];
-        uint32_t float_constant_index;
-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(
-              mapping,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (float_constant_index << 2)],
-              sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
-        }
-      }
+      CopyUsedFloatConstants(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_000_X], current_float_constant_map_vertex_);
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                               << SpirvShaderTranslator::kConstantBufferFloatVertex;
     }
@@ -8535,18 +8735,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         return false;
       }
       buffer_info.range = VkDeviceSize(float_constants_size);
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint64_t float_constant_map_entry = current_float_constant_map_pixel_[i];
-        uint32_t float_constant_index;
-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(
-              mapping,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (float_constant_index << 2)],
-              sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
-        }
-      }
+      CopyUsedFloatConstants(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_256_X], current_float_constant_map_pixel_);
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                               << SpirvShaderTranslator::kConstantBufferFloatPixel;
     }
@@ -8607,44 +8796,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     sampler_count_pixel = 0;
     texture_count_pixel = 0;
   }
-  // TODO(Triang3l): Reuse texture and sampler bindings if not changed.
-  current_graphics_descriptor_set_values_up_to_date_ &=
-      ~((UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex) |
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
-
-  // Make sure new descriptor sets are bound to the command buffer.
-
-  current_graphics_descriptor_sets_bound_up_to_date_ &=
-      current_graphics_descriptor_set_values_up_to_date_;
-
-  // Fill the texture and sampler write image infos.
-
-  bool write_vertex_textures =
-      (texture_count_vertex || sampler_count_vertex) &&
-      !(current_graphics_descriptor_set_values_up_to_date_ &
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex));
-  bool write_pixel_textures =
-      (texture_count_pixel || sampler_count_pixel) &&
-      !(current_graphics_descriptor_set_values_up_to_date_ &
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+  // Fill the texture and sampler image infos of both stages: they decide whether the sets written last in this
+  // frame can be reused (vulkan_reuse_texture_descriptor_sets), and are the writes otherwise.
   descriptor_write_image_info_.clear();
-  descriptor_write_image_info_.reserve(
-      (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-      (write_pixel_textures ? texture_count_pixel + sampler_count_pixel : 0));
+  descriptor_write_image_info_.reserve(texture_count_vertex + sampler_count_vertex + texture_count_pixel +
+                                       sampler_count_pixel);
   size_t vertex_texture_image_info_offset = descriptor_write_image_info_.size();
-  if (write_vertex_textures && texture_count_vertex) {
-    for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
-      VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-      descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
-          texture_binding.fetch_constant, texture_binding.dimension,
-          bool(texture_binding.is_signed));
-      descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
-                                              ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                              : VK_IMAGE_LAYOUT_UNDEFINED;
-    }
+  for (uint32_t i = 0; i < texture_count_vertex; ++i) {
+    const VulkanShader::TextureBinding& texture_binding = textures_vertex[i];
+    VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
+    descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
+        texture_binding.fetch_constant, texture_binding.dimension, bool(texture_binding.is_signed));
+    descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
+                                            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                            : VK_IMAGE_LAYOUT_UNDEFINED;
   }
   size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
-  if (write_vertex_textures && sampler_count_vertex) {
+  if (sampler_count_vertex) {
     for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
          current_samplers_vertex_) {
       VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
@@ -8652,25 +8820,82 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     }
   }
   size_t pixel_texture_image_info_offset = descriptor_write_image_info_.size();
-  if (write_pixel_textures && texture_count_pixel) {
-    for (const VulkanShader::TextureBinding& texture_binding : *textures_pixel) {
-      VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-      descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
-          texture_binding.fetch_constant, texture_binding.dimension,
-          bool(texture_binding.is_signed));
-      descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
-                                              ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                              : VK_IMAGE_LAYOUT_UNDEFINED;
-    }
+  for (uint32_t i = 0; i < texture_count_pixel; ++i) {
+    const VulkanShader::TextureBinding& texture_binding = (*textures_pixel)[i];
+    VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
+    descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
+        texture_binding.fetch_constant, texture_binding.dimension, bool(texture_binding.is_signed));
+    descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
+                                            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                            : VK_IMAGE_LAYOUT_UNDEFINED;
   }
   size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
-  if (write_pixel_textures && sampler_count_pixel) {
+  if (sampler_count_pixel) {
     for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
          current_samplers_pixel_) {
       VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
       descriptor_image_info.sampler = sampler_pair.second;
     }
   }
+  size_t image_info_end = descriptor_write_image_info_.size();
+
+  // Upstream wrote both texture sets for every draw ("TODO(Triang3l): Reuse texture and sampler bindings if not
+  // changed"). A set written earlier in this frame for the same layout and the same views and samplers is reused
+  // (transient sets live until their frame completes on the GPU, so only within the frame; views and samplers in
+  // use are not destroyed before that either).
+  const bool reuse_texture_sets = REXCVAR_GET(vulkan_reuse_texture_descriptor_sets);
+  auto texture_set_reusable = [&](uint32_t stage, uint32_t set_index, VkDescriptorSetLayout layout,
+                                  uint32_t texture_count, size_t begin, size_t end) -> bool {
+    const uint32_t bit = UINT32_C(1) << set_index;
+    const TextureSetCache& cache = texture_set_cache_[stage];
+    const size_t n = end - begin;
+    if (reuse_texture_sets && cache.frame == frame_current_ && cache.set != VK_NULL_HANDLE &&
+        cache.layout == layout && cache.texture_count == texture_count && cache.infos.size() == n &&
+        (!n || !std::memcmp(cache.infos.data(), descriptor_write_image_info_.data() + begin,
+                            n * sizeof(VkDescriptorImageInfo)))) {
+      if (current_graphics_descriptor_sets_[set_index] != cache.set) {
+        current_graphics_descriptor_sets_[set_index] = cache.set;
+        current_graphics_descriptor_sets_bound_up_to_date_ &= ~bit;
+      }
+      current_graphics_descriptor_set_values_up_to_date_ |= bit;
+      ++texture_set_cache_hits_;
+      return true;
+    }
+    current_graphics_descriptor_set_values_up_to_date_ &= ~bit;
+    current_graphics_descriptor_sets_bound_up_to_date_ &= ~bit;
+    ++texture_set_cache_misses_;
+    return false;
+  };
+  bool write_vertex_textures =
+      (texture_count_vertex || sampler_count_vertex) &&
+      !texture_set_reusable(0, SpirvShaderTranslator::kDescriptorSetTexturesVertex,
+                            current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref(),
+                            texture_count_vertex, vertex_texture_image_info_offset,
+                            pixel_texture_image_info_offset);
+  bool write_pixel_textures =
+      (texture_count_pixel || sampler_count_pixel) &&
+      !texture_set_reusable(1, SpirvShaderTranslator::kDescriptorSetTexturesPixel,
+                            current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref(),
+                            texture_count_pixel, pixel_texture_image_info_offset, image_info_end);
+  if (!(texture_count_vertex || sampler_count_vertex)) {
+    current_graphics_descriptor_set_values_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
+  }
+  if (!(texture_count_pixel || sampler_count_pixel)) {
+    current_graphics_descriptor_set_values_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
+  }
+  {
+    const uint64_t total = texture_set_cache_hits_ + texture_set_cache_misses_;
+    if (total && total % 200000 < 2) {
+      REXLOG_INFO("Texture descriptor sets: {} reused, {} written ({:.1f} % reused)", texture_set_cache_hits_,
+                  texture_set_cache_misses_, 100.0 * double(texture_set_cache_hits_) / double(total));
+    }
+  }
+
+  // Make sure new descriptor sets are bound to the command buffer.
+  current_graphics_descriptor_sets_bound_up_to_date_ &=
+      current_graphics_descriptor_set_values_up_to_date_;
 
   // Write the new descriptor sets.
 
@@ -8736,6 +8961,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
         write_textures[0].dstSet;
+    TextureSetCache& cache = texture_set_cache_[0];
+    cache.frame = frame_current_;
+    cache.set = write_textures[0].dstSet;
+    cache.layout = current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref();
+    cache.texture_count = texture_count_vertex;
+    cache.infos.assign(descriptor_write_image_info_.begin() + vertex_texture_image_info_offset,
+                       descriptor_write_image_info_.begin() + pixel_texture_image_info_offset);
   }
   // Pixel shader textures and samplers.
   if (write_pixel_textures) {
@@ -8753,6 +8985,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
         write_textures[0].dstSet;
+    TextureSetCache& cache = texture_set_cache_[1];
+    cache.frame = frame_current_;
+    cache.set = write_textures[0].dstSet;
+    cache.layout = current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref();
+    cache.texture_count = texture_count_pixel;
+    cache.infos.assign(descriptor_write_image_info_.begin() + pixel_texture_image_info_offset,
+                       descriptor_write_image_info_.begin() + image_info_end);
   }
   // Write.
   if (write_descriptor_set_count) {

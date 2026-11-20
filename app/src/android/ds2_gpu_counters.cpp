@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -49,9 +50,14 @@ struct GpuCountable {
   uint32_t group, countable;
   const char* name;
 };
-// Groups: 0 CP, 8 UCHE, 9 TP, 0xA SP, 0xB RB, 0x7 VFD, 0x3 RAS, 0x4 PC, 0x10 LRZ.
+// KGSL groups (msm_kgsl.h): 0 CP, 2 PC, 3 VFD, 4 HLSQ, 5 VPC, 6 TSE, 7 RAS, 8 UCHE, 9 TP, 0xA SP, 0xB RB, 0x18 CCU,
+// 0x19 LRZ. Countable 0 of the front-end groups (PC ... RAS, CCU, LRZ) is the block's busy cycles; CP countable 1 counts
+// the command processor busy while the GPU core is idle (per-draw state work the core waits for; 2026-11-20).
 constexpr GpuCountable kGpuCountables[] = {
-    {0x0, 0, "cp_always"},          {0x0, 2, "cp_busy"},
+    {0x0, 0, "cp_always"},          {0x0, 2, "cp_busy"},            {0x0, 1, "cp_busy_core_idle"},
+    {0x2, 0, "pc_busy"},            {0x3, 0, "vfd_busy"},           {0x4, 0, "hlsq_busy"},
+    {0x5, 0, "vpc_busy"},           {0x6, 0, "tse_busy"},           {0x7, 0, "ras_busy"},
+    {0x18, 0, "ccu_busy"},          {0x19, 0, "lrz_busy"},
     {0xA, 0, "sp_busy"},            {0xA, 1, "sp_alu_working"},     {0xA, 2, "sp_efu_working"},
     {0xA, 4, "sp_stall_tp"},        {0xA, 5, "sp_stall_uche"},      {0xA, 6, "sp_stall_rb"},
     {0xA, 7, "sp_non_exec"},        {0xA, 9, "sp_wave_ctx_cycles"}, {0xA, 8, "sp_wave_contexts"},
@@ -87,7 +93,22 @@ void StartGpuCounters() {
     std::vector<KgslPerfcounterReadGroup> reads;
     std::vector<const char*> names;
     std::string failed;
-    for (const GpuCountable& c : kGpuCountables) {
+    // DS2_GPU_COUNTERS_PC=<first>-<last>: instead of the default set, the command processor's cycles and a range of
+    // raw PC (primitive controller) countables, named pc_<n>, e.g. to find the vertex reuse counters (input-assembly
+    // vertices, vertex shader invocations, vertex hits, draw calls) by their per-frame values. At most 8 at a time.
+    std::vector<GpuCountable> countables(std::begin(kGpuCountables), std::end(kGpuCountables));
+    static std::vector<std::string> pc_names;
+    if (const char* pc = std::getenv("DS2_GPU_COUNTERS_PC"); pc && pc[0]) {
+      int first = 0, last = -1;
+      if (std::sscanf(pc, "%d-%d", &first, &last) != 2) last = first;
+      countables = {{0x0, 0, "cp_always"}, {0x0, 2, "cp_busy"}};
+      pc_names.clear();
+      pc_names.reserve(64);
+      for (int n = first; n <= last && n - first < 32; ++n) pc_names.push_back("pc_" + std::to_string(n));
+      for (int n = first; n <= last && n - first < 32; ++n)
+        countables.push_back({0x2, uint32_t(n), pc_names[size_t(n - first)].c_str()});
+    }
+    for (const GpuCountable& c : countables) {
       KgslPerfcounterGet get = {c.group, c.countable, 0, 0, 0};
       if (ioctl(fd, DS2_KGSL_IOC_PERFCOUNTER_GET, &get) != 0) {
         failed += std::string(failed.empty() ? "" : ", ") + c.name + " (errno " + std::to_string(errno) + ")";
@@ -152,6 +173,15 @@ void StartGpuCounters() {
                     pct(delta("sp_fs_half_alu"), delta("sp_fs_full_alu") + delta("sp_fs_half_alu")));
       REXLOG_INFO("ds2 GPU counters ({:.1f} s, per second): {}", secs, line);
       REXLOG_INFO("ds2 GPU counters derived: {}", derived);
+      char front[400];
+      std::snprintf(front, sizeof(front),
+                    "of gpu busy: cp busy while the core idles %.1f%%, pc %.1f%%, vfd %.1f%%, hlsq %.1f%%, vpc %.1f%%, "
+                    "tse %.1f%%, ras %.1f%%, lrz %.1f%%, ccu %.1f%%",
+                    pct(delta("cp_busy_core_idle"), cp_busy), pct(delta("pc_busy"), cp_busy),
+                    pct(delta("vfd_busy"), cp_busy), pct(delta("hlsq_busy"), cp_busy), pct(delta("vpc_busy"), cp_busy),
+                    pct(delta("tse_busy"), cp_busy), pct(delta("ras_busy"), cp_busy), pct(delta("lrz_busy"), cp_busy),
+                    pct(delta("ccu_busy"), cp_busy));
+      REXLOG_INFO("ds2 GPU counters front end: {}", front);
       prev.swap(cur);
       prev_time = now;
     }

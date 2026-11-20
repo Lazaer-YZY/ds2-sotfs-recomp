@@ -7,14 +7,17 @@ import android.content.SharedPreferences;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.hardware.input.InputManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.SparseArray;
+import android.util.TypedValue;
 import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
@@ -22,6 +25,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 /** Local touch controls layered over SDL's surface; physical pads stay in SDL. */
@@ -405,9 +409,7 @@ final class TouchControlsView extends View {
      */
     private RadioButton radio(LinearLayout content, String label, String a, String b, String c,
                               int checked) {
-        TextView title = new TextView(content.getContext());
-        title.setText(label);
-        content.addView(title);
+        if (label != null) header(content, label);
         RadioGroup group = new RadioGroup(content.getContext());
         String[] texts = c != null ? new String[] { a, b, c } : new String[] { a, b };
         RadioButton first = null;
@@ -421,6 +423,39 @@ final class TouchControlsView extends View {
         }
         content.addView(group);
         return first;
+    }
+
+    /** A bold section header of the settings dialog. */
+    private void header(LinearLayout content, String text) {
+        TextView view = new TextView(content.getContext());
+        view.setText(text);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        float density = getResources().getDisplayMetrics().density;
+        view.setPadding(0, Math.round(16f * density), 0, Math.round(2f * density));
+        content.addView(view);
+    }
+
+    /** A short grey line under an option, indented to the option's text. */
+    private TextView hint(LinearLayout content, String text) {
+        TextView view = new TextView(content.getContext());
+        view.setText(text);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        view.setAlpha(0.7f);
+        float density = getResources().getDisplayMetrics().density;
+        view.setPadding(Math.round(32f * density), 0, 0, Math.round(4f * density));
+        content.addView(view);
+        return view;
+    }
+
+    /** A checkbox with an optional grey explanation under it. */
+    private CheckBox option(LinearLayout content, String label, String help, boolean checked) {
+        CheckBox box = new CheckBox(content.getContext());
+        box.setText(label);
+        box.setChecked(checked);
+        content.addView(box);
+        if (help != null) hint(content, help);
+        return box;
     }
 
     /** Index of the checked button in the group of {@code first}, 0 if none. */
@@ -440,6 +475,7 @@ final class TouchControlsView extends View {
         int padding = Math.round(20f * getResources().getDisplayMetrics().density);
         content.setPadding(padding, 0, padding, 0);
 
+        header(content, strings.getString(R.string.touch_section_controls));
         CheckBox toggle = new CheckBox(activity);
         toggle.setText(strings.getString(R.string.touch_show_controls));
         toggle.setChecked(visibility.visible());
@@ -448,10 +484,8 @@ final class TouchControlsView extends View {
             if (!syncingSettingsToggle) settingsChoiceEdited = true;
         });
         content.addView(toggle);
-        TextView hint = new TextView(activity);
-        hint.setText(strings.getString(R.string.touch_controller_hint));
+        TextView hint = hint(content, strings.getString(R.string.touch_controller_hint));
         hint.setVisibility(visibility.controllerPresent() ? VISIBLE : GONE);
-        content.addView(hint);
         settingsToggle = toggle;
         controllerHint = hint;
 
@@ -480,43 +514,60 @@ final class TouchControlsView extends View {
         ctrlAutoHide.setChecked(ctrl.enabled());
         content.addView(ctrlAutoHide);
 
-        CheckBox hideAll = new CheckBox(activity);
-        hideAll.setText(strings.getString(R.string.touch_hide_all));
-        hideAll.setChecked(ctrl.hideAll());
-        content.addView(hideAll);
-        TextView hideAllHelp = new TextView(activity);
-        hideAllHelp.setText(strings.getString(R.string.touch_hide_all_help));
-        content.addView(hideAllHelp);
+        CheckBox hideAll = option(content, strings.getString(R.string.touch_hide_all),
+            strings.getString(R.string.touch_hide_all_help), ctrl.hideAll());
         SharedPreferences render = RuntimeActivity.renderPrefs(activity);
         // Frame rate: 30 / 40 / 60, and the 120 Hz panel for a smoother 60 (RuntimeActivity.applyFrameRate).
         String fps = render.getString("fps", RuntimeActivity.DEFAULT_FPS);
         RadioButton fpsChoice = radio(content, strings.getString(R.string.touch_frame_rate),
             strings.getString(R.string.touch_fps_30), strings.getString(R.string.touch_fps_40),
             strings.getString(R.string.touch_fps_60), "30".equals(fps) ? 0 : "40".equals(fps) ? 1 : 2);
-        CheckBox panel120 = new CheckBox(activity);
-        panel120.setText(strings.getString(R.string.touch_panel120));
-        panel120.setChecked(render.getBoolean("panel120", false));
-        content.addView(panel120);
-        // Diagnostics (the owner, 2026-11-11: off for regular play): read at start, so from the next start.
-        CheckBox debugLog = new CheckBox(activity);
-        debugLog.setText(strings.getString(R.string.touch_debug_log));
-        debugLog.setChecked(render.getBoolean("debug_log", RuntimeActivity.DEFAULT_DEBUG_LOG));
-        content.addView(debugLog);
-        // Performance overlay (fps, 1% low, frame time graph of the game's own frames): applied at once.
-        CheckBox perfOverlay = new CheckBox(activity);
-        perfOverlay.setText(strings.getString(R.string.touch_perf_overlay));
-        perfOverlay.setChecked(render.getBoolean("overlay", false));
-        content.addView(perfOverlay);
+        CheckBox panel120 = option(content, strings.getString(R.string.touch_panel120),
+            strings.getString(R.string.touch_panel120_help), render.getBoolean("panel120", false));
+        // Game language (from the next start, RuntimeActivity.addLanguageArguments): the device's language or one
+        // of the game's, each written in its own words.
+        header(content, strings.getString(R.string.touch_section_language));
+        String[] languageNames = RuntimeActivity.LANGUAGE_NAMES.clone();
+        languageNames[0] = strings.getString(R.string.touch_language_device,
+            RuntimeActivity.languageName(RuntimeActivity.deviceLanguageId()));
+        Spinner language = new Spinner(activity);
+        ArrayAdapter<String> languageAdapter =
+            new ArrayAdapter<>(activity, android.R.layout.simple_spinner_item, languageNames);
+        languageAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        language.setAdapter(languageAdapter);
+        language.setSelection(Math.max(0, java.util.Arrays.asList(RuntimeActivity.LANGUAGE_IDS)
+            .indexOf(render.getString("language", RuntimeActivity.DEFAULT_LANGUAGE))));
+        content.addView(language);
+        // Display (from the next start, RuntimeActivity.addDisplayArguments): render resolution, FSR upscaling.
+        String renderHeight = render.getString("render_height", RuntimeActivity.DEFAULT_RENDER_HEIGHT);
+        header(content, strings.getString(R.string.touch_section_image));
+        TextView resolutionLabel = new TextView(activity);
+        resolutionLabel.setText(strings.getString(R.string.touch_resolution));
+        content.addView(resolutionLabel);
+        RadioButton resolutionChoice = radio(content, null,
+            strings.getString(R.string.touch_resolution_540), strings.getString(R.string.touch_resolution_720),
+            strings.getString(R.string.touch_resolution_1440),
+            "540".equals(renderHeight) ? 0 : "1440".equals(renderHeight) ? 2 : 1);
+        CheckBox fsr = option(content, strings.getString(R.string.touch_fsr),
+            strings.getString(R.string.touch_fsr_help), render.getBoolean("fsr", false));
         // The game's depth of field (off by default: it blurs the character on this renderer and costs frames).
-        CheckBox depthOfField = new CheckBox(activity);
-        depthOfField.setText(strings.getString(R.string.touch_depth_of_field));
-        depthOfField.setChecked(render.getBoolean("dof", false));
-        content.addView(depthOfField);
-        // Eco mode (off by default): coarser shading of the 3D scene for less GPU load, power and heat.
-        CheckBox ecoMode = new CheckBox(activity);
-        ecoMode.setText(strings.getString(R.string.touch_eco_mode));
-        ecoMode.setChecked(render.getBoolean("eco", false));
-        content.addView(ecoMode);
+        CheckBox depthOfField = option(content, strings.getString(R.string.touch_depth_of_field),
+            strings.getString(R.string.touch_depth_of_field_help), render.getBoolean("dof", false));
+        // Prime core (on by default since 2026-11-20, the owner: "smoother, even with a bit more prime core"): the
+        // game's main thread, the GPU command thread and the draw thread may also run on the fastest core. Applied at
+        // once.
+        header(content, strings.getString(R.string.touch_section_performance));
+        CheckBox primeCore = option(content, strings.getString(R.string.touch_prime_core),
+            strings.getString(R.string.touch_prime_core_help), render.getBoolean("prime", RuntimeActivity.DEFAULT_PRIME));
+        // Performance overlay (fps, 1% low, frame time graph of the game's own frames): applied at once.
+        CheckBox perfOverlay = option(content, strings.getString(R.string.touch_perf_overlay),
+            strings.getString(R.string.touch_perf_overlay_help), render.getBoolean("overlay", false));
+
+        // Troubleshooting. Diagnostics (the owner, 2026-11-11: off for regular play): read at start.
+        header(content, strings.getString(R.string.touch_section_troubleshooting));
+        CheckBox debugLog = option(content, strings.getString(R.string.touch_debug_log),
+            strings.getString(R.string.touch_debug_log_help),
+            render.getBoolean("debug_log", RuntimeActivity.DEFAULT_DEBUG_LOG));
 
         // Qualcomm and Mali devices: open the GPU driver page (download / switch Turnip or PanVK).
         Button driverButton = null;
@@ -532,6 +583,9 @@ final class TouchControlsView extends View {
         folderButton.setText(strings.getString(R.string.touch_game_folder));
         folderButton.setAllCaps(false);
         content.addView(folderButton);
+        TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
+        nextStart.setPadding(0, Math.round(8f * getResources().getDisplayMetrics().density), 0,
+                             Math.round(8f * getResources().getDisplayMetrics().density));
 
         ScrollView scroll = new ScrollView(activity);
         scroll.addView(content);
@@ -545,10 +599,13 @@ final class TouchControlsView extends View {
                     .putBoolean("debug_log", debugLog.isChecked())
                     .putBoolean("overlay", perfOverlay.isChecked())
                     .putBoolean("dof", depthOfField.isChecked())
-                    .putBoolean("eco", ecoMode.isChecked()).apply();
-                RuntimeActivity.nativeSetOption("overlay", perfOverlay.isChecked() ? "1" : "0");
+                    .putString("render_height", new String[] { "540", "720", "1440" }[radioChoice(resolutionChoice)])
+                    .putBoolean("fsr", fsr.isChecked())
+                    .putString("language", RuntimeActivity.LANGUAGE_IDS[language.getSelectedItemPosition()])
+                    .putBoolean("prime", primeCore.isChecked()).apply();
+                RuntimeActivity.nativeSetOption("prime", primeCore.isChecked() ? "1" : "0");
+                activity.setPerfOverlay(perfOverlay.isChecked());
                 RuntimeActivity.nativeSetOption("dof", depthOfField.isChecked() ? "1" : "0");
-                RuntimeActivity.nativeSetOption("eco", ecoMode.isChecked() ? "1" : "0");
                 activity.applyFrameRate(radioChoice(fpsChoice) == 0 ? "30" : radioChoice(fpsChoice) == 1 ? "40" : "60",
                                         panel120.isChecked());
             })

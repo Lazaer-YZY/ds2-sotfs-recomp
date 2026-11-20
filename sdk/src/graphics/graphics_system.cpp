@@ -27,6 +27,7 @@
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
 #include <rex/stream.h>
+#include <rex/system/frame_breakdown.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
 #include <rex/ui/graphics_provider.h>
@@ -349,6 +350,7 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   if (!interrupt_callback_) {
     return;
   }
+  rex::system::frame_breakdown::TimelineMark('I', source);
 
   auto thread = system::XThread::GetCurrentThread();
   assert_not_null(thread);
@@ -381,6 +383,7 @@ void GraphicsSystem::MarkVblank() {
     std::lock_guard<std::mutex> lock(vblank_wait_mutex_);
     vblank_count_.fetch_add(1, std::memory_order_acq_rel);
   }
+  rex::system::frame_breakdown::TimelineMark('V', uint32_t(vblank_count_.load(std::memory_order_relaxed)));
   vblank_wait_cv_.notify_all();
   last_vblank_us.store(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())

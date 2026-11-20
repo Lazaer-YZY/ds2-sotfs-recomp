@@ -45,6 +45,11 @@ REXCVAR_DEFINE_BOOL(spirv_structured_forward_jumps, true, "GPU/Vulkan",
                     "shader can drop code that does not feed the position)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_BOOL(gpu_debug_trivial_vertex_shader_no_outputs, false, "GPU/Vulkan",
+                    "Diagnostics, with gpu_debug_trivial_vertex_shader: that shader writes only the position, not "
+                    "its interpolators")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace rex::graphics {
 
 bool SpirvShaderTranslator::UseSharedMemoryTexelBuffer(uint32_t max_storage_buffer_range,
@@ -1931,8 +1936,12 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
   }
 
   if (!IsSpirvComputeShader()) {
-    // Zero the interpolators.
-    uint32_t interpolators_remaining = GetModificationInterpolatorMask();
+    // Zero the interpolators (gpu_debug_trivial_vertex_shader_no_outputs: not in the trivial diagnostic shader, which
+    // then writes only the position, to measure what storing the outputs costs).
+    uint32_t interpolators_remaining =
+        IsDebugTrivialShader() && REXCVAR_GET(gpu_debug_trivial_vertex_shader_no_outputs)
+            ? 0
+            : GetModificationInterpolatorMask();
     uint32_t interpolator_index;
     while (rex::bit_scan_forward(interpolators_remaining, &interpolator_index)) {
       interpolators_remaining &= ~(UINT32_C(1) << interpolator_index);
@@ -2701,6 +2710,18 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       spv::OpVectorTimesScalar, type_float3_, ndc_offset, position_w);
   position_xyz =
       builder_->createNoContractionBinOp(spv::OpFAdd, type_float3_, position_xyz, ndc_offset_mul_w);
+
+  // No host depth clamp while the guest disabled clipping: keep the depth inside [0, w] (w is clamped at 0 for
+  // vertices behind the eye) so the primitive is not clipped at the near or far plane. Per vertex rather than per
+  // fragment, which differs only inside primitives that cross a plane.
+  if (shader_modification.vertex.clamp_depth) {
+    spv::Id depth = builder_->createCompositeExtract(position_xyz, type_float_, 2);
+    spv::Id depth_max = builder_->createBinBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax,
+                                                       position_w, const_float_0_);
+    depth = builder_->createTriBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, depth,
+                                           const_float_0_, depth_max);
+    position_xyz = builder_->createCompositeInsert(depth, position_xyz, type_float3_, 2);
+  }
 
   spv::Id kill_vertex = spv::NoResult;
   if (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b100) {

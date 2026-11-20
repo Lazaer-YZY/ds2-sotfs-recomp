@@ -24,5 +24,7 @@ void Startup();
 void AfterSetup();
 // Any thread: "30", "40" or "60".
 void SetFrameRate(std::string_view fps);
+// The frame period the cap aims at, in ms (16.7 at 60 fps, 25 at 40, 33.3 at 30).
+double TargetPeriodMs();
 
 }  // namespace ds2::framerate

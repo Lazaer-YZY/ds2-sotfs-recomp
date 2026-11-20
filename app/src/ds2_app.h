@@ -7,6 +7,7 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+#include "ds2_hp_probe.h"
 #include "ds2_capture.h"
 #include "ds2_cpu_settings.h"
 #include "ds2_dlc.h"
@@ -130,10 +131,17 @@ class Ds2App : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override {
 #if defined(__ANDROID__)
     // Runs before the GPU plugin loads, i.e. before any Vulkan instance exists.
+    ds2::android::InstallGraphicsFailureSaver();
     ds2::android::LoadCustomVulkanDriver();
     ds2::android::WrapTouchInput(config);
 #endif
     ds2::input_script::Wrap(config);
+  }
+
+  void OnSetupFailed() override {
+#if defined(__ANDROID__)
+    ds2::android::ReportGraphicsFailure();
+#endif
   }
 
   void OnPostSetup() override {
@@ -162,6 +170,7 @@ class Ds2App : public rex::ReXApp {
     });
     ds2::capture::Start(runtime());   // diagnostic frame capture, off unless --ds2_capture_dir is given
     ds2::watchdog::Start(runtime());  // load/hang telemetry in the log
+    ds2::hp_probe::Start(runtime());  // bench helper, DS2_HP_PROBE only
   }
   void OnShutdown() override {
     ds2::frame_overlay::Shutdown();

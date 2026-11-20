@@ -255,8 +255,9 @@ final class GpuDriverCatalog {
         /** Mali G1 (v14): built by PanVK-kbase but not run on hardware yet. */
         UNTESTED,
         /**
-         * Midgard and Bifrost: no PanVK-kbase build, and Bifrost's PanVK has
-         * four descriptor sets where the renderer binds five.
+         * Midgard and Bifrost: no PanVK-kbase build (the system driver is the
+         * only choice; the renderer binds at most four descriptor sets, Mali's
+         * limit).
          */
         UNSUPPORTED,
         /** The GPU name is unknown or not a Mali one. */

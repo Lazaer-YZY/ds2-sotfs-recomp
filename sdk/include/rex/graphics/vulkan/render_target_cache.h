@@ -106,6 +106,15 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
   // Performs the resolve to a shared memory area according to the current
   // register values, and also clears the render targets if needed. Must be in a
   // frame for calling.
+  // Whether the last Resolve went through the direct 7e3 -> k_8_8_8_8 path (vulkan_direct_resolve_7e3_to_8888;
+  // for its verification).
+  bool last_resolve_7e3_to_8888() const { return last_resolve_7e3_to_8888_; }
+  // Writes the pending lazy dumps intersecting the range now (vulkan_resolve_verify_lazy).
+  void FlushPendingResolveDumpsForVerify(uint32_t start, uint32_t length) {
+    FlushPendingResolveDumps(start, length, "verification");
+  }
+  // Whether the last Resolve deferred its memory write (a lazy dump).
+  bool last_resolve_lazy() const { return last_resolve_lazy_; }
   bool Resolve(const memory::Memory& memory, VulkanSharedMemory& shared_memory,
                VulkanTextureCache& texture_cache, uint32_t& written_address_out,
                uint32_t& written_length_out);
@@ -879,8 +888,23 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
     uint32_t group_count_y = 0;
     VkPipeline pipeline = VK_NULL_HANDLE;
     bool swap_red_blue = false;
+    // A float24 depth resolve: the texture (R32_SFLOAT) and its stencil side image are read with the depth layout.
+    bool float24 = false;
     uint64_t op_tag = 0;
   };
+  // vulkan_resolve_feed_lazy_dump_float24: an R8_UINT image the size of a fed k_24_8_FLOAT texture holding the
+  // stencil bytes of its last float24 feed (the texture holds only the depth).
+  struct Float24StencilSide {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    // Depth layout descriptor set (texture, side image) for the lazy dump.
+    size_t dump_descriptor_index = SIZE_MAX;
+    bool initialized = false;
+  };
+  std::unordered_map<const VulkanTextureCache::VulkanTexture*, Float24StencilSide> float24_stencil_sides_;
+  Float24StencilSide* GetFloat24StencilSide(const VulkanTextureCache::VulkanTexture* texture);
+  void DestroyFloat24StencilSide(Float24StencilSide& side);
   // Sampled-image descriptor sets reading a fed texture, [red/blue swapped].
   struct LazyDumpSource {
     size_t descriptor_index[2] = {SIZE_MAX, SIZE_MAX};
@@ -975,6 +999,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
   // The lazy dump of a fed 1x 7e3 resolve: packs the A2B10G10R10_UNORM texture's
   // fields back into the words (vulkan_resolve_feed_lazy_dump_7e3).
   VkPipeline direct_host_resolve_unorm2101010_pipeline_ = VK_NULL_HANDLE;
+  // A 1x 7e3 render target resolved to k_8_8_8_8 (format-converting; vulkan_direct_resolve_7e3_to_8888).
+  VkPipeline direct_host_resolve_7e3_to_8888_pipeline_ = VK_NULL_HANDLE;
+  bool last_resolve_7e3_to_8888_ = false;
+  bool last_resolve_lazy_ = false;
   // Resolve feeding (vulkan_resolve_feed_textures): draws a render target into a
   // R8G8B8A8_UNORM texture, optionally swapping red and blue.
   VkPipelineLayout resolve_feed_pipeline_layout_ = VK_NULL_HANDLE;
@@ -999,6 +1027,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
   // (k_2_10_10_10 textures), the 7e3 / 2-bit alpha fields written as UNORM
   // (vulkan_resolve_feed_7e3).
   VkPipeline resolve_feed_pipeline_7e3_ = VK_NULL_HANDLE;
+  VkPipeline resolve_feed_pipeline_7e3_8888_ = VK_NULL_HANDLE;
+  VkPipeline resolve_feed_pipeline_depth_float24_stencil_ = VK_NULL_HANDLE;
+  VkPipeline direct_host_resolve_float24_fed_pipeline_ = VK_NULL_HANDLE;
   VkPipelineLayout direct_resolve_pipeline_layout_depth_ = VK_NULL_HANDLE;
   std::unordered_map<DirectResolvePipelineKey, VkPipeline, DirectResolvePipelineKey::Hasher>
       direct_resolve_pipelines_;

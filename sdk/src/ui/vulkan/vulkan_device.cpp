@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -30,13 +31,15 @@ REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, true, "UI/Vulkan",
-                    "Deprecated and ignored for parity; vertexPipelineStoresAndAtomics is always "
-                    "required for Vulkan GPU emulation")
+// Arm's Mali driver has no vertexPipelineStoresAndAtomics, fillModeNonSolid, clip or cull distances (Vulkan
+// hardware database reports, 2026), PanVK no geometryShader; Apple Silicon / MoltenVK has no geometryShader or
+// fillModeNonSolid. The renderer has a fallback for each, so Android and macOS require none of them. Without vertex
+// stores only vertex-shader memory export draws are left out (Dark Souls II has none: 0 in 52,688 logged frames).
+REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, !REX_PLATFORM_ANDROID, "UI/Vulkan",
+                    "Require vertexPipelineStoresAndAtomics (vertex shader memory export) for Vulkan GPU "
+                    "emulation; off: a device without it is used and such draws are left out")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-// Apple Silicon / MoltenVK does not expose geometryShader or fillModeNonSolid;
-// default both to false on macOS so the device can still be selected.
-REXCVAR_DEFINE_BOOL(vulkan_require_geometry_shader, !REX_PLATFORM_MAC, "UI/Vulkan",
+REXCVAR_DEFINE_BOOL(vulkan_require_geometry_shader, !REX_PLATFORM_MAC && !REX_PLATFORM_ANDROID, "UI/Vulkan",
                     "Require geometryShader support for Vulkan GPU emulation (disable to allow "
                     "fallback primitive emulation paths)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -54,14 +57,24 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_fragment_shading_rate, true, "UI/Vulkan",
                     "pipelines' shading rate dynamic, so Eco mode (gpu_eco_shading_rate) can "
                     "coarsen the 3D scene's shading at any time. Off: Eco mode does nothing.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, !REX_PLATFORM_MAC, "UI/Vulkan",
+REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, !REX_PLATFORM_MAC && !REX_PLATFORM_ANDROID, "UI/Vulkan",
                     "Require fillModeNonSolid support for Vulkan GPU emulation (disable to "
                     "allow fallback to solid fill for line/point polygon modes)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Why the renderer could not start on the last Vulkan device it tried ("<GPU name>: <reason>"), empty while nothing
+// failed: the Android app shows it on its GPU driver page instead of closing without a word.
+extern "C" __attribute__((visibility("default"))) char rex_vulkan_failure_reason[256] = {};
+
 namespace rex {
 namespace ui {
 namespace vulkan {
+
+namespace {
+void NoteDeviceRejected(const char* device_name, const char* reason) {
+  std::snprintf(rex_vulkan_failure_reason, sizeof(rex_vulkan_failure_reason), "%s: %s", device_name, reason);
+}
+}  // namespace
 
 template <typename Structure, VkStructureType StructureType>
 struct VulkanFeatures {
@@ -125,6 +138,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
           "Vulkan device '{}' doesn't support the independentBlend feature "
           "required for GPU emulation",
           properties.deviceName);
+      NoteDeviceRejected(properties.deviceName, "no independentBlend");
       return nullptr;
     }
     if (!supported_features.fragmentStoresAndAtomics) {
@@ -132,20 +146,29 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
           "Vulkan device '{}' doesn't support fragmentStoresAndAtomics, which "
           "is required for Vulkan GPU emulation parity",
           properties.deviceName);
+      NoteDeviceRejected(properties.deviceName, "no fragmentStoresAndAtomics");
       return nullptr;
     }
     if (!supported_features.vertexPipelineStoresAndAtomics) {
+      if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics)) {
+        REXLOG_WARN(
+            "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics, but "
+            "vulkan_require_vertex_pipeline_stores_and_atomics=true",
+            properties.deviceName);
+        NoteDeviceRejected(properties.deviceName, "no vertexPipelineStoresAndAtomics");
+        return nullptr;
+      }
       REXLOG_WARN(
-          "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics, which "
-          "is required for Vulkan GPU emulation parity",
+          "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics: draws whose vertex shader "
+          "exports to memory will be left out",
           properties.deviceName);
-      return nullptr;
     }
     if (REXCVAR_GET(vulkan_require_geometry_shader) && !supported_features.geometryShader) {
       REXLOG_WARN(
           "Vulkan device '{}' doesn't support geometryShader, but "
           "vulkan_require_geometry_shader=true",
           properties.deviceName);
+      NoteDeviceRejected(properties.deviceName, "no geometryShader");
       return nullptr;
     }
     if (REXCVAR_GET(vulkan_require_fill_mode_non_solid) && !supported_features.fillModeNonSolid) {
@@ -153,6 +176,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
           "Vulkan device '{}' doesn't support fillModeNonSolid, but "
           "vulkan_require_fill_mode_non_solid=true",
           properties.deviceName);
+      NoteDeviceRejected(properties.deviceName, "no fillModeNonSolid");
       return nullptr;
     }
   }
@@ -340,6 +364,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
   if (with_swapchain && !device->extensions_.ext_KHR_swapchain) {
     REXLOG_WARN("Vulkan device '{}' doesn't support swapchains", properties.deviceName);
+    NoteDeviceRejected(properties.deviceName, "no swapchain support");
     return nullptr;
   }
 
@@ -521,6 +546,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
         "Vulkan device '{}' doesn't provide a graphics and compute queue "
         "family",
         properties.deviceName);
+    NoteDeviceRejected(properties.deviceName, "no graphics and compute queue");
     return nullptr;
   }
 
@@ -529,6 +555,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
         "Vulkan device '{}' doesn't provide a queue family that supports "
         "presentation",
         properties.deviceName);
+    NoteDeviceRejected(properties.deviceName, "no queue that can present");
     return nullptr;
   }
 
@@ -910,6 +937,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
         "Failed to create a Vulkan logical device from the physical device "
         "'{}': {}",
         properties.deviceName, vk::to_string(vk::Result(device_create_result)));
+    NoteDeviceRejected(properties.deviceName,
+                       ("device creation failed (" + vk::to_string(vk::Result(device_create_result)) + ")").c_str());
     return nullptr;
   }
 
@@ -1038,6 +1067,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
                 (memory_type_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "cached" : "");
   }
 
+  rex_vulkan_failure_reason[0] = 0;  // a device that works: an earlier one's rejection no longer matters
   return device;
 }
 

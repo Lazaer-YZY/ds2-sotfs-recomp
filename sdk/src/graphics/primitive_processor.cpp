@@ -40,6 +40,15 @@ REXCVAR_DEFINE_INT32(primitive_processor_cache_min_indices, 0, "GPU",
                      "Minimum indices for primitive processor cache")
     .range(0, 1000000);
 
+// The guest's big-endian 16-bit indices are normally bound as they are (guest DMA) and the vertex shader swaps
+// gl_VertexIndex back, so the host GPU sees byte-swapped index values. They are still one per vertex, but a
+// post-transform vertex cache that hashes on the low bits (constant within a mesh once swapped) would thrash. With
+// this, they are byte-swapped on the CPU into a per-frame host buffer (shared by the frame's two passes over the
+// same geometry) and the shader swaps nothing. Triangle-type draws without primitive reset only.
+REXCVAR_DEFINE_BOOL(gpu_host_endian_indices16, false, "GPU",
+                    "Byte-swap 16-bit guest index buffers on the CPU instead of in the vertex shader")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 // All these overrides are always safe to use as all backends are expected to
 // support triangle lists and line strips.
 // DEFINE_bool(
@@ -898,6 +907,35 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
                 xenos::GpuSwap(guest_indices[i], guest_index_endian) & xenos::kVertexIndexMask;
           }
           cacheable.index_buffer_type = ProcessedIndexBufferType::kHostConverted;
+          cacheable.host_shader_index_endian = xenos::Endian::kNone;
+          cache_transaction.SetNewResult(cacheable);
+        }
+      }
+
+      if (REXCVAR_GET(gpu_host_endian_indices16) &&
+          cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA &&
+          guest_index_format == xenos::IndexFormat::kInt16 &&
+          guest_index_endian == xenos::Endian::k8in16 && !guest_primitive_reset_enabled &&
+          host_vertex_shader_type == Shader::HostVertexShaderType::kVertex) {
+        CacheTransaction cache_transaction(
+            *this, CacheKey(guest_index_base, guest_draw_vertex_count, guest_index_format,
+                            guest_index_endian, false, xenos::PrimitiveType::kNone, true));
+        if (cache_transaction.GetFoundResult()) {
+          cacheable = *cache_transaction.GetFoundResult();
+        } else {
+          auto guest_indices = memory_.TranslatePhysical<const uint16_t*>(guest_index_base);
+          auto host_indices =
+              reinterpret_cast<uint16_t*>(RequestHostConvertedIndexBufferForCurrentFrame(
+                  xenos::IndexFormat::kInt16, guest_draw_vertex_count, true, guest_index_base,
+                  cacheable.host_index_buffer_handle));
+          if (!host_indices) {
+            return false;
+          }
+          for (uint32_t i = 0; i < guest_draw_vertex_count; ++i) {
+            host_indices[i] = uint16_t((guest_indices[i] >> 8) | (guest_indices[i] << 8));
+          }
+          cacheable.index_buffer_type = ProcessedIndexBufferType::kHostConverted;
+          cacheable.host_index_format = xenos::IndexFormat::kInt16;
           cacheable.host_shader_index_endian = xenos::Endian::kNone;
           cache_transaction.SetNewResult(cacheable);
         }

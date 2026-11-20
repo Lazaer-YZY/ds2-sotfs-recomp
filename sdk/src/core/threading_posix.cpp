@@ -571,6 +571,36 @@ class PosixConditionBase {
     }
   }
 
+  // REX_POSIX_NOTIFY_UNLOCKED (default on; "0", "false" or "no" = notify while holding mutex_, as before): events,
+  // semaphores and mutants decide under mutex_ whom to wake and notify after unlocking it, so the woken thread does
+  // not run straight into mutex_ still held by the signaler (a second sleep and wake-up per hand-off), and a mutant
+  // released with nobody waiting makes no futex call (DS2's zone switch releases ~17,000 uncontended mutants in one
+  // frame). No lost wake-up: whoever is counted in cond_waiters_ under mutex_ is inside cond_.wait* (or about to
+  // re-check the predicate under mutex_), and a notify that finds the signal already taken wakes a thread that sees
+  // the predicate false and sleeps again, as with any spurious wake-up. The signaler holds a reference to the
+  // object for the whole call (kernel object lookups), so the condition outlives the late notify.
+  static bool NotifyUnlockedEnabled() {
+    static const bool enabled = [] {
+      const char* value = std::getenv("REX_POSIX_NOTIFY_UNLOCKED");
+      return !(value && (value[0] == '0' || value[0] == 'f' || value[0] == 'F' || value[0] == 'n' ||
+                         value[0] == 'N'));
+    }();
+    return enabled;
+  }
+  // Under mutex_: the notify NotifyCondWaiters(wake_one) would do: 0 none, 1 one, 2 all.
+  int CondNotifyKind(bool wake_one) const {
+    if (!NotifyOneEnabled()) return 2;
+    if (!cond_waiters_) return 0;
+    return wake_one ? 1 : 2;
+  }
+  void CondNotify(int kind) {
+    if (kind == 1) {
+      cond_.notify_one();
+    } else if (kind == 2) {
+      cond_.notify_all();
+    }
+  }
+
   std::condition_variable cond_;
   std::mutex mutex_;
   // Threads inside cond_.wait* in Wait() (blocked, or woken and about to re-check); under mutex_,
@@ -600,6 +630,13 @@ class PosixCondition<Event> : public PosixConditionBase {
     signal_ = true;
     // An auto-reset event lets one wait through (post_execution resets it); a manual-reset event
     // stays signaled until Reset, so every waiter must wake.
+    if (NotifyUnlockedEnabled()) {
+      const int kind = CondNotifyKind(!manual_reset_);
+      NotifyMultiWaiters();
+      lock.unlock();
+      CondNotify(kind);
+      return true;
+    }
     NotifyCondWaiters(!manual_reset_);
     NotifyMultiWaiters();
     return true;
@@ -640,6 +677,13 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
     count_ += release_count;
     // One unit satisfies one wait: wake one waiter per release of 1 (each such release wakes
     // another), every waiter for a larger release as before.
+    if (NotifyUnlockedEnabled()) {
+      const int kind = CondNotifyKind(release_count == 1);
+      NotifyMultiWaiters();
+      lock.unlock();
+      CondNotify(kind);
+      return true;
+    }
     NotifyCondWaiters(release_count == 1);
     NotifyMultiWaiters();
     return true;
@@ -679,6 +723,13 @@ class PosixCondition<Mutant> : public PosixConditionBase {
       --count_;
       // Free to be acquired by another thread
       if (count_ == 0) {
+        if (NotifyUnlockedEnabled()) {
+          const int kind = (NotifyOneEnabled() && !cond_waiters_) ? 0 : 2;
+          NotifyMultiWaiters();
+          lock.unlock();
+          CondNotify(kind);
+          return true;
+        }
         cond_.notify_all();
         NotifyMultiWaiters();
       }

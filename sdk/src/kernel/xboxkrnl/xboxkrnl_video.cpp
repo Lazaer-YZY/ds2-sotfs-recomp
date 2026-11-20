@@ -13,6 +13,20 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <sys/resource.h>
+#include <time.h>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#include <vector>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -32,6 +46,7 @@
 #include <rex/runtime.h>
 #include <rex/system/export_resolver.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/frame_breakdown.h>
 #include <rex/system/xtypes.h>
 #include <rex/ui/flags.h>
 
@@ -466,9 +481,364 @@ REXCVAR_DEFINE_INT32(swap_min_vblanks, 0, "GPU",
     .range(0, 8)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(frame_timeline, false, "GPU",
+                    "Diagnostics: record the events that pace a frame (game swap and frame cap, vertical blanks, "
+                    "interrupts, the game's waits for the command processor, the command thread's waits) and log "
+                    "the last 200 ms when frames start to jitter (8 of the last 30 over 18 ms, none over 30; at most 12 dumps, "
+                    "20 s apart) and once while steady, for comparison");
+REXCVAR_DEFINE_UINT32(frame_breakdown_ms, 0, "GPU",
+                      "Diagnostics: for every game frame longer than this many ms, log how the presenting thread "
+                      "spent it (CPU, run queue, guest waits by call site, sleeps, frame cap), plus a summary of all "
+                      "frames every 10 s; 0 = off")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace {
 uint64_t g_last_swap_vblank = 0;
+
+extern "C" void (*rex_gpu_timeline_observer)(uint32_t kind, uint32_t value);
+// frame_timeline: the late-frame window and the dumps.
+void FrameTimelineOnSwap(uint64_t now_ns, uint64_t interval_ns) {
+  namespace fb = rex::system::frame_breakdown;
+  const bool on = REXCVAR_GET(frame_timeline);
+  if (on != fb::g_timeline_on.load(std::memory_order_relaxed)) {
+    fb::g_timeline_on.store(on, std::memory_order_relaxed);
+    static void (*const kObserver)(uint32_t, uint32_t) = [](uint32_t kind, uint32_t value) {
+      static const char kKinds[] = "?kKwWP";
+      rex::system::frame_breakdown::TimelineRecord(kind < 6 ? kKinds[kind] : '?', value);
+    };
+    rex_gpu_timeline_observer = on ? kObserver : nullptr;
+  }
+  if (!on) return;
+  static uint64_t late_bits = 0;  // the last 30 frames, 1 = over 18 ms
+  static uint64_t long_bits = 0;  // the last 30 frames, 1 = over 30 ms (loading, hitches: not the pacing jitter)
+  static uint32_t frames = 0, dumps = 0, steady_dumps = 0;
+  static uint64_t last_dump_ns = 0;
+  late_bits = ((late_bits << 1) | (interval_ns > 18000000 ? 1 : 0)) & ((uint64_t(1) << 30) - 1);
+  long_bits = ((long_bits << 1) | (interval_ns > 30000000 ? 1 : 0)) & ((uint64_t(1) << 30) - 1);
+  ++frames;
+  const int late = __builtin_popcountll(late_bits);
+  if (frames > 3600 && dumps < 12 && late >= 8 && !long_bits && now_ns - last_dump_ns > 20000000000ull) {
+    ++dumps;
+    last_dump_ns = now_ns;
+    fb::TimelineDump(200.0, "jitter: 8+ of the last 30 frames over 18 ms");
+  } else if (frames > 3600 && steady_dumps < 1 && late == 0 && frames % 600 == 0) {
+    ++steady_dumps;
+    fb::TimelineDump(200.0, "steady: none of the last 30 frames over 18 ms");
+  }
+}
+
+// frame_breakdown_ms: the presenting thread's clocks at its previous swap and the 10-s window sums.
+struct FrameBreakdown {
+  bool primed = false;
+  uint64_t swap_ns = 0, cpu_ns = 0, run_ns = 0, queue_ns = 0, wait_ns = 0, delay_ns = 0, proc_ns = 0;
+  uint32_t waits = 0;
+  long nvcsw = 0, nivcsw = 0, minflt = 0, majflt = 0;
+  uint64_t window_start_ns = 0;
+  uint32_t frames = 0, slow = 0;
+  double sum_ms = 0, sum_cpu = 0, sum_queue = 0, sum_wait = 0, sum_delay = 0, sum_cap = 0, sum_proc = 0,
+         sum_other = 0, max_ms = 0;
+  // Thread groups (ThreadGroups below): CPU and run-queue time per frame, summed over the window.
+  double sum_group_run[4] = {}, sum_group_queue[4] = {};
+  uint64_t sum_group_slices[4] = {};
+};
+FrameBreakdown g_fb;
+
+// The threads every frame of the game thread depends on, by group: the game's job workers, Havok's job threads, the
+// game's draw-command thread and the SDK's GPU command thread. Their CPU and run-queue time (schedstat) per game frame
+// tell a late frame's waits apart: workers busy (real work), workers runnable but not running (core contention), or
+// neither (wake-up latency). The thread list is refreshed with each 10-s window.
+struct ThreadGroups {
+  static constexpr int kGroups = 4;
+  static constexpr const char* kPrefix[kGroups] = {"MtTaskWorkerThr", "Havok Job Threa", "DrawCommandThre",
+                                                   "GPU Commands"};
+  static constexpr const char* kLabel[kGroups] = {"workers", "havok", "draw", "gpu"};
+  struct Entry {
+    int fd;
+    int group;
+  };
+  std::vector<Entry> entries;
+  uint64_t last_run[kGroups] = {}, last_queue[kGroups] = {}, last_slices[kGroups] = {};
+  bool primed = false;
+  // The /proc scan (~40 file reads, 1-2 ms) runs on a helper thread, not in the game's swap; the swap adopts the
+  // new list at its next frame (Adopt).
+  std::mutex pending_mutex;
+  std::vector<Entry> pending;
+  std::atomic<bool> has_pending{false}, scanning{false};
+
+  void Refresh() {
+    if (scanning.exchange(true)) return;
+    std::thread([this] {
+      std::vector<Entry> list = Scan();
+      {
+        std::lock_guard<std::mutex> lock(pending_mutex);
+        for (const Entry& e : pending) close(e.fd);  // an unadopted older list
+        pending = std::move(list);
+      }
+      has_pending.store(true, std::memory_order_release);
+      scanning.store(false);
+    }).detach();
+  }
+  // On the swap thread: switch to a finished scan (the next frame primes the new list's totals).
+  void Adopt() {
+    if (!has_pending.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(pending_mutex);
+#if defined(__linux__) || defined(__ANDROID__)
+    for (const Entry& e : entries) close(e.fd);
+#endif
+    entries = std::move(pending);
+    pending.clear();
+    has_pending.store(false, std::memory_order_relaxed);
+    primed = false;
+  }
+  static std::vector<Entry> Scan() {
+    std::vector<Entry> entries;
+#if defined(__linux__) || defined(__ANDROID__)
+    DIR* dir = opendir("/proc/self/task");
+    if (!dir) return entries;
+    while (dirent* d = readdir(dir)) {
+      if (d->d_name[0] < '0' || d->d_name[0] > '9') continue;
+      char path[96], comm[32] = {};
+      std::snprintf(path, sizeof(path), "/proc/self/task/%s/comm", d->d_name);
+      FILE* f = std::fopen(path, "r");
+      if (!f) continue;
+      const size_t n = std::fread(comm, 1, sizeof(comm) - 1, f);
+      std::fclose(f);
+      comm[n] = 0;
+      for (int g = 0; g < kGroups; ++g) {
+        if (std::strncmp(comm, kPrefix[g], std::strlen(kPrefix[g])) != 0) continue;
+        std::snprintf(path, sizeof(path), "/proc/self/task/%s/schedstat", d->d_name);
+        const int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) entries.push_back({fd, g});
+        break;
+      }
+    }
+    closedir(dir);
+#endif
+    return entries;
+  }
+  // Group totals now (CPU time, run-queue time, times scheduled in); false when unavailable.
+  bool Read(uint64_t run[kGroups], uint64_t queue[kGroups], uint64_t slices[kGroups]) {
+    for (int g = 0; g < kGroups; ++g) run[g] = queue[g] = slices[g] = 0;
+#if defined(__linux__) || defined(__ANDROID__)
+    if (entries.empty()) return false;
+    for (const Entry& e : entries) {
+      char buf[96];
+      const ssize_t n = pread(e.fd, buf, sizeof(buf) - 1, 0);
+      if (n <= 0) continue;
+      buf[n] = 0;
+      char* end = nullptr;
+      run[e.group] += std::strtoull(buf, &end, 10);
+      queue[e.group] += std::strtoull(end, &end, 10);
+      slices[e.group] += std::strtoull(end, nullptr, 10);
+    }
+    return true;
+#else
+    return false;
+#endif
+  }
+};
+ThreadGroups g_groups;
+
+// Busy share of each CPU since the previous call (/proc/stat), e.g. "0:12 1:8 ... 7:64" in percent; empty if unreadable.
+std::string CpuBusySinceLast() {
+  static std::vector<std::pair<uint64_t, uint64_t>> last;  // per CPU: busy, total jiffies
+  std::vector<std::pair<uint64_t, uint64_t>> now;
+#if defined(__linux__) || defined(__ANDROID__)
+  if (FILE* f = std::fopen("/proc/stat", "r")) {
+    char line[256];
+    while (std::fgets(line, sizeof(line), f)) {
+      if (std::strncmp(line, "cpu", 3) != 0 || line[3] < '0' || line[3] > '9') continue;
+      unsigned long long v[8] = {};
+      int cpu = -1;
+      if (std::sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu", &cpu, &v[0], &v[1], &v[2], &v[3],
+                      &v[4], &v[5], &v[6], &v[7]) < 5 || cpu < 0) {
+        continue;
+      }
+      if (size_t(cpu) >= now.size()) now.resize(size_t(cpu) + 1);
+      const uint64_t idle = v[3] + v[4];
+      uint64_t total = 0;
+      for (unsigned long long x : v) total += x;
+      now[size_t(cpu)] = {total - idle, total};
+    }
+    std::fclose(f);
+  }
+#endif
+  std::string out;
+  if (last.size() == now.size()) {
+    for (size_t cpu = 0; cpu < now.size(); ++cpu) {
+      const uint64_t total = now[cpu].second - last[cpu].second;
+      const uint64_t busy = now[cpu].first - last[cpu].first;
+      // An offline CPU (core_ctl parks some) shows no time at all.
+      out += fmt::format("{}{}:{}", out.empty() ? "" : " ", cpu, total ? fmt::format("{}", 100 * busy / total) : "off");
+    }
+  }
+  last = std::move(now);
+  return out;
+}
+
+uint64_t ClockNs(clockid_t id) {
+  timespec ts{};
+  clock_gettime(id, &ts);
+  return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+}
+
+// Called after the frame cap's wait (cap_ns long) with the swap's timestamp.
+void FrameBreakdownOnSwap(uint64_t now_ns, uint64_t cap_ns, uint32_t frame) {
+  namespace fb = rex::system::frame_breakdown;
+  const uint32_t threshold_ms = REXCVAR_GET(frame_breakdown_ms);
+  fb::g_on.store(threshold_ms != 0, std::memory_order_relaxed);
+  if (!threshold_ms) {
+    g_fb.primed = false;
+    return;
+  }
+  fb::ThreadWaits& w = fb::CurrentThreadWaits();
+  uint64_t run_ns = 0, queue_ns = 0;
+  fb::ThreadSchedStat(run_ns, queue_ns);
+  const uint64_t cpu_ns = ClockNs(CLOCK_THREAD_CPUTIME_ID);
+  const uint64_t proc_ns = ClockNs(CLOCK_PROCESS_CPUTIME_ID);
+  rusage ru{};
+#if defined(RUSAGE_THREAD)
+  getrusage(RUSAGE_THREAD, &ru);
+#endif
+  uint64_t group_run[ThreadGroups::kGroups], group_queue[ThreadGroups::kGroups],
+      group_slices[ThreadGroups::kGroups];
+  g_groups.Adopt();
+  const bool groups_ok = g_groups.Read(group_run, group_queue, group_slices) && g_groups.primed;
+  double group_run_ms[ThreadGroups::kGroups] = {}, group_queue_ms[ThreadGroups::kGroups] = {};
+  uint64_t group_slices_d[ThreadGroups::kGroups] = {};
+  bool groups_valid = groups_ok;
+  for (int g = 0; g < ThreadGroups::kGroups && groups_ok; ++g) {
+    // A listed thread that exited takes its time out of the total: skip this frame, find the threads again.
+    if (group_run[g] < g_groups.last_run[g] || group_queue[g] < g_groups.last_queue[g] ||
+        group_slices[g] < g_groups.last_slices[g]) {
+      groups_valid = false;
+    }
+  }
+  if (groups_ok && !groups_valid) g_groups.Refresh();
+  if (groups_valid) {
+    for (int g = 0; g < ThreadGroups::kGroups; ++g) {
+      group_run_ms[g] = (group_run[g] - g_groups.last_run[g]) / 1e6;
+      group_queue_ms[g] = (group_queue[g] - g_groups.last_queue[g]) / 1e6;
+      group_slices_d[g] = group_slices[g] - g_groups.last_slices[g];
+    }
+  }
+  if (g_fb.primed) {
+    const double ms = (now_ns - g_fb.swap_ns) / 1e6;
+    const double cpu = (cpu_ns - g_fb.cpu_ns) / 1e6;
+    const double queue = (queue_ns - g_fb.queue_ns) / 1e6;
+    const double wait = (w.wait_ns - g_fb.wait_ns) / 1e6;
+    const double delay = (w.delay_ns - g_fb.delay_ns) / 1e6;
+    const double cap = cap_ns / 1e6;
+    const double proc = (proc_ns - g_fb.proc_ns) / 1e6;
+    const double other = ms - cpu - queue - wait - delay - cap;
+    if (!g_fb.window_start_ns) g_fb.window_start_ns = now_ns;
+    ++g_fb.frames;
+    g_fb.sum_ms += ms;
+    g_fb.sum_cpu += cpu;
+    g_fb.sum_queue += queue;
+    g_fb.sum_wait += wait;
+    g_fb.sum_delay += delay;
+    g_fb.sum_cap += cap;
+    g_fb.sum_proc += proc;
+    g_fb.sum_other += other;
+    g_fb.max_ms = std::max(g_fb.max_ms, ms);
+    std::string groups;
+    for (int g = 0; g < ThreadGroups::kGroups && groups_valid; ++g) {
+      g_fb.sum_group_run[g] += group_run_ms[g];
+      g_fb.sum_group_queue[g] += group_queue_ms[g];
+      g_fb.sum_group_slices[g] += group_slices_d[g];
+      groups += fmt::format("{}{} {:.1f}/{:.1f} x{}", g ? ", " : "; threads cpu/run queue/runs: ",
+                            ThreadGroups::kLabel[g], group_run_ms[g], group_queue_ms[g], group_slices_d[g]);
+    }
+    if (ms > double(threshold_ms)) {
+      ++g_fb.slow;
+      std::string sites;
+      fb::WaitSite sorted[fb::ThreadWaits::kSites];
+      std::copy(std::begin(w.sites), std::end(w.sites), sorted);
+      std::sort(std::begin(sorted), std::end(sorted),
+                [](const fb::WaitSite& a, const fb::WaitSite& b) { return a.ns > b.ns; });
+      for (const fb::WaitSite& s : sorted) {
+        if (!s.count || s.ns < 200000) continue;
+        sites += fmt::format(" {}{:08X} {:.1f}ms x{};", (s.lr & 1) ? "delay@" : "", s.lr & ~1u, s.ns / 1e6,
+                             s.count);
+      }
+      REXKRNL_INFO("frame breakdown: frame {} {:.1f} ms at={:.3f}: cpu {:.1f} + run queue {:.1f} + waits {:.1f} "
+                   "({}) + delays {:.1f} + frame cap {:.1f} + other {:.1f}; process cpu {:.1f} ms; switches "
+                   "{}/{} (voluntary/forced), faults {}/{}; waits by site:{}{}",
+                   frame, ms, now_ns / 1e9, cpu, queue, wait, w.waits - g_fb.waits, delay, cap, other, proc,
+                   ru.ru_nvcsw - g_fb.nvcsw, ru.ru_nivcsw - g_fb.nivcsw, ru.ru_minflt - g_fb.minflt,
+                   ru.ru_majflt - g_fb.majflt, sites, groups);
+    }
+    if (now_ns - g_fb.window_start_ns >= 10000000000ull) {
+      const double n = std::max<uint32_t>(g_fb.frames, 1);
+      REXKRNL_INFO("frame breakdown (10 s): {} frames, avg {:.2f} ms (max {:.1f}, {} over {} ms) = cpu {:.2f} + run "
+                   "queue {:.2f} + waits {:.2f} + delays {:.2f} + frame cap {:.2f} + other {:.2f}; process cpu "
+                   "{:.1f} ms per frame",
+                   g_fb.frames, g_fb.sum_ms / n, g_fb.max_ms, g_fb.slow, threshold_ms, g_fb.sum_cpu / n,
+                   g_fb.sum_queue / n, g_fb.sum_wait / n, g_fb.sum_delay / n, g_fb.sum_cap / n,
+                   g_fb.sum_other / n, g_fb.sum_proc / n);
+      if (groups_valid) {
+        // Runs = times a thread of the group was scheduled in; queue / runs is the average wait for a core per run
+        // (tens of us: wake-up latency; milliseconds: queued behind other threads).
+        std::string avg;
+        for (int g = 0; g < ThreadGroups::kGroups; ++g) {
+          const double runs = double(g_fb.sum_group_slices[g]);
+          avg += fmt::format("{}{} {:.2f}/{:.2f} ({:.0f} runs, {:.0f} us queued each)", g ? ", " : "",
+                             ThreadGroups::kLabel[g], g_fb.sum_group_run[g] / n, g_fb.sum_group_queue[g] / n,
+                             runs / n, runs ? g_fb.sum_group_queue[g] * 1000.0 / runs : 0.0);
+        }
+        REXKRNL_INFO("frame breakdown (10 s): threads cpu/run queue per frame: {} ({} threads); cpu busy %: {}",
+                     avg, g_groups.entries.size(), CpuBusySinceLast());
+      }
+      FrameBreakdown next;
+      next.window_start_ns = now_ns;
+      g_fb = next;
+      g_groups.Refresh();  // threads come and go; the next frame primes the new list
+    }
+  }
+  if (!g_groups.primed) {
+    // An empty list (early in the boot) is rescanned at most once a second.
+    static uint64_t last_scan_ns = 0;
+    if (g_groups.entries.empty() && now_ns - last_scan_ns > 1000000000ull) {
+      last_scan_ns = now_ns;
+      g_groups.Refresh();
+    }
+    g_groups.Read(group_run, group_queue, group_slices);
+    g_groups.primed = !g_groups.entries.empty();
+  }
+  for (int g = 0; g < ThreadGroups::kGroups; ++g) {
+    g_groups.last_run[g] = group_run[g];
+    g_groups.last_queue[g] = group_queue[g];
+    g_groups.last_slices[g] = group_slices[g];
+  }
+  g_fb.primed = true;
+  g_fb.swap_ns = now_ns;
+  g_fb.cpu_ns = cpu_ns;
+  g_fb.run_ns = run_ns;
+  g_fb.queue_ns = queue_ns;
+  g_fb.wait_ns = w.wait_ns;
+  g_fb.delay_ns = w.delay_ns;
+  g_fb.waits = w.waits;
+  g_fb.proc_ns = proc_ns;
+  g_fb.nvcsw = ru.ru_nvcsw;
+  g_fb.nivcsw = ru.ru_nivcsw;
+  g_fb.minflt = ru.ru_minflt;
+  g_fb.majflt = ru.ru_majflt;
+  w.ResetSites();
+}
 }  // namespace
+
+// The host thread id of the game's presenting thread (the last VdSwap caller; 0 before the first swap), for app hooks
+// that treat the game's main thread differently (DS2: the GPU-wait timing for the prime-core governor). extern "C".
+extern "C" __attribute__((visibility("default"))) std::atomic<int> rex_swap_thread_tid{0};
+// Game frames presented (VdSwap calls) and the frame cap's total wait in them, for app-side pacing decisions (DS2: the
+// prime-core governor).
+extern "C" __attribute__((visibility("default"))) std::atomic<uint64_t> rex_swap_count{0};
+extern "C" __attribute__((visibility("default"))) std::atomic<uint64_t> rex_swap_cap_ns_total{0};
+// Called on the presenting thread for every game frame (after the frame cap), with the frame's interval and the cap's
+// wait; set by the app (DS2: the prime-core governor), nullptr = none.
+extern "C" __attribute__((visibility("default"))) std::atomic<void (*)(uint64_t interval_ns, uint64_t cap_ns)>
+    rex_swap_observer{nullptr};
 
 void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
                   mapped_void fetch_ptr,       // frontbuffer Direct3D 9 texture header fetch
@@ -478,23 +848,40 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
                   mapped_u32 frontbuffer_ptr,  // ptr to frontbuffer address
                   mapped_u32 texture_format_ptr, mapped_u32 color_space_ptr, mapped_u32 width,
                   mapped_u32 height) {
+  uint64_t cap_ns = 0;
+#if defined(__linux__) || defined(__ANDROID__)
+  {
+    thread_local const int tid = int(syscall(SYS_gettid));
+    rex_swap_thread_tid.store(tid, std::memory_order_relaxed);
+  }
+#endif
+  rex::system::frame_breakdown::TimelineMark('S');
   if (const int32_t min_vblanks = REXCVAR_GET(swap_min_vblanks); min_vblanks > 0) {
     if (auto* graphics_system = REX_KERNEL_STATE()->emulator()->graphics_system()) {
       const uint64_t target = g_last_swap_vblank + uint64_t(min_vblanks);
       if (graphics_system->vblank_count() < target) {
+        const uint64_t t0 = rex::system::frame_breakdown::NowNs();
         graphics_system->WaitForVblankCount(target, 200);
+        cap_ns = rex::system::frame_breakdown::NowNs() - t0;
       }
       g_last_swap_vblank = graphics_system->vblank_count();
     }
   }
   {
     const uint32_t i = g_guest_frames.load(std::memory_order_relaxed);
-    g_guest_frame_ns[i % kGuestFrameRing].store(
-        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                     std::chrono::steady_clock::now().time_since_epoch())
-                     .count()),
-        std::memory_order_relaxed);
+    const uint64_t now_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    const uint64_t previous_ns =
+        i ? g_guest_frame_ns[(i - 1) % kGuestFrameRing].load(std::memory_order_relaxed) : now_ns;
+    g_guest_frame_ns[i % kGuestFrameRing].store(now_ns, std::memory_order_relaxed);
     g_guest_frames.store(i + 1, std::memory_order_release);
+    rex::system::frame_breakdown::TimelineMark('C');
+    rex_swap_cap_ns_total.fetch_add(cap_ns, std::memory_order_relaxed);
+    rex_swap_count.fetch_add(1, std::memory_order_release);
+    if (auto* observer = rex_swap_observer.load(std::memory_order_acquire)) observer(now_ns - previous_ns, cap_ns);
+    FrameBreakdownOnSwap(now_ns, cap_ns, i);
+    FrameTimelineOnSwap(now_ns, now_ns - previous_ns);
   }
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
@@ -537,6 +924,14 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   assert_true(color_space == 0);  // RGB(0)
   assert_true(*width == 1 + gpu_fetch.size_2d.width);
   assert_true(*height == 1 + gpu_fetch.size_2d.height);
+  {
+    // The game's front buffer size, logged when it changes (what the video mode and resolution settings gave).
+    static std::atomic<uint32_t> logged_size{0};
+    const uint32_t size = (uint32_t(*width) << 16) | (uint32_t(*height) & 0xFFFF);
+    if (logged_size.exchange(size, std::memory_order_relaxed) != size) {
+      REXKRNL_INFO("VdSwap: front buffer {}x{}", uint32_t(*width), uint32_t(*height));
+    }
+  }
 
   // The caller seems to reserve 64 words (256b) in the primary ringbuffer
   // for this method to do what it needs. We just zero them out and send a

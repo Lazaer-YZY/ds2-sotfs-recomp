@@ -23,6 +23,8 @@
 #include <rex/math.h>
 #include <rex/cvar.h>
 
+#include <cstdlib>
+
 REXCVAR_DEFINE_BOOL(spirv_debug_texture_signs_unsigned, false, "GPU/Vulkan",
                     "Diagnostic: translate every texture fetch as unsigned (no sign or gamma "
                     "handling; wrong colours) to measure what sign specialization could save.");
@@ -47,6 +49,17 @@ REXCVAR_DEFINE_BOOL(spirv_texture_sign_branch, true, "GPU/Vulkan",
                     "a used component is gamma, instead of a per-component switch (which Mesa "
                     "flattens, running the gamma conversion for every fetched component). Same "
                     "results. Takes effect for shaders translated afterwards.");
+REXCVAR_DEFINE_STRING(gpu_debug_vfetch_zero_vertex_shader, "", "GPU/Vulkan",
+                      "Diagnostics: in vertex shaders with this ucode hash (hex), vertex fetches return zero words "
+                      "instead of reading guest memory (every vertex collapses, so nothing is rasterized): with "
+                      "gpu_debug_zero_scissor_vertex_shader for the same shader, the difference is what its vertex "
+                      "fetches cost")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(gpu_debug_trivial_vertex_shader, "", "GPU/Vulkan",
+                      "Diagnostics: vertex shaders with this ucode hash (hex) are translated without their ALU and "
+                      "fetch instructions (outputs and position stay zero): the same draws and vertex counts with no "
+                      "shader work, to measure the fixed per-draw and per-vertex cost")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(vulkan_texture_fetch_implicit_lod, true, "GPU/Vulkan",
                     "Sample pixel shader texture fetches with a computed LOD (except 3D / stacked "
                     "textures and register gradients) with implicit derivatives and the fetch "
@@ -66,8 +79,15 @@ bool SpirvShaderTranslator::IsVertexTextureSignSpecializationEnabled() {
   return false;
 }
 
+bool SpirvShaderTranslator::IsDebugTrivialShader() const {
+  static const uint64_t hash =
+      std::strtoull(REXCVAR_GET(gpu_debug_trivial_vertex_shader).c_str(), nullptr, 16);
+  return hash && is_vertex_shader() && current_shader().ucode_data_hash() == hash;
+}
+
 void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     const ParsedVertexFetchInstruction& instr) {
+  if (IsDebugTrivialShader()) return;
   UpdateInstructionPredication(instr.is_predicated, instr.predicate_condition);
 
   uint32_t used_result_components = instr.result.GetUsedResultComponents();
@@ -165,7 +185,12 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     // any games relying on out-of-bounds access. On Adreno 200 on Android (LG
     // P705), however, words (not full elements) out of glBufferData bounds
     // contain 0.
-    word_composite_constituents[word_count++] = LoadUint32FromSharedMemory(word_address);
+    static const uint64_t debug_zero_fetch_shader =
+        std::strtoull(REXCVAR_GET(gpu_debug_vfetch_zero_vertex_shader).c_str(), nullptr, 16);
+    word_composite_constituents[word_count++] =
+        debug_zero_fetch_shader && current_shader().ucode_data_hash() == debug_zero_fetch_shader
+            ? builder_->makeUintConstant(0)
+            : LoadUint32FromSharedMemory(word_address);
   }
   spv::Id words;
   if (word_count > 1) {

@@ -104,6 +104,9 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   /// Called after runtime is fully initialized, before window creation.
   virtual void OnPostSetup() {}
 
+  /// Called when the GPU plugin, graphics presentation or runtime setup failed, before the app gives up.
+  virtual void OnSetupFailed() {}
+
   /// Called after ImGui drawer is created. Add custom dialogs here.
   virtual void OnCreateDialogs(ui::ImGuiDrawer* drawer) { (void)drawer; }
 

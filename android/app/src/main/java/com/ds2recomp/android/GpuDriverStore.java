@@ -319,6 +319,24 @@ final class GpuDriverStore {
      * get in; a failed start on the system driver only reopens the page, where
      * a custom driver can be picked (#185).
      */
+    /**
+     * Why the renderer could not start in the last run when the process ended before the activity could pass it on
+     * (native setup failure, saved by the abort handler to files/graphics_failure.txt), or null. Read once.
+     */
+    static String takeGraphicsFailure(Context context) {
+        java.io.File file = new java.io.File(context.getExternalFilesDir(null), "graphics_failure.txt");
+        if (!file.isFile()) return null;
+        String reason = null;
+        try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
+            byte[] bytes = new byte[512];
+            int n = in.read(bytes);
+            if (n > 0) reason = new String(bytes, 0, n, java.nio.charset.StandardCharsets.UTF_8).trim();
+        } catch (java.io.IOException ignored) {
+        }
+        file.delete();
+        return reason == null || reason.isEmpty() ? null : reason;
+    }
+
     static String takeFailedBoot(Context context) {
         SharedPreferences preferences = preferences(context);
         String pending = preferences.getString(KEY_BOOT_PENDING, null);

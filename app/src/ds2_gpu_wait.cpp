@@ -26,7 +26,12 @@
 #include <rex/logging.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 REXCVAR_DEFINE_BOOL(ds2_gpu_wait_sleep, true, "DS2",
                     "v122: the game's Direct3D GPU wait (sub_829E9E28) sleeps until the command processor makes "
@@ -40,6 +45,10 @@ void Ds2WaitRingProgress(uint32_t seen, uint32_t max_us);
 }  // namespace rex::graphics
 
 extern "C" void __imp__sub_829E9E28(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" std::atomic<int> rex_swap_thread_tid;
+// The main thread's time in the game's GPU waits (this hook's iterations, sleeps included), for the prime-core
+// governor (ds2_affinity.cpp): a frame the main thread spends waiting for the GPU is not CPU-bound.
+extern "C" __attribute__((visibility("default"))) std::atomic<uint64_t> ds2_main_gpu_wait_ns{0};
 
 namespace {
 
@@ -68,7 +77,29 @@ uint32_t ReadPointer(const uint8_t* base, uint32_t record) {
 
 }  // namespace
 
+namespace {
+struct GpuWaitTimer {
+  bool on = false;
+  std::chrono::steady_clock::time_point t0;
+  GpuWaitTimer() {
+#if defined(__ANDROID__) || defined(__linux__)
+    thread_local const int tid = int(syscall(SYS_gettid));
+    on = tid == rex_swap_thread_tid.load(std::memory_order_relaxed);
+#endif
+    if (on) t0 = std::chrono::steady_clock::now();
+  }
+  ~GpuWaitTimer() {
+    if (on) {
+      ds2_main_gpu_wait_ns.fetch_add(
+          uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
+          std::memory_order_relaxed);
+    }
+  }
+};
+}  // namespace
+
 REX_HOOK_RAW(sub_829E9E28) {
+  GpuWaitTimer timer;
   const uint32_t record = ctx.r3.u32;
   static const bool enabled = REXCVAR_GET(ds2_gpu_wait_sleep);
   if (!enabled) {

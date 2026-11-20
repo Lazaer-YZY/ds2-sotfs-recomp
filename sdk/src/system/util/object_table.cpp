@@ -15,10 +15,39 @@
 #include <rex/logging.h>
 #include <rex/stream.h>
 #include <rex/system/util/object_table.h>
+
+#include <mutex>
+#include <vector>
+
+#include <rex/cvar.h>
+#include <rex/thread/mutex.h>
 #include <rex/system/xobject.h>
 #include <rex/system/xthread.h>
 
+REXCVAR_DEFINE_BOOL(kernel_object_table_own_lock, true, "Kernel",
+                    "The kernel's handle table has its own lock instead of the process-wide global critical "
+                    "region. Every handle-based kernel call (NtSetEvent, NtReleaseSemaphore, NtWaitForSingleObjectEx, "
+                    "...) looks its object up in the table, and the GPU command thread holds the global region "
+                    "while it requests shared memory: on the Thor the game thread waited ~1 ms and the command "
+                    "thread ~1.6 ms per frame for each other (Majula, 2026-11-19). Read once at start.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace rex::system::util {
+
+namespace {
+// The table's lock (kernel_object_table_own_lock), or the global critical region as before. Lock order: the global
+// region may be held when the table lock is taken, never the other way round (objects are released after the
+// table lock is dropped).
+std::recursive_mutex& TableMutex() {
+  static std::recursive_mutex own;
+  static std::recursive_mutex& m =
+      REXCVAR_GET(kernel_object_table_own_lock) ? own : rex::thread::global_critical_region::mutex();
+  return m;
+}
+std::unique_lock<std::recursive_mutex> AcquireTable() {
+  return std::unique_lock<std::recursive_mutex>(TableMutex());
+}
+}  // namespace
 
 ObjectTable::ObjectTable() {}
 
@@ -27,20 +56,26 @@ ObjectTable::~ObjectTable() {
 }
 
 void ObjectTable::Reset() {
-  auto global_lock = global_critical_region_.Acquire();
+  std::vector<XObject*> to_release;
+  {
+    auto table_lock = AcquireTable();
 
-  // Release all objects.
-  for (uint32_t n = 0; n < table_capacity_; n++) {
-    ObjectTableEntry& entry = table_[n];
-    if (entry.object) {
-      entry.object->Release();
+    // Release all objects (after the lock is dropped: an object's destruction may take the global region).
+    for (uint32_t n = 0; n < table_capacity_; n++) {
+      ObjectTableEntry& entry = table_[n];
+      if (entry.object) {
+        to_release.push_back(entry.object);
+      }
     }
-  }
 
-  table_capacity_ = 0;
-  last_free_entry_ = 0;
-  free(table_);
-  table_ = nullptr;
+    table_capacity_ = 0;
+    last_free_entry_ = 0;
+    free(table_);
+    table_ = nullptr;
+  }
+  for (XObject* object : to_release) {
+    object->Release();
+  }
 }
 
 X_STATUS ObjectTable::FindFreeSlot(uint32_t* out_slot) {
@@ -100,7 +135,7 @@ X_STATUS ObjectTable::AddHandle(XObject* object, X_HANDLE* out_handle) {
 
   uint32_t handle = 0;
   {
-    auto global_lock = global_critical_region_.Acquire();
+    auto global_lock = AcquireTable();
 
     // Find a free slot.
     uint32_t slot = 0;
@@ -146,7 +181,7 @@ X_STATUS ObjectTable::DuplicateHandle(X_HANDLE handle, X_HANDLE* out_handle) {
 }
 
 X_STATUS ObjectTable::RetainHandle(X_HANDLE handle) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = AcquireTable();
 
   ObjectTableEntry* entry = LookupTable(handle);
   if (!entry) {
@@ -158,7 +193,7 @@ X_STATUS ObjectTable::RetainHandle(X_HANDLE handle) {
 }
 
 namespace {
-// Takes the handle out of the table; the caller holds the global lock. The object loses its last
+// Takes the handle out of the table; the caller holds the table lock. The object loses its last
 // table reference, returned so it can be released once the lock is dropped.
 template <typename Table, typename Entry>
 X_STATUS QuitarHandle(Table* table, Entry* entry, X_HANDLE handle, rex::system::XObject** out_object) {
@@ -203,7 +238,7 @@ X_STATUS ObjectTable::ReleaseHandle(X_HANDLE handle) {
   XObject* to_release = nullptr;
   X_STATUS result = X_STATUS_SUCCESS;
   {
-    auto global_lock = global_critical_region_.Acquire();
+    auto global_lock = AcquireTable();
 
     ObjectTableEntry* entry = LookupTable(handle);
     if (!entry) {
@@ -232,7 +267,7 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
   XObject* to_release = nullptr;
   X_STATUS result;
   {
-    auto global_lock = global_critical_region_.Acquire();
+    auto global_lock = AcquireTable();
     handle = TranslateHandle(handle);
     if (!handle) {
       return X_STATUS_INVALID_HANDLE;
@@ -246,7 +281,7 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
 }
 
 std::vector<object_ref<XObject>> ObjectTable::GetAllObjects() {
-  auto lock = global_critical_region_.Acquire();
+  auto lock = AcquireTable();
   std::vector<object_ref<XObject>> results;
 
   for (uint32_t slot = 0; slot < table_capacity_; slot++) {
@@ -261,15 +296,21 @@ std::vector<object_ref<XObject>> ObjectTable::GetAllObjects() {
 }
 
 void ObjectTable::PurgeAllObjects() {
-  auto lock = global_critical_region_.Acquire();
-  for (uint32_t slot = 0; slot < table_capacity_; slot++) {
-    auto& entry = table_[slot];
-    if (entry.object && !entry.object->is_host_object()) {
-      entry.handle_ref_count = 0;
-      entry.object->Release();
+  std::vector<XObject*> to_release;
+  {
+    auto table_lock = AcquireTable();
+    for (uint32_t slot = 0; slot < table_capacity_; slot++) {
+      auto& entry = table_[slot];
+      if (entry.object && !entry.object->is_host_object()) {
+        entry.handle_ref_count = 0;
+        to_release.push_back(entry.object);
 
-      entry.object = nullptr;
+        entry.object = nullptr;
+      }
     }
+  }
+  for (XObject* object : to_release) {
+    object->Release();
   }
 }
 
@@ -279,7 +320,7 @@ ObjectTable::ObjectTableEntry* ObjectTable::LookupTable(X_HANDLE handle) {
     return nullptr;
   }
 
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = AcquireTable();
 
   // Lower 2 bits are ignored.
   uint32_t slot = GetHandleSlot(handle);
@@ -306,7 +347,7 @@ XObject* ObjectTable::LookupObject(X_HANDLE handle, bool already_locked) {
 
   XObject* object = nullptr;
   if (!already_locked) {
-    global_critical_region_.mutex().lock();
+    TableMutex().lock();
   }
 
   // Lower 2 bits are ignored.
@@ -326,14 +367,14 @@ XObject* ObjectTable::LookupObject(X_HANDLE handle, bool already_locked) {
   }
 
   if (!already_locked) {
-    global_critical_region_.mutex().unlock();
+    TableMutex().unlock();
   }
 
   return object;
 }
 
 void ObjectTable::GetObjectsByType(XObject::Type type, std::vector<object_ref<XObject>>* results) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = AcquireTable();
   for (uint32_t slot = 0; slot < table_capacity_; ++slot) {
     auto& entry = table_[slot];
     if (entry.object) {
@@ -379,7 +420,7 @@ void ObjectTable::RemoveNameMapping(const std::string_view name) {
 X_STATUS ObjectTable::GetObjectByName(const std::string_view name, X_HANDLE* out_handle) {
   // Names are case-insensitive.
   // Look up handle under name lock only -- do NOT hold name_mutex_ while
-  // acquiring global lock (RemoveHandle takes global -> name ordering).
+  // acquiring the table lock (RemoveHandle takes table -> name ordering).
   X_HANDLE handle;
   {
     std::lock_guard<std::mutex> name_lock(name_mutex_);
@@ -392,9 +433,9 @@ X_STATUS ObjectTable::GetObjectByName(const std::string_view name, X_HANDLE* out
   }
   *out_handle = handle;
 
-  // Retain under global lock via normal LookupObject path.
+  // Retain under the table lock via normal LookupObject path.
   // The handle may have been removed between releasing name_mutex_ and
-  // acquiring global lock -- LookupObject returns nullptr in that case.
+  // acquiring the table lock -- LookupObject returns nullptr in that case.
   auto obj = LookupObject(handle, false);
   if (obj) {
     obj->RetainHandle();

@@ -404,6 +404,19 @@ class VulkanTextureCache final : public TextureCache {
   // on Windows versions before 10, may have an allocation count limit as low as
   // 4096.
   VmaAllocator vma_allocator_ = VK_NULL_HANDLE;
+  // vulkan_texture_memory_block_mb: textures come from this pool of fixed-size blocks (the first
+  // vulkan_texture_memory_reserve_mb allocated at start and kept) instead of VMA's default blocks, which grow to
+  // 256 MB and are allocated (and zeroed by the kernel) on the command thread whenever a streamed texture does not
+  // fit, and freed again when they empty.
+  VmaPool texture_pool_ = VK_NULL_HANDLE;
+  // Creates a texture image from texture_pool_ (or VMA's default pools without it, or if the pool cannot hold it);
+  // logs creations slower than 1 ms (new memory).
+  VkResult CreateTextureImage(const VkImageCreateInfo& image_create_info, VkImage& image,
+                              VmaAllocation& allocation);
+public:
+  // One line: texture memory (pool blocks and their use, VMA's other blocks), for the 10-s GPU timing window.
+  void LogMemoryStats();
+private:
 
   static const HostFormatPair kBestHostFormats[64];
   static const HostFormatPair kHostFormatGBGRUnaligned;

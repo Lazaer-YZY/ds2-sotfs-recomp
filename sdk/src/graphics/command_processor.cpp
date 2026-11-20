@@ -36,6 +36,7 @@
 #include <rex/memory.h>
 #include <rex/memory/ring_buffer.h>
 #include <rex/stream.h>
+#include <rex/system/frame_breakdown.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 
@@ -172,6 +173,7 @@ bool IsPixelShaderSkipped(uint64_t hash) {
 }
 
 DS2_PLUGIN_EXPORT void Ds2WaitRingProgress(uint32_t seen, uint32_t max_us) {
+  rex::system::frame_breakdown::TimelineMark('r');
   g_ds2_ring_waiters.fetch_add(1);
   {
     std::unique_lock<std::mutex> lock(g_ds2_ring_mutex);
@@ -179,6 +181,7 @@ DS2_PLUGIN_EXPORT void Ds2WaitRingProgress(uint32_t seen, uint32_t max_us) {
                            [seen] { return g_ds2_ring_progress.load() != seen; });
   }
   g_ds2_ring_waiters.fetch_sub(1);
+  rex::system::frame_breakdown::TimelineMark('R');
 }
 
 namespace {
@@ -323,6 +326,7 @@ void CommandProcessor::WorkerThreadMain() {
     uint32_t write_ptr_index = write_ptr_index_.load();
     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
+      const auto stall_start = std::chrono::steady_clock::now();
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
@@ -348,6 +352,9 @@ void CommandProcessor::WorkerThreadMain() {
         write_ptr_index = write_ptr_index_.load();
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
+      stall_ns_total_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - stall_start)
+                                      .count());
       ReturnFromWait();
       if (!worker_running_ || !pending_fns_.empty()) {
         continue;

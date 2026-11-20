@@ -51,6 +51,12 @@ REXCVAR_DEFINE_BOOL(gpu_redirect_msaa_depth_clears, true, "GPU",
                     "pixels are the same EDRAM bytes. Dark Souls II clears every point-light shadow "
                     "map of its atlas this way (2 x 277 tiles transferred per map, ~2-5 ms a frame "
                     "in the hut cutscene).");
+REXCVAR_DEFINE_BOOL(gpu_ownership_from_first_row, true, "GPU",
+                    "A 1x draw takes ownership of its render targets' EDRAM only from the first tile row it can "
+                    "write (the host scissor's top, or the exact top of a rectangle draw) instead of from row 0. "
+                    "Dark Souls II clears the last 8 rows of a 640x360 depth buffer with a rectangle while an 8888 "
+                    "target shares its top rows: the whole-range claim moved 48 tiles to the depth buffer and the "
+                    "next 8888 draw moved them back, 9 transfers a frame at Majula.");
 REXCVAR_DEFINE_BOOL(gpu_log_transfer_draws, false, "GPU",
                     "Diagnostic: log each distinct ownership transfer situation once with "
                     "the state of the draw that needs it.");
@@ -744,6 +750,8 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   // (gpu_redirect_msaa_depth_clears).
   bool clear_like = false;
   uint64_t clear_like_value = 0;
+  // The first pixel row a single-rectangle draw covers (exact), for gpu_ownership_from_first_row; -1 unknown.
+  int32_t draw_coverage_top = -1;
   uint32_t skip_overwritten_transfers = REXCVAR_GET(gpu_skip_overwritten_transfers);
   bool cutout_depth_used = (depth_and_color_rts_used_bits & 0b1) != 0;
   uint32_t cutout_color_used = depth_and_color_rts_used_bits >> 1;
@@ -839,6 +847,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
         top = std::max(top, int32_t(scissor.offset[1]));
         right = std::min(right, scissor_right);
         bottom = std::min(bottom, scissor_bottom);
+        draw_coverage_top = top;
         cutout_reject = 5;
         if (right > left && bottom > top) {
           cutout_reject = 0;
@@ -994,10 +1003,30 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     }
   }
 
+  // gpu_ownership_from_first_row: tile rows above the first row the draw can write are left to
+  // their owners. The host scissor bounds every write; a rectangle draw's own top (one row of
+  // margin for rounding) bounds it further.
+  uint32_t first_row_tiles = 0;
+  if (REXCVAR_GET(gpu_ownership_from_first_row) && !interlock_barrier_only && !draw_samples_as_pixels_ &&
+      msaa_samples == xenos::MsaaSamples::k1X) {
+    draw_util::Scissor first_row_scissor;
+    draw_util::GetScissor(regs, first_row_scissor);
+    int32_t first_row = int32_t(first_row_scissor.offset[1]);
+    if (draw_coverage_top >= 0) {
+      first_row = std::max(first_row, draw_coverage_top - 1);
+    }
+    first_row_tiles = uint32_t(std::max(first_row, int32_t(0))) / xenos::kEdramTileHeightSamples;
+  }
   for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
     const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
     uint32_t rt_bit_index = rt_base_index.second;
-    ChangeOwnership(rt_keys[rt_bit_index], 0, rt_lengths_tiles[i],
+    uint32_t start_tiles = std::min(
+        first_row_tiles * (pitch_tiles_at_32bpp << ((rts_are_64bpp >> rt_bit_index) & 1)),
+        rt_lengths_tiles[i]);
+    if (start_tiles >= rt_lengths_tiles[i]) {
+      continue;
+    }
+    ChangeOwnership(rt_keys[rt_bit_index], start_tiles, rt_lengths_tiles[i] - start_tiles,
                     interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index],
                     last_update_transfer_cutout_valid_ ? &last_update_transfer_cutout_
                                                        : nullptr);

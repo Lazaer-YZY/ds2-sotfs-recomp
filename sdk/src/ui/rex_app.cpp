@@ -241,6 +241,7 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
   auto status = runtime_->Setup(ppc_info_, std::move(config_));
   if (XFAILED(status)) {
     REXLOG_ERROR("Runtime setup failed: {:08X}", status);
+    OnSetupFailed();
     return false;
   }
 
@@ -324,6 +325,7 @@ bool ReXApp::SetupPresentation() {
       auto msg =
           fmt::format("Failed to load GPU plugin '{}'. See log for details.", config_.gpu_plugin);
       REXLOG_ERROR("{}", msg);
+      OnSetupFailed();
       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
       return false;
     }
@@ -333,6 +335,7 @@ bool ReXApp::SetupPresentation() {
     X_STATUS status = config_.graphics->SetupPresentation(&app_context());
     if (XFAILED(status)) {
       REXLOG_ERROR("Graphics presentation setup failed: {:08X}", status);
+      OnSetupFailed();
       return false;
     }
   }

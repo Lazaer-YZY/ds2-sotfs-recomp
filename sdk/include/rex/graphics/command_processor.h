@@ -196,6 +196,9 @@ class CommandProcessor {
   WaitRegMemStats wait_reg_mem_stats_;
   // Total time WAIT_REG_MEM waited (always counted; the Vulkan slow-frame breakdown reads it).
   uint64_t wait_reg_mem_us_total_ = 0;
+  // Total time the command thread waited for the game's commands (an empty ring), in ns (always counted: a few
+  // clock reads per frame; the Vulkan slow-frame breakdown reads it).
+  uint64_t stall_ns_total_ = 0;
   std::mutex vblank_wake_mutex_;
   std::condition_variable vblank_wake_cv_;
   uint64_t vblank_wake_generation_ = 0;

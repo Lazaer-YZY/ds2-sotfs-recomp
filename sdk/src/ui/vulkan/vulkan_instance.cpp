@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -27,11 +29,203 @@
 #endif
 
 REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan debug messages");
-
+REXCVAR_DEFINE_STRING(vulkan_emulate_gpu, "", "UI/Vulkan",
+                      "Testing on a GPU that has everything: hide the Vulkan features and formats another GPU "
+                      "family lacks, so the renderer takes that family's fallback paths here. \"mali\": Arm's "
+                      "Mali driver (no vertex-stage stores, clip or cull distances, non-solid fill, depth clamp, "
+                      "dual-source blending, logic ops, multiple viewports, sparse memory, BC textures, "
+                      "mirror-once sampling; 16-bit normalized formats not renderable). \"mali_vk11\": the same "
+                      "on a Vulkan 1.1 driver (older Mali phones). \"panvk\": \"mali\" and no geometry or "
+                      "tessellation shaders (Mesa PanVK). Only the renderer's choices are "
+                      "emulated, not the other driver's behaviour or speed.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(vulkan_emulate_gpu_keep, "", "UI/Vulkan",
+                      "With vulkan_emulate_gpu: feature groups to leave visible, to find which one a difference "
+                      "comes from (comma list: norm16 = 16-bit normalized render targets, bc, clip = clip and cull "
+                      "distances, depthclamp, mirror = mirror-once sampling, stores = vertex-stage stores, misc = "
+                      "non-solid fill, dual-source blending, logic ops, multiple viewports)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex {
 namespace ui {
 namespace vulkan {
+
+namespace {
+// vulkan_emulate_gpu: the instance's physical device queries, filtered. Features come from Vulkan hardware database
+// reports of Arm's Mali driver (r25-r50, 2026; depth clamp is missing on the older ones, so it is hidden too);
+// PanVK has no geometry shaders (its geometry shader support was still being written in 2026). Which 16-bit
+// normalized formats Mali can render to is not known here: they are hidden to take the fallback.
+enum class EmulatedGpu { kNone, kMali, kMaliVk11, kPanVk };
+EmulatedGpu g_emulated_gpu = EmulatedGpu::kNone;
+PFN_vkEnumerateDeviceExtensionProperties g_real_enumerate_device_extensions = nullptr;
+PFN_vkGetPhysicalDeviceProperties g_real_get_properties = nullptr;
+PFN_vkGetPhysicalDeviceProperties2 g_real_get_properties_2 = nullptr;
+PFN_vkGetPhysicalDeviceFeatures g_real_get_features = nullptr;
+PFN_vkGetPhysicalDeviceFeatures2 g_real_get_features_2 = nullptr;
+PFN_vkGetPhysicalDeviceFormatProperties g_real_get_format_properties = nullptr;
+// vulkan_emulate_gpu_keep: groups left visible.
+bool g_keep_norm16 = false, g_keep_bc = false, g_keep_clip = false, g_keep_depth_clamp = false, g_keep_mirror = false,
+     g_keep_stores = false, g_keep_misc = false;
+
+void HideEmulatedFeatures(VkPhysicalDeviceFeatures& features) {
+  if (!g_keep_stores) features.vertexPipelineStoresAndAtomics = VK_FALSE;
+  if (!g_keep_clip) {
+    features.shaderClipDistance = VK_FALSE;
+    features.shaderCullDistance = VK_FALSE;
+  }
+  if (!g_keep_depth_clamp) features.depthClamp = VK_FALSE;
+  if (!g_keep_misc) {
+    features.fillModeNonSolid = VK_FALSE;
+    features.dualSrcBlend = VK_FALSE;
+    features.logicOp = VK_FALSE;
+    features.multiViewport = VK_FALSE;
+  }
+  if (!g_keep_bc) features.textureCompressionBC = VK_FALSE;
+  features.sparseBinding = VK_FALSE;
+  features.sparseResidencyBuffer = VK_FALSE;
+  features.sparseResidencyImage2D = VK_FALSE;
+  features.sparseResidencyImage3D = VK_FALSE;
+  features.sparseResidencyAliased = VK_FALSE;
+  if (g_emulated_gpu == EmulatedGpu::kPanVk) {
+    features.geometryShader = VK_FALSE;
+    features.tessellationShader = VK_FALSE;
+  }
+}
+
+VKAPI_ATTR void VKAPI_CALL EmulatedGetFeatures(VkPhysicalDevice physical_device,
+                                               VkPhysicalDeviceFeatures* features) {
+  g_real_get_features(physical_device, features);
+  HideEmulatedFeatures(*features);
+}
+
+VKAPI_ATTR void VKAPI_CALL EmulatedGetFeatures2(VkPhysicalDevice physical_device,
+                                                VkPhysicalDeviceFeatures2* features) {
+  g_real_get_features_2(physical_device, features);
+  HideEmulatedFeatures(features->features);
+  for (auto* next = static_cast<VkBaseOutStructure*>(features->pNext); next; next = next->pNext) {
+    if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES && !g_keep_mirror) {
+      auto* features_1_2 = reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(next);
+      features_1_2->samplerMirrorClampToEdge = VK_FALSE;
+      features_1_2->uniformBufferStandardLayout = VK_FALSE;
+    }
+  }
+}
+
+// The extensions Arm's Mali driver lacks among those the renderer looks for (mirror-once sampling, which a Vulkan 1.1
+// device would otherwise get from the extension).
+VKAPI_ATTR VkResult VKAPI_CALL EmulatedEnumerateDeviceExtensions(VkPhysicalDevice physical_device,
+                                                                 const char* layer_name, uint32_t* count,
+                                                                 VkExtensionProperties* extensions) {
+  uint32_t real_count = 0;
+  VkResult result = g_real_enumerate_device_extensions(physical_device, layer_name, &real_count, nullptr);
+  if (result != VK_SUCCESS) return result;
+  std::vector<VkExtensionProperties> all(real_count);
+  result = g_real_enumerate_device_extensions(physical_device, layer_name, &real_count, all.data());
+  if (result < 0) return result;
+  all.resize(real_count);
+  if (!g_keep_mirror) all.erase(std::remove_if(all.begin(), all.end(),
+                           [](const VkExtensionProperties& e) {
+                             return std::strcmp(e.extensionName, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) == 0;
+                           }),
+            all.end());
+  if (!extensions) {
+    *count = uint32_t(all.size());
+    return VK_SUCCESS;
+  }
+  const uint32_t written = std::min(*count, uint32_t(all.size()));
+  std::copy_n(all.begin(), written, extensions);
+  *count = written;
+  return written < all.size() ? VK_INCOMPLETE : VK_SUCCESS;
+}
+
+// mali_vk11: the device reports Vulkan 1.1 (the renderer then uses extensions instead of 1.2 / 1.3 core features).
+VKAPI_ATTR void VKAPI_CALL EmulatedGetProperties(VkPhysicalDevice physical_device,
+                                                 VkPhysicalDeviceProperties* properties) {
+  g_real_get_properties(physical_device, properties);
+  properties->apiVersion = std::min(properties->apiVersion, uint32_t(VK_MAKE_API_VERSION(0, 1, 1, 0)));
+}
+
+VKAPI_ATTR void VKAPI_CALL EmulatedGetProperties2(VkPhysicalDevice physical_device,
+                                                  VkPhysicalDeviceProperties2* properties) {
+  g_real_get_properties_2(physical_device, properties);
+  properties->properties.apiVersion =
+      std::min(properties->properties.apiVersion, uint32_t(VK_MAKE_API_VERSION(0, 1, 1, 0)));
+}
+
+VKAPI_ATTR void VKAPI_CALL EmulatedGetFormatProperties(VkPhysicalDevice physical_device, VkFormat format,
+                                                       VkFormatProperties* properties) {
+  g_real_get_format_properties(physical_device, format, properties);
+  if (format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && format <= VK_FORMAT_BC7_SRGB_BLOCK) {
+    if (!g_keep_bc) *properties = {};
+    return;
+  }
+  if (g_keep_norm16) return;
+  switch (format) {
+    case VK_FORMAT_R16_UNORM:
+    case VK_FORMAT_R16_SNORM:
+    case VK_FORMAT_R16G16_UNORM:
+    case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16B16A16_UNORM:
+    case VK_FORMAT_R16G16B16A16_SNORM: {
+      constexpr VkFormatFeatureFlags kRender =
+          VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+      properties->linearTilingFeatures &= ~kRender;
+      properties->optimalTilingFeatures &= ~kRender;
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+void InstallGpuEmulation(VulkanInstance::Functions& ifn) {
+  const std::string name = REXCVAR_GET(vulkan_emulate_gpu);
+  {
+    const std::string keep = "," + REXCVAR_GET(vulkan_emulate_gpu_keep) + ",";
+    auto has = [&keep](const char* group) { return keep.find(std::string(",") + group + ",") != std::string::npos; };
+    g_keep_norm16 = has("norm16");
+    g_keep_bc = has("bc");
+    g_keep_clip = has("clip");
+    g_keep_depth_clamp = has("depthclamp");
+    g_keep_mirror = has("mirror");
+    g_keep_stores = has("stores");
+    g_keep_misc = has("misc");
+  }
+  if (name.empty()) return;
+  if (name == "mali") {
+    g_emulated_gpu = EmulatedGpu::kMali;
+  } else if (name == "mali_vk11") {
+    g_emulated_gpu = EmulatedGpu::kMaliVk11;
+  } else if (name == "panvk") {
+    g_emulated_gpu = EmulatedGpu::kPanVk;
+  } else {
+    REXLOG_WARN("vulkan_emulate_gpu: unknown GPU family '{}' (mali, mali_vk11, panvk); nothing hidden", name);
+    return;
+  }
+  if (g_emulated_gpu == EmulatedGpu::kMaliVk11) {
+    g_real_get_properties = ifn.vkGetPhysicalDeviceProperties;
+    ifn.vkGetPhysicalDeviceProperties = EmulatedGetProperties;
+    if (ifn.vkGetPhysicalDeviceProperties2) {
+      g_real_get_properties_2 = ifn.vkGetPhysicalDeviceProperties2;
+      ifn.vkGetPhysicalDeviceProperties2 = EmulatedGetProperties2;
+    }
+  }
+  g_real_get_features = ifn.vkGetPhysicalDeviceFeatures;
+  ifn.vkGetPhysicalDeviceFeatures = EmulatedGetFeatures;
+  if (ifn.vkGetPhysicalDeviceFeatures2) {
+    g_real_get_features_2 = ifn.vkGetPhysicalDeviceFeatures2;
+    ifn.vkGetPhysicalDeviceFeatures2 = EmulatedGetFeatures2;
+  }
+  g_real_get_format_properties = ifn.vkGetPhysicalDeviceFormatProperties;
+  ifn.vkGetPhysicalDeviceFormatProperties = EmulatedGetFormatProperties;
+  g_real_enumerate_device_extensions = ifn.vkEnumerateDeviceExtensionProperties;
+  ifn.vkEnumerateDeviceExtensionProperties = EmulatedEnumerateDeviceExtensions;
+  REXLOG_WARN("vulkan_emulate_gpu: the renderer sees the features and formats of {} (testing only)",
+              g_emulated_gpu == EmulatedGpu::kMali       ? "Arm's Mali driver"
+              : g_emulated_gpu == EmulatedGpu::kMaliVk11 ? "Arm's Mali driver, Vulkan 1.1"
+                                                         : "Mesa PanVK on Mali");
+}
+}  // namespace
 
 std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
                                                        const bool try_enable_validation) {
@@ -483,6 +677,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     REXLOG_ERROR("Failed to get all Vulkan instance function pointers");
     return nullptr;
   }
+  InstallGpuEmulation(ifn);
 
   // Check whether a surface can be created.
 

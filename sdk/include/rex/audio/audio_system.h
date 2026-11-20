@@ -33,6 +33,9 @@ constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
 class AudioDriver;
 class XmaDecoder;
 
+// The calling thread gets the audio_thread_nice scheduler priority (Android/Linux; audio_system.cpp).
+void RaiseAudioThreadPriority(const char* name);
+
 class AudioSystem : public system::IAudioSystem {
  public:
   virtual ~AudioSystem();

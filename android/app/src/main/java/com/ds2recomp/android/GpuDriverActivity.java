@@ -36,9 +36,10 @@ import java.util.Set;
  * (Turnip on Qualcomm, PanVK on Mali), choose how it loads, and download
  * packages from the device's sources in {@link GpuDriverCatalog}.
  *
- * It is the launcher activity. On a Qualcomm or Mali device it shows once,
- * before the first game start, and again after a start with a custom driver
- * that never reached the game; otherwise it hands straight over to the game.
+ * It is the launcher activity. On a Qualcomm device without the bundled
+ * Turnip it shows once, before the first game start; on any device it shows
+ * again after a start that never reached the game or whose renderer could not
+ * start (with the reason); otherwise it hands straight over to the game.
  * The CTRL dialog's "GPU driver" button opens it while playing; changing the
  * driver or its loading mode then restarts the process, because the driver is
  * bound before the Vulkan instance.
@@ -76,6 +77,9 @@ public final class GpuDriverActivity extends Activity {
         GameStorage.prepare(this);
         fromGame = getIntent().getBooleanExtra(EXTRA_FROM_GAME, false);
         graphicsFailure = getIntent().getStringExtra(EXTRA_GRAPHICS_FAILURE);
+        // A renderer that failed during native setup aborts the process; its reason waits in a file.
+        String savedFailure = GpuDriverStore.takeGraphicsFailure(this);
+        if (graphicsFailure == null) graphicsFailure = savedFailure;
         vendor = GpuDriverStore.vendor();
         gpuName = GpuDriverStore.gpuModel();
         if (vendor == GpuDriverStore.Vendor.MALI) {
@@ -93,11 +97,14 @@ public final class GpuDriverActivity extends Activity {
                 return;
             }
             failedDriver = GpuDriverStore.takeFailedBoot(this);
-            // Adreno: the bundled Turnip needs no first-run choice.
+            // Adreno: the bundled Turnip needs no first-run choice. Mali: the
+            // first start uses Arm's system driver (the renderer does without
+            // the features it lacks); a failed start comes back here with the
+            // reason, and PanVK is offered then.
             boolean adreno = vendor == GpuDriverStore.Vendor.ADRENO
                 && GpuDriverStore.bundledTurnip(this) != null;
             if (failedDriver == null && graphicsFailure == null
-                    && (adreno || GpuDriverStore.choiceMade(this))) {
+                    && (adreno || isMali() || GpuDriverStore.choiceMade(this))) {
                 launchGame();
                 return;
             }
@@ -201,7 +208,7 @@ public final class GpuDriverActivity extends Activity {
             } else {
                 notice = "The Mali system driver cannot run the game: " + graphicsFailure + ". "
                     + (maliSupport == GpuDriverCatalog.MaliSupport.UNSUPPORTED
-                        ? "No driver can run the game on this GPU."
+                        ? "There is no other driver for this GPU."
                         : "Download PanVK-kbase below, select it and start the game.");
             }
         } else if (failedDriver != null) {
@@ -257,22 +264,22 @@ public final class GpuDriverActivity extends Activity {
 
     private void addMaliIntroduction(LinearLayout page) {
         String gpu = gpuName != null ? gpuName : "Mali (model unknown)";
+        page.addView(dim("GPU: " + gpu));
+        page.addView(dim("The game uses Arm's own Mali driver (the system driver) unless you pick another one. "
+            + "That driver lacks some Vulkan features (clip distances, vertex-stage stores, BC textures); the "
+            + "renderer does without them. Mali support has not been tested on a Mali device yet: reports are "
+            + "welcome."));
         if (maliSupport == GpuDriverCatalog.MaliSupport.UNSUPPORTED) {
             String name = GpuDriverCatalog.maliName(gpuName);
-            page.addView(dim("GPU: " + gpu));
-            TextView none = text("No usable driver for this GPU" + (name != null ? " (" + name + ")" : "") + ".", 15f, true);
-            none.setTextColor(Color.rgb(255, 196, 80));
-            page.addView(none);
-            page.addView(dim("The game needs a " + MALI_GPUS + ". The system driver stays selectable, "
-                + "but the game does not start with it on this GPU."));
+            page.addView(dim("There is no PanVK build for this GPU" + (name != null ? " (" + name + ")" : "")
+                + ": PanVK-kbase needs a " + MALI_GPUS + ", so the system driver is the only choice."));
             return;
         }
-        StringBuilder about = new StringBuilder("GPU: ").append(gpu)
-            .append("\nRecommended: PanVK-kbase ").append(GpuDriverCatalog.PANVK_RECOMMENDED_TAG);
+        StringBuilder about = new StringBuilder("If the system driver does not start the game or draws it wrongly: PanVK-kbase ")
+            .append(GpuDriverCatalog.PANVK_RECOMMENDED_TAG);
         if (maliSupport == GpuDriverCatalog.MaliSupport.UNTESTED) about.append(" (not yet tested on this GPU by its author)");
         page.addView(dim(about.toString()));
-        page.addView(dim("Arm's Mali driver lacks features the game needs, so the game does not start with the "
-            + "system driver; it stays selectable. PanVK-kbase is an experimental open-source Mesa driver for "
+        page.addView(dim("PanVK-kbase is an experimental open-source Mesa driver for "
             + MALI_GPUS + ". Its author supports Android 15 and newer; Android 13 and 14 may not work"
             + (android.os.Build.VERSION.SDK_INT < GpuDriverStore.PANVK_LOWEST_API
                 ? ", and this device's Android is too old for it." : ".")
@@ -300,7 +307,7 @@ public final class GpuDriverActivity extends Activity {
         }
         if (!turnipOnly) {
             addChoice(GpuDriverStore.SYSTEM_DRIVER, GpuDriverStore.SYSTEM_DRIVER_NAME,
-                isMali() ? "The device's own Mali driver; the game does not start with it"
+                isMali() ? "Arm's Mali driver shipped with this device"
                          : "The Vulkan driver shipped with this device", null);
         }
         for (GpuDriverStore.Installed driver : installed) {

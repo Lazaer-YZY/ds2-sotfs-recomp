@@ -180,14 +180,16 @@ if has launch; then
   RUN_SECS=${DS2_RUN_SECS:-120}
   echo "running for ${RUN_SECS}s ..."
   elapsed=0
+  rm -f "$DEVICE_LOGS/STOP_RUN"
   for t in ${DS2_SCREENSHOTS:-}; do
-    [ "$t" -gt "$elapsed" ] && { sleep $((t - elapsed)); elapsed=$t; }
+    # One second at a time, so STOP_RUN also ends the wait for a late screenshot.
+    while [ "$elapsed" -lt "$t" ] && [ ! -e "$DEVICE_LOGS/STOP_RUN" ]; do sleep 1; elapsed=$((elapsed + 1)); done
+    [ -e "$DEVICE_LOGS/STOP_RUN" ] && break
     "${ADB[@]}" exec-out screencap -p > "$DEVICE_LOGS/shot_${stamp}_${t}s.png" 2>/dev/null </dev/null || true
     echo "screenshot ${t}s: $DEVICE_LOGS/shot_${stamp}_${t}s.png"
   done
   # Live sessions end early when out/device/STOP_RUN appears (touch it; it is removed here): the normal end follows
   # (logs, force-stop, sleep; ab_run.sh then keeps the end save and restores the owner's).
-  rm -f "$DEVICE_LOGS/STOP_RUN"
   while [ "$elapsed" -lt "$RUN_SECS" ] && [ ! -e "$DEVICE_LOGS/STOP_RUN" ]; do sleep 1; elapsed=$((elapsed + 1)); done
   [ -e "$DEVICE_LOGS/STOP_RUN" ] && { rm -f "$DEVICE_LOGS/STOP_RUN"; echo "stopped early at ~${elapsed}s (STOP_RUN)"; }
   "${ADB[@]}" logcat -d > "$DEVICE_LOGS/logcat_$stamp.txt" 2>/dev/null || true
