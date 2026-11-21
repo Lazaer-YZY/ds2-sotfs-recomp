@@ -40,6 +40,11 @@ class InputSystem : public system::IInputSystem {
   void AttachWindow(rex::ui::Window* window);
   void SetActiveCallback(std::function<bool()> callback);
 
+  /// Called on each physical (non-synthetic) device's state before the merge in GetState, for example a
+  /// player's button remap (ds2 Android, issue #9). Set before the guest starts polling.
+  using GamepadFilter = void (*)(const DeviceInfo& device, X_INPUT_GAMEPAD& gamepad);
+  void SetGamepadFilter(GamepadFilter filter) { gamepad_filter_ = filter; }
+
   /// Replaces any previous assignment. Call before the guest starts polling.
   void SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment);
 
@@ -60,6 +65,7 @@ class InputSystem : public system::IInputSystem {
   std::vector<std::unique_ptr<InputDriver>> drivers_;
 
   std::unique_ptr<DeviceAssignment> assignment_;
+  GamepadFilter gamepad_filter_ = nullptr;
   ActiveDeviceTracker active_devices_;
 
   // Ordered by ordinal. Ordinals are never recycled, so unplugging pad one

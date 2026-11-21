@@ -104,6 +104,80 @@ void* OpenCustomVulkanIcd(const std::string& path, const char* driver) {
 }
 #endif
 
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+// --- Gamepad button remap (CTRL -> Controller buttons, issue #9) -----------------------------------------------
+// Each of a physical pad's buttons can act as another one, or as none. Applied by the SDK input system to
+// non-synthetic devices only (InputSystem::SetGamepadFilter), so the touch controls and the test script pad keep
+// their buttons. The map comes from DS2_PAD_MAP at start and from the CTRL page through nativeSetOption("pad_map"):
+// the targets of a b x y lb rb lt rt back start l3 r3, in that order, comma-separated ("none" = no button).
+
+constexpr int kRemapCount = 12;
+constexpr std::string_view kRemapNames[kRemapCount] = {"a",  "b",  "x",    "y",     "lb", "rb",
+                                                       "lt", "rt", "back", "start", "l3", "r3"};
+constexpr uint16_t kRemapMasks[kRemapCount] = {0x1000, 0x2000, 0x4000, 0x8000, 0x0100, 0x0200,
+                                               0,      0,      0x0020, 0x0010, 0x0040, 0x0080};
+constexpr int kRemapLt = 6, kRemapRt = 7;
+constexpr uint8_t kRemapNone = 0xFF;
+constexpr uint8_t kTriggerThreshold = 30;  // XINPUT_GAMEPAD_TRIGGER_THRESHOLD
+std::atomic<uint8_t> g_pad_map[kRemapCount];
+std::atomic<bool> g_pad_map_active{false};
+
+void SetPadMap(std::string_view list) {
+  uint8_t map[kRemapCount];
+  for (int i = 0; i < kRemapCount; ++i) map[i] = uint8_t(i);
+  size_t pos = 0;
+  for (int index = 0; index < kRemapCount && !list.empty(); ++index) {
+    size_t comma = list.find(',', pos);
+    if (comma == std::string_view::npos) comma = list.size();
+    const std::string_view name = list.substr(pos, comma - pos);
+    uint8_t target = kRemapNone;
+    for (int t = 0; t < kRemapCount; ++t) {
+      if (name == kRemapNames[t]) target = uint8_t(t);
+    }
+    map[index] = target;
+    if (comma >= list.size()) break;
+    pos = comma + 1;
+  }
+  bool identity = true;
+  for (int i = 0; i < kRemapCount; ++i) {
+    g_pad_map[i].store(map[i], std::memory_order_relaxed);
+    identity = identity && map[i] == i;
+  }
+  g_pad_map_active.store(!identity, std::memory_order_release);
+  REXLOG_INFO("input: gamepad button remap {}", identity ? std::string("off") : std::string(list));
+}
+
+void RemapGamepad(const in::DeviceInfo&, in::X_INPUT_GAMEPAD& pad) {
+  if (!g_pad_map_active.load(std::memory_order_acquire)) return;
+  const uint16_t in_buttons = pad.buttons;
+  const uint8_t in_lt = pad.left_trigger, in_rt = pad.right_trigger;
+  uint16_t remappable = 0;
+  for (uint16_t mask : kRemapMasks) remappable |= mask;
+  uint16_t buttons = in_buttons & uint16_t(~remappable);  // the d-pad stays as it is
+  uint8_t lt = 0, rt = 0;
+  for (int source = 0; source < kRemapCount; ++source) {
+    const uint8_t target = g_pad_map[source].load(std::memory_order_relaxed);
+    if (target >= kRemapCount) continue;
+    const uint8_t value = source == kRemapLt ? in_lt
+                          : source == kRemapRt ? in_rt
+                          : (in_buttons & kRemapMasks[source]) ? uint8_t(255) : uint8_t(0);
+    if (target == kRemapLt) {
+      lt = std::max(lt, value);
+    } else if (target == kRemapRt) {
+      rt = std::max(rt, value);
+    } else if (value > kTriggerThreshold) {
+      buttons |= kRemapMasks[target];
+    }
+  }
+  pad.buttons = buttons;
+  pad.left_trigger = lt;
+  pad.right_trigger = rt;
+}
+
 // --- Touch pad --------------------------------------------------------------------------------------------------
 
 struct TouchState {
@@ -116,6 +190,16 @@ struct TouchState {
 std::mutex g_touch_mutex;
 TouchState g_touch;
 std::atomic<uint32_t> g_touch_packet{0};
+// A tap shorter than the game's input poll (a quick finger, or adb's input tap: down and up in the same millisecond)
+// would be lost: buttons and triggers pressed in the last kTouchMinPressMs stay reported as down that long.
+// Bits 0-15 the buttons, 16 / 17 the left / right trigger. Under g_touch_mutex.
+constexpr int64_t kTouchMinPressMs = 70;
+uint32_t g_touch_recent = 0;
+int64_t g_touch_recent_until = 0;
+
+uint32_t TouchPressMask(const TouchState& t) {
+  return t.buttons | (t.left_trigger ? 1u << 16 : 0u) | (t.right_trigger ? 1u << 17 : 0u);
+}
 
 constexpr in::DeviceId kTouchPad = in::DeviceId(0x445332544F554348ull);  // "DS2TOUCH"
 
@@ -140,6 +224,13 @@ class TouchPad final : public in::InputDriver {
       {
         std::lock_guard lock(g_touch_mutex);
         t = g_touch;
+        if (g_touch_recent && NowMs() < g_touch_recent_until) {
+          t.buttons |= uint16_t(g_touch_recent & 0xFFFF);
+          if (g_touch_recent & (1u << 16)) t.left_trigger = 255;
+          if (g_touch_recent & (1u << 17)) t.right_trigger = 255;
+        } else {
+          g_touch_recent = 0;
+        }
       }
       std::memset(out_state, 0, sizeof(*out_state));
       out_state->packet_number = g_touch_packet.load(std::memory_order_relaxed);
@@ -185,11 +276,6 @@ class TouchPad final : public in::InputDriver {
 };
 
 std::atomic<int64_t> g_launch_ms{-1};
-
-int64_t NowMs() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
 
 }  // namespace
 
@@ -311,7 +397,10 @@ void WrapTouchInput(rex::RuntimeConfig& config) {
     auto system = base(tool_mode);
     if (system && !tool_mode) {
       // The default factory is CreateDefaultInputSystem (sdk/src/ui/rex_app.cpp), a rex::input::InputSystem.
-      static_cast<in::InputSystem*>(system.get())->AddDriver(std::make_unique<TouchPad>());
+      auto* input = static_cast<in::InputSystem*>(system.get());
+      input->AddDriver(std::make_unique<TouchPad>());
+      SetPadMap(EnvOr("DS2_PAD_MAP", ""));
+      input->SetGamepadFilter(RemapGamepad);
     }
     return system;
   };
@@ -461,6 +550,12 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeSetTouchInput(JNIEnv*, jclass, 
   };
   {
     std::lock_guard lock(ds2::android::g_touch_mutex);
+    const uint32_t pressed =
+        ds2::android::TouchPressMask(next) & ~ds2::android::TouchPressMask(ds2::android::g_touch);
+    if (pressed) {
+      ds2::android::g_touch_recent |= pressed;
+      ds2::android::g_touch_recent_until = ds2::android::NowMs() + ds2::android::kTouchMinPressMs;
+    }
     ds2::android::g_touch = next;
   }
   ds2::android::g_touch_packet.fetch_add(1, std::memory_order_relaxed);
@@ -504,6 +599,8 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, 
     ds2::cheats::Set(key.substr(6), val == "1" || val == "true");
   } else if (key == "prime") {
     ds2::android::SetPrimeGovernor(val == "1" || val == "true");
+  } else if (key == "pad_map") {
+    ds2::android::SetPadMap(val);
   } else {
     REXLOG_INFO("ds2: option {} = {} (not wired)", key, val);
   }

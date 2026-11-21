@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -122,21 +123,46 @@ void InstallConfigured(rex::Runtime* runtime) {
   }
   const auto exe_dir = rex::filesystem::GetExecutableFolder();
   if (!exe_dir.empty()) ImportCalibration(exe_dir);
+  auto* content = runtime->kernel_state()->content_manager();
+  // DS2_DLC_ROOT (Android: the app, issue #6): installed DLC under this root instead of the content root, e.g. the
+  // app folder on the SD card that holds the game (GameStorage.dlcContentRoot). Set before the game starts.
+  if (const char* root = std::getenv("DS2_DLC_ROOT"); root && *root && content) {
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    content->set_marketplace_root(std::filesystem::path(root));
+    REXLOG_INFO("[ds2 dlc] installed DLC under {}", root);
+  }
   std::string list = REXCVAR_GET(ds2_install_dlc);
   if (list.empty() && !exe_dir.empty()) {
-    // dlc/ in the port folder (Android: the app's files dir): install whatever packages were copied there.
-    std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(exe_dir / "dlc", ec)) {
-      if (ec) break;
-      // Skip hidden files: macOS leaves "._<name>" AppleDouble copies next to every file it writes to a FAT card.
-      if (e.path().filename().string().rfind('.', 0) == 0) continue;
-      if (e.is_regular_file(ec)) list += (list.empty() ? "" : ";") + rex::path_to_utf8(e.path());
+    // The package folders: DS2_DLC_DIRS (';'-separated; Android: the dlc/ folders next to the game and in the app
+    // folder, GameStorage.dlcPackageDirs), else dlc/ in the port folder. Every package found is installed
+    // (an installed one is skipped).
+    std::vector<std::filesystem::path> dirs;
+    if (const char* env = std::getenv("DS2_DLC_DIRS"); env && *env) {
+      const std::string_view all(env);
+      size_t from = 0;
+      while (from <= all.size()) {
+        size_t to = all.find(';', from);
+        if (to == std::string_view::npos) to = all.size();
+        if (to > from) dirs.emplace_back(std::string(all.substr(from, to - from)));
+        from = to + 1;
+      }
+    } else {
+      dirs.push_back(exe_dir / "dlc");
+    }
+    for (const auto& dir : dirs) {
+      std::error_code ec;
+      for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec) break;
+        // Skip hidden files: macOS leaves "._<name>" AppleDouble copies next to every file it writes to a FAT card.
+        if (e.path().filename().string().rfind('.', 0) == 0) continue;
+        if (e.is_regular_file(ec)) list += (list.empty() ? "" : ";") + rex::path_to_utf8(e.path());
+      }
     }
   }
   if (list.empty()) {
     return;
   }
-  auto* content = runtime->kernel_state()->content_manager();
   if (!content) {
     REXLOG_WARN("[ds2 dlc] no content manager");
     return;

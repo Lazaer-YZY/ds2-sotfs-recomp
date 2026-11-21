@@ -287,7 +287,7 @@ std::filesystem::path ContentManager::ResolvePackageRoot(uint64_t xuid, XContent
 
   // Package root path:
   // content_root/xuid/title_id/content_type/
-  return root_path_ / xuid_str / title_id_str / content_type_str;
+  return RootFor(content_type) / xuid_str / title_id_str / content_type_str;
 }
 
 std::filesystem::path ContentManager::ResolvePackagePath(uint64_t xuid,
@@ -323,7 +323,7 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string
 
   // Header root path:
   // content_root/xuid/title_id/Headers/content_type/filename.header
-  return root_path_ / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
+  return RootFor(content_type) / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
          final_name;
 }
 

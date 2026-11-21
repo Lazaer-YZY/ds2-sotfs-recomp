@@ -280,6 +280,11 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
     if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
       continue;
     }
+    if (gamepad_filter_) {
+      if (const DeviceInfo* info = DeviceInfoFor(id); info && !info->synthetic) {
+        gamepad_filter_(*info, state.gamepad);
+      }
+    }
     active_devices_.Observe(user_index, id, state.gamepad);
     if (!any) {
       merged = state;

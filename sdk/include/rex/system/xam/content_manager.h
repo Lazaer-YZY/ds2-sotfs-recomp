@@ -181,7 +181,17 @@ class ContentManager {
   // own title and content type select its virtual storage location.
   X_RESULT InstallContent(const std::filesystem::path& package_path);
 
+  // Marketplace content (DLC) under its own root instead of the content root, for example on the SD card next to
+  // the game (ds2 Android, issue #6): <root>/0000000000000000/<title id>/00000002/ and its Headers/. Empty (the
+  // default): the content root. Set before the title starts.
+  void set_marketplace_root(const std::filesystem::path& root) { marketplace_root_ = root; }
+  const std::filesystem::path& marketplace_root() const { return marketplace_root_; }
+
  private:
+  const std::filesystem::path& RootFor(XContentType content_type) const {
+    return content_type == XContentType::kMarketplaceContent && !marketplace_root_.empty() ? marketplace_root_
+                                                                                          : root_path_;
+  }
   std::filesystem::path ResolvePackageRoot(uint64_t xuid, XContentType content_type,
                                            uint32_t title_id = -1);
   std::filesystem::path ResolvePackagePath(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
@@ -197,6 +207,7 @@ class ContentManager {
 
   KernelState* kernel_state_;
   std::filesystem::path root_path_;
+  std::filesystem::path marketplace_root_;
 
   // TODO(benvanik): remove use of global lock, it's bad here!
   rex::thread::global_critical_region global_critical_region_;

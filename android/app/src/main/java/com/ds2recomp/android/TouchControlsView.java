@@ -85,6 +85,33 @@ final class TouchControlsView extends View {
     private float dragOffsetX, dragOffsetY, baseUnit;
     private int shownButtons, shownLt, shownRt, shownLx, shownLy, shownRx, shownRy;
 
+    // Drag to look (CTRL -> "Drag on the screen to move the camera", off by default: the right stick stays; the
+    // owner, 2026-11-21). A touch on the right part of the screen, away from the controls, turns the camera: the
+    // finger's speed becomes a right-stick deflection, sampled once per display frame (onLookTick), so the camera
+    // stops when the finger stops.
+    /** Touches that start left of this share of the width never look (the left stick's side). */
+    private static final float LOOK_MIN_X = .35f;
+    /**
+     * Finger speed (units per second) that gives a full deflection at 100 % camera drag speed. DS2 turns the camera
+     * about 120 degrees/s at full deflection (a full turn in ~3 s on the Thor) and ~13 degrees/s at 0.43 (pad.sh: a
+     * Majula 360 in 27.3 s), roughly linear past its dead zone: a drag across the Thor's screen (14 units) at 8
+     * units/s turns the camera about 200 degrees.
+     */
+    private static final float LOOK_FULL_RATE = 8f;
+    /** Slower than this (units per second) counts as a still finger. */
+    private static final float LOOK_MIN_RATE = .35f;
+    /** Smallest deflection sent while the finger moves: just past the game's own dead zone (~0.35, pad.sh). */
+    private static final float LOOK_FLOOR = .36f;
+    /** A drag axis slower than this share of the other one is left out (a sideways drag does not tilt the view). */
+    private static final float LOOK_MINOR_AXIS = .35f;
+    private boolean lookDrag;
+    private float lookSpeed = 1f;
+    private int lookPointer = -1;
+    private float lookLastX, lookLastY, lookAccX, lookAccY, lookVelX, lookVelY;
+    private long lookTickNanos;
+    private boolean lookTickPosted;
+    private final Runnable lookTick = this::onLookTick;
+
     TouchControlsView(RuntimeActivity activity) {
         super(activity);
         this.activity = activity;
@@ -96,6 +123,8 @@ final class TouchControlsView extends View {
         ctrl.reset(now);
         ctrl.setEnabled(preferences.getBoolean("ctrl_auto_hide", true), now);
         ctrl.setHideAll(preferences.getBoolean("hide_all", false), now);
+        lookDrag = preferences.getBoolean("look_drag", false);
+        lookSpeed = bounded(preferences.getFloat("look_speed", 1f), .25f, 3f, 1f);
         setClickable(true);
         setContentDescription("Touch controller settings");
     }
@@ -205,6 +234,7 @@ final class TouchControlsView extends View {
                 float storedY = preferences.getFloat("y_" + id, fresh.y[id]);
                 if (Float.isFinite(storedX)) fresh.x[id] = storedX;
                 if (Float.isFinite(storedY)) fresh.y[id] = storedY;
+                fresh.scale[id] = TouchControlLayout.clampScale(preferences.getFloat("scale_" + id, 1f));
                 fresh.visible[id] = preferences.getBoolean("visible_" + id, true);
             }
             float ctrlX = preferences.getFloat("ctrl_x", fresh.ctrlX);
@@ -219,7 +249,13 @@ final class TouchControlsView extends View {
         clearTouches();
     }
 
-    private float editorReservedBottom() { return getHeight() * .15f; }
+    /**
+     * The editor's toolbar sits in the middle band, which the default layout leaves free, so no strip is reserved for
+     * it: entering the editor (and SAVE) never moves controls (with a bottom toolbar the clamp pushed L3, R3 and the
+     * d-pad up, and SAVE kept them there). Its buttons win touches over a control dragged under them.
+     */
+    private static final float TOOLBAR_Y = .47f, TOOLBAR_LABEL_Y = .385f;
+    private float editorReservedBottom() { return 0f; }
     private TouchControlLayout activeLayout() { return editing ? draft : layout; }
     private float unit() { return baseUnit * activeLayout().size; }
     private float px(int id) { return activeLayout().pixelX(id, getWidth()); }
@@ -270,9 +306,23 @@ final class TouchControlsView extends View {
         return dx * dx + dy * dy <= radius * radius;
     }
 
+    /** The unit of one control: the overall size times its own (Edit layout's - / +). */
+    private float elementUnit(int id) { return unit() * activeLayout().scale[id]; }
+
+    /** How far (x, y) is into control {@code id}'s touch area: below 1 inside, 0 at its centre. */
+    private float hitDistance(int id, float x, float y) {
+        float unit = elementUnit(id);
+        float dx = (x - px(id)) / (TouchControlLayout.hitHalfWidth(id) * unit);
+        float dy = (y - py(id)) / (TouchControlLayout.hitHalfHeight(id) * unit);
+        if (TouchControlLayout.isRect(id)) {
+            float edge = Math.max(Math.abs(dx), Math.abs(dy));
+            return edge * edge;
+        }
+        return dx * dx + dy * dy;
+    }
+
     private boolean hit(int id, float x, float y) {
-        float radius = TouchControlLayout.hitRadius(id) * unit();
-        return near(x, y, px(id), py(id), radius);
+        return hitDistance(id, x, y) <= 1f;
     }
 
     private int elementAt(float x, float y, boolean includeHidden) {
@@ -280,9 +330,7 @@ final class TouchControlsView extends View {
         float bestDistance = Float.POSITIVE_INFINITY;
         for (int id = 0; id < TouchControlLayout.COUNT; ++id) {
             if (!includeHidden && !activeLayout().visible[id]) continue;
-            float radius = TouchControlLayout.hitRadius(id) * unit();
-            float dx = x - px(id), dy = y - py(id);
-            float distance = (dx * dx + dy * dy) / (radius * radius);
+            float distance = hitDistance(id, x, y);
             if (distance <= 1f && distance < bestDistance) {
                 best = id;
                 bestDistance = distance;
@@ -316,11 +364,11 @@ final class TouchControlsView extends View {
         int buttons = 0, lt = 0, rt = 0, lx = 0, ly = 0, rx = 0, ry = 0;
         boolean leftAssigned = false, rightAssigned = false;
         if (controlsVisible() && !editing && layout != null && baseUnit > 0f) {
-            float unit = unit();
             for (int i = 0; i < pointers.size(); ++i) {
                 Pointer pointer = pointers.valueAt(i);
                 int id = pointer.element;
                 if (!layout.visible[id]) continue;
+                float unit = elementUnit(id);
                 if (id == TouchControlLayout.LEFT_STICK && !leftAssigned) {
                     float dx = (pointer.x - px(id)) / unit;
                     float dy = (py(id) - pointer.y) / unit;
@@ -334,17 +382,29 @@ final class TouchControlsView extends View {
                     if (length > 1f) { dx /= length; dy /= length; }
                     rx = stick(dx); ry = stick(dy); rightAssigned = true;
                 } else if (id == TouchControlLayout.DPAD) {
+                    // One direction at a time, the one the finger is furthest towards: DS2 gives each d-pad
+                    // direction its own item slot, and a press between two squares must not cycle both.
                     float dx = (pointer.x - px(id)) / unit;
                     float dy = (pointer.y - py(id)) / unit;
-                    if (dx < -.28f) buttons |= LEFT;
-                    if (dx > .28f) buttons |= RIGHT;
-                    if (dy < -.28f) buttons |= UP;
-                    if (dy > .28f) buttons |= DOWN;
+                    if (Math.max(Math.abs(dx), Math.abs(dy)) >= .25f) {
+                        if (Math.abs(dx) > Math.abs(dy)) buttons |= dx < 0f ? LEFT : RIGHT;
+                        else buttons |= dy < 0f ? UP : DOWN;
+                    }
                 } else if (hit(id, pointer.x, pointer.y)) {
                     if (id == TouchControlLayout.LT) lt = 255;
                     else if (id == TouchControlLayout.RT) rt = 255;
                     else buttons |= buttonMask(id);
                 }
+            }
+            if (!rightAssigned && lookPointer != -1) {
+                // Like a mouse: a drag to the right turns right, a drag up looks up (stick up). Per axis, because
+                // the game's dead zone is per axis (on the Thor 0.30 right + 0.30 up did not turn the camera, 0.45
+                // right did); a much slower second axis is dropped so a sideways drag stays level.
+                float speedX = Math.abs(lookVelX), speedY = Math.abs(lookVelY);
+                if (speedY < speedX * LOOK_MINOR_AXIS) speedY = 0f;
+                if (speedX < speedY * LOOK_MINOR_AXIS) speedX = 0f;
+                rx = Math.round(Math.signum(lookVelX) * lookDeflection(speedX) * 32767f);
+                ry = Math.round(-Math.signum(lookVelY) * lookDeflection(speedY) * 32767f);
             }
         }
         shownButtons = buttons; shownLt = lt; shownRt = rt;
@@ -353,7 +413,49 @@ final class TouchControlsView extends View {
         invalidate();
     }
 
+    /** Stick deflection (0..1) for a finger speed along one axis, in units per second. */
+    private float lookDeflection(float speed) {
+        if (speed < LOOK_MIN_RATE) return 0f;
+        return LOOK_FLOOR + (1f - LOOK_FLOOR) * Math.min(1f, speed * lookSpeed / LOOK_FULL_RATE);
+    }
+
+    /**
+     * Once per display frame while a look drag is down: the finger's movement since the last frame becomes its speed
+     * (units per second, smoothed over about two frames), which publish() turns into a right-stick deflection.
+     */
+    private void onLookTick() {
+        lookTickPosted = false;
+        if (lookPointer == -1) {
+            lookVelX = lookVelY = 0f;
+            return;
+        }
+        long now = System.nanoTime();
+        float seconds = Math.max(1e-3f, (now - lookTickNanos) / 1e9f);
+        lookTickNanos = now;
+        float unit = Math.max(1f, unit());
+        float rateX = lookAccX / unit / seconds, rateY = lookAccY / unit / seconds;
+        lookAccX = lookAccY = 0f;
+        lookVelX = lookVelX * .5f + rateX * .5f;
+        lookVelY = lookVelY * .5f + rateY * .5f;
+        publish();
+        postLookTick();
+    }
+
+    private void postLookTick() {
+        if (lookTickPosted || lookPointer == -1) return;
+        lookTickPosted = true;
+        postOnAnimation(lookTick);
+    }
+
+    private void endLook() {
+        lookPointer = -1;
+        lookAccX = lookAccY = lookVelX = lookVelY = 0f;
+    }
+
     void clearTouches() {
+        endLook();
+        removeCallbacks(lookTick);
+        lookTickPosted = false;
         pointers.clear();
         boolean heldCtrl = settingsPointer != -1;
         settingsPointer = dragPointer = toolbarPointer = -1;
@@ -377,6 +479,7 @@ final class TouchControlsView extends View {
         for (int id = 0; id < TouchControlLayout.COUNT; ++id) {
             editor.putFloat("x_" + id, layout.x[id]);
             editor.putFloat("y_" + id, layout.y[id]);
+            editor.putFloat("scale_" + id, layout.scale[id]);
             editor.putBoolean("visible_" + id, layout.visible[id]);
         }
         editor.putFloat("ctrl_x", layout.ctrlX).putFloat("ctrl_y", layout.ctrlY);
@@ -520,6 +623,29 @@ final class TouchControlsView extends View {
 
         CheckBox hideAll = option(content, strings.getString(R.string.touch_hide_all),
             strings.getString(R.string.touch_hide_all_help), ctrl.hideAll());
+        // Drag to look (off by default; the right stick stays): applied at once.
+        CheckBox lookDragBox = option(content, strings.getString(R.string.touch_look_drag),
+            strings.getString(R.string.touch_look_drag_help), lookDrag);
+        TextView lookSpeedLabel = new TextView(activity);
+        SeekBar lookSpeedBar = new SeekBar(activity);
+        lookSpeedBar.setMax(275);
+        lookSpeedBar.setProgress(Math.round(lookSpeed * 100f) - 25);
+        lookSpeedLabel.setText(strings.getString(R.string.touch_look_speed, lookSpeedBar.getProgress() + 25));
+        lookSpeedBar.setOnSeekBarChangeListener(seekListener(value ->
+            lookSpeedLabel.setText(strings.getString(R.string.touch_look_speed, value + 25))));
+        content.addView(lookSpeedLabel);
+        content.addView(lookSpeedBar);
+        // Physical controller buttons (issue #9): PadRemap's page, applied at once.
+        header(content, strings.getString(R.string.touch_section_pad));
+        Button padButton = new Button(activity);
+        padButton.setText(strings.getString(R.string.touch_pad_remap));
+        padButton.setAllCaps(false);
+        content.addView(padButton);
+        Runnable applyLook = () -> {
+            lookDrag = lookDragBox.isChecked();
+            lookSpeed = (lookSpeedBar.getProgress() + 25) / 100f;
+            preferences.edit().putBoolean("look_drag", lookDrag).putFloat("look_speed", lookSpeed).apply();
+        };
         SharedPreferences render = RuntimeActivity.renderPrefs(activity);
         // Frame rate: 30 / 40 / 60, and the 120 Hz panel for a smoother 60 (RuntimeActivity.applyFrameRate).
         String fps = render.getString("fps", RuntimeActivity.DEFAULT_FPS);
@@ -666,6 +792,12 @@ final class TouchControlsView extends View {
             strings.getString(R.string.touch_compat_tu_gmem));
         CheckBox compatNoUbwc = option(content, strings.getString(R.string.touch_compat_tu_noubwc), null,
             render.getBoolean("compat_tu_noubwc", false));
+        CheckBox compatTuReserve = option(content, strings.getString(R.string.touch_compat_tu_reserve), null,
+            render.getBoolean("compat_tu_reserve", false));
+        CheckBox compatShader = option(content, strings.getString(R.string.touch_compat_shader),
+            strings.getString(R.string.touch_compat_shader_help), render.getBoolean("compat_shader", false));
+        CheckBox compatDecodeBc = option(content, strings.getString(R.string.touch_compat_decode_bc),
+            strings.getString(R.string.touch_compat_decode_bc_help), render.getBoolean("compat_decode_bc", false));
         TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
         nextStart.setPadding(0, Math.round(8f * getResources().getDisplayMetrics().density), 0,
                              Math.round(8f * getResources().getDisplayMetrics().density));
@@ -688,6 +820,7 @@ final class TouchControlsView extends View {
             .setTitle(strings.getString(R.string.touch_settings_title))
             .setView(scroll)
             .setPositiveButton(strings.getString(R.string.touch_apply), (dialog, which) -> {
+                applyLook.run();
                 applySettings(toggle.isChecked(), size.getProgress() + 60,
                               opacity.getProgress() + 25, ctrlAutoHide.isChecked(), hideAll.isChecked());
                 final String nextStartBefore = RuntimeActivity.nextStartState(RuntimeActivity.renderPrefs(activity));
@@ -709,6 +842,9 @@ final class TouchControlsView extends View {
                     .putBoolean("compat_dynrender", compatDynrender.isChecked())
                     .putString("compat_tu_mode", tuModes[radioChoice(compatTuMode)])
                     .putBoolean("compat_tu_noubwc", compatNoUbwc.isChecked())
+                    .putBoolean("compat_tu_reserve", compatTuReserve.isChecked())
+                    .putBoolean("compat_shader", compatShader.isChecked())
+                    .putBoolean("compat_decode_bc", compatDecodeBc.isChecked())
                     .putBoolean("prime", primeCore.isChecked()).commit();  // on disk before a restart below
                 RuntimeActivity.nativeSetOption("cheat_hp", cheatHp.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("cheat_stamina", cheatStamina.isChecked() ? "1" : "0");
@@ -724,6 +860,7 @@ final class TouchControlsView extends View {
                     activity.offerRestart();
             })
             .setNeutralButton(strings.getString(R.string.touch_edit_layout), (dialog, which) -> {
+                applyLook.run();
                 applySettings(toggle.isChecked(), size.getProgress() + 60,
                               opacity.getProgress() + 25, ctrlAutoHide.isChecked(), hideAll.isChecked());
                 enterEditor();
@@ -754,6 +891,10 @@ final class TouchControlsView extends View {
         backupsButton.setOnClickListener(v -> {
             settingsDialog.dismiss();
             activity.openSaveBackupsPage();
+        });
+        padButton.setOnClickListener(v -> {
+            settingsDialog.dismiss();
+            PadRemap.show(activity);
         });
         settingsDialogOpen = true;
         syncCtrlPin();
@@ -809,13 +950,26 @@ final class TouchControlsView extends View {
         invalidate();
     }
 
+    /** Editor toolbar: SAVE, CANCEL, RESET, HIDE / SHOW, smaller, bigger (the selected control). */
+    private static final int TOOLBAR_BUTTONS = 6;
+    private static float toolbarCenter(int i) { return .28f + i * .088f; }
+
     private int toolbarAt(float x, float y) {
-        if (Math.abs(y - getHeight() * .91f) > getHeight() * .052f) return -1;
-        for (int i = 0; i < 4; ++i) {
-            if (Math.abs(x - getWidth() * (.37f + i * .09f)) <= getWidth() * .043f)
+        if (Math.abs(y - getHeight() * TOOLBAR_Y) > getHeight() * .052f) return -1;
+        for (int i = 0; i < TOOLBAR_BUTTONS; ++i) {
+            if (Math.abs(x - getWidth() * toolbarCenter(i)) <= getWidth() * .041f)
                 return i;
         }
         return -1;
+    }
+
+    /** Edit layout's - / +: one step of the selected control's own size, kept on screen. */
+    private void scaleSelected(int direction) {
+        if (selected < 0 || selected == TouchControlLayout.CTRL) return;
+        float next = Math.round((draft.scale[selected] + direction * TouchControlLayout.SCALE_STEP) * 10f) / 10f;
+        draft.scale[selected] = TouchControlLayout.clampScale(next);
+        draft.move(selected, px(selected), py(selected), getWidth(), getHeight(), unit(), editorReservedBottom());
+        invalidate();
     }
 
     private boolean onEditorTouch(MotionEvent event, int action, int index, int id) {
@@ -887,7 +1041,8 @@ final class TouchControlsView extends View {
                         dragPointer = -1;
                         draft.visible[selected] = !draft.visible[selected];
                         invalidate();
-                    }
+                    } else if (pressed == 4) scaleSelected(-1);
+                    else if (pressed == 5) scaleSelected(1);
                 }
             }
             return true;
@@ -926,20 +1081,41 @@ final class TouchControlsView extends View {
             }
             if (!controlsVisible()) return action == MotionEvent.ACTION_POINTER_DOWN;
             int element = elementAt(x, y, false);
-            if (element < 0) return action == MotionEvent.ACTION_POINTER_DOWN;
+            if (element < 0) {
+                if (lookDrag && lookPointer == -1 && x >= getWidth() * LOOK_MIN_X) {
+                    lookPointer = id;
+                    lookLastX = x;
+                    lookLastY = y;
+                    lookAccX = lookAccY = lookVelX = lookVelY = 0f;
+                    lookTickNanos = System.nanoTime();
+                    postLookTick();
+                    return true;
+                }
+                return action == MotionEvent.ACTION_POINTER_DOWN;
+            }
             pointers.put(id, new Pointer(element, x, y));
             publish();
             return true;
         }
         if (action == MotionEvent.ACTION_MOVE) {
             for (int i = 0; i < event.getPointerCount(); ++i) {
-                Pointer pointer = pointers.get(event.getPointerId(i));
+                int pointerId = event.getPointerId(i);
+                if (pointerId == lookPointer) {
+                    float x = event.getX(i), y = event.getY(i);
+                    lookAccX += x - lookLastX;
+                    lookAccY += y - lookLastY;
+                    lookLastX = x;
+                    lookLastY = y;
+                    continue;
+                }
+                Pointer pointer = pointers.get(pointerId);
                 if (pointer != null) { pointer.x = event.getX(i); pointer.y = event.getY(i); }
             }
             publish();
             return true;
         }
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+            if (id == lookPointer) endLook();
             pointers.remove(id);
             if (id == settingsPointer) {
                 boolean restoring = settingsPointerRestores;
@@ -982,52 +1158,89 @@ final class TouchControlsView extends View {
                                   Color.red(value), Color.green(value), Color.blue(value)));
     }
 
+    private static final int FILL_IDLE = Color.argb(90, 0, 0, 0);
+    private static final int FILL_ACTIVE = Color.argb(190, 70, 159, 214);
+    private static final int OUTLINE = Color.argb(210, 222, 239, 249);
+
+    /** Xbox 360 face button letter colours, a little softened so they read on the dark fill. */
+    private static int labelColor(int id) {
+        switch (id) {
+            case TouchControlLayout.A: return Color.rgb(120, 205, 90);
+            case TouchControlLayout.B: return Color.rgb(240, 100, 85);
+            case TouchControlLayout.X: return Color.rgb(90, 160, 240);
+            case TouchControlLayout.Y: return Color.rgb(245, 205, 60);
+            default: return Color.WHITE;
+        }
+    }
+
+    private void drawLabel(Canvas canvas, float x, float y, String label, float textSize, boolean bold,
+                           int labelColor, float opacity) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setTextAlign(Paint.Align.CENTER);
+        paint.setTextSize(textSize);
+        paint.setFakeBoldText(bold);
+        color(labelColor, opacity);
+        canvas.drawText(label, x, y - (paint.ascent() + paint.descent()) * .5f, paint);
+        paint.setFakeBoldText(false);
+    }
+
     private void drawButton(Canvas canvas, float x, float y, float radius,
                             String label, boolean active, float opacity) {
+        drawButton(canvas, x, y, radius, label, active, opacity, Color.WHITE);
+    }
+
+    private void drawButton(Canvas canvas, float x, float y, float radius,
+                            String label, boolean active, float opacity, int labelColor) {
         paint.setStyle(Paint.Style.FILL);
-        color(active ? Color.argb(190, 70, 159, 214) : Color.argb(90, 0, 0, 0), opacity);
+        color(active ? FILL_ACTIVE : FILL_IDLE, opacity);
         canvas.drawCircle(x, y, radius, paint);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(Math.max(2f, unit() * .015f));
-        color(Color.argb(210, 222, 239, 249), opacity);
+        color(OUTLINE, opacity);
         canvas.drawCircle(x, y, radius, paint);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setTextAlign(Paint.Align.CENTER);
-        paint.setTextSize(unit() * .26f);
-        paint.setFakeBoldText(false);
-        color(Color.WHITE, opacity);
-        canvas.drawText(label, x, y - (paint.ascent() + paint.descent()) * .5f, paint);
+        drawLabel(canvas, x, y, label, radius * .578f, labelColor != Color.WHITE,
+                  active ? Color.WHITE : labelColor, opacity);
     }
 
-    private void drawPill(Canvas canvas, float x, float y, String label,
-                          boolean active, float opacity) {
-        float halfWidth = unit() * .42f, halfHeight = unit() * .22f;
+    /** A rounded rectangle with a centred label: shoulder buttons, Back and Start, d-pad squares. */
+    private void drawRoundRect(Canvas canvas, float x, float y, float halfWidth, float halfHeight, float corner,
+                               String label, float textSize, boolean active, float opacity) {
         paint.setStyle(Paint.Style.FILL);
-        color(active ? Color.argb(190, 70, 159, 214) : Color.argb(90, 0, 0, 0), opacity);
-        canvas.drawRoundRect(x - halfWidth, y - halfHeight, x + halfWidth,
-                             y + halfHeight, halfHeight, halfHeight, paint);
+        color(active ? FILL_ACTIVE : FILL_IDLE, opacity);
+        canvas.drawRoundRect(x - halfWidth, y - halfHeight, x + halfWidth, y + halfHeight, corner, corner, paint);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(Math.max(2f, unit() * .015f));
-        color(Color.argb(210, 222, 239, 249), opacity);
-        canvas.drawRoundRect(x - halfWidth, y - halfHeight, x + halfWidth,
-                             y + halfHeight, halfHeight, halfHeight, paint);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setTextAlign(Paint.Align.CENTER);
-        paint.setTextSize(unit() * .20f);
-        paint.setFakeBoldText(true);
-        color(Color.WHITE, opacity);
-        canvas.drawText(label, x, y - (paint.ascent() + paint.descent()) * .5f, paint);
+        color(OUTLINE, opacity);
+        canvas.drawRoundRect(x - halfWidth, y - halfHeight, x + halfWidth, y + halfHeight, corner, corner, paint);
+        if (!label.isEmpty()) drawLabel(canvas, x, y, label, textSize, true, Color.WHITE, opacity);
     }
 
-    private void drawStick(Canvas canvas, float x, float y, int axisX, int axisY,
+    private final android.graphics.Path arrow = new android.graphics.Path();
+
+    /** One d-pad square with a triangle pointing away from the centre (dirX, dirY: -1, 0 or 1). */
+    private void drawDpadSquare(Canvas canvas, float x, float y, float half, int dirX, int dirY,
+                                boolean active, float opacity) {
+        drawRoundRect(canvas, x, y, half, half, half * .3f, "", 1f, active, opacity);
+        float size = half * .48f;
+        // Tip towards (dirX, dirY), base across the other axis.
+        arrow.reset();
+        arrow.moveTo(x + dirX * size, y + dirY * size);
+        arrow.lineTo(x - dirX * size * .6f + dirY * size, y - dirY * size * .6f + dirX * size);
+        arrow.lineTo(x - dirX * size * .6f - dirY * size, y - dirY * size * .6f - dirX * size);
+        arrow.close();
+        paint.setStyle(Paint.Style.FILL);
+        color(Color.WHITE, opacity);
+        canvas.drawPath(arrow, paint);
+    }
+
+    private void drawStick(Canvas canvas, float x, float y, float unit, int axisX, int axisY,
                            float opacity) {
-        float unit = unit();
         paint.setStyle(Paint.Style.FILL);
         color(Color.argb(72, 0, 0, 0), opacity);
         canvas.drawCircle(x, y, unit, paint);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(Math.max(2f, unit * .015f));
-        color(Color.argb(210, 222, 239, 249), opacity);
+        color(OUTLINE, opacity);
         canvas.drawCircle(x, y, unit, paint);
         color(Color.argb(92, 222, 239, 249), opacity);
         canvas.drawCircle(x, y, unit * .68f, paint);
@@ -1043,39 +1256,57 @@ final class TouchControlsView extends View {
         if (!editing && !controls.visible[id]) return;
         float opacity = editing ? (controls.visible[id] ? Math.max(.70f,
             controls.opacity) : .40f) : controls.opacity;
-        float x = px(id), y = py(id), unit = unit();
+        float x = px(id), y = py(id), unit = elementUnit(id);
         switch (id) {
             case TouchControlLayout.LEFT_STICK:
-                drawStick(canvas, x, y, shownLx, shownLy, opacity); break;
+                drawStick(canvas, x, y, unit, shownLx, shownLy, opacity); break;
             case TouchControlLayout.RIGHT_STICK:
-                drawStick(canvas, x, y, shownRx, shownRy, opacity); break;
-            case TouchControlLayout.DPAD:
-                drawButton(canvas, x, y - unit * .855f, unit * .45f, "↑",
-                           (shownButtons & UP) != 0, opacity);
-                drawButton(canvas, x, y + unit * .855f, unit * .45f, "↓",
-                           (shownButtons & DOWN) != 0, opacity);
-                drawButton(canvas, x - unit * .855f, y, unit * .45f, "←",
-                           (shownButtons & LEFT) != 0, opacity);
-                drawButton(canvas, x + unit * .855f, y, unit * .45f, "→",
-                           (shownButtons & RIGHT) != 0, opacity);
+                drawStick(canvas, x, y, unit, shownRx, shownRy, opacity); break;
+            case TouchControlLayout.DPAD: {
+                float spread = TouchControlLayout.DPAD_SPREAD * unit, half = TouchControlLayout.DPAD_HALF * unit;
+                drawDpadSquare(canvas, x, y - spread, half, 0, -1, (shownButtons & UP) != 0, opacity);
+                drawDpadSquare(canvas, x, y + spread, half, 0, 1, (shownButtons & DOWN) != 0, opacity);
+                drawDpadSquare(canvas, x - spread, y, half, -1, 0, (shownButtons & LEFT) != 0, opacity);
+                drawDpadSquare(canvas, x + spread, y, half, 1, 0, (shownButtons & RIGHT) != 0, opacity);
                 break;
+            }
             case TouchControlLayout.BACK:
             case TouchControlLayout.START:
-                drawPill(canvas, x, y, NAMES[id], (shownButtons & buttonMask(id)) != 0,
-                         opacity);
+                drawRoundRect(canvas, x, y, unit * .42f, unit * .22f, unit * .22f, NAMES[id], unit * .20f,
+                              (shownButtons & buttonMask(id)) != 0, opacity);
                 break;
-            default:
+            case TouchControlLayout.LB:
+            case TouchControlLayout.LT:
+            case TouchControlLayout.RB:
+            case TouchControlLayout.RT: {
                 boolean active = id == TouchControlLayout.LT ? shownLt != 0
                     : id == TouchControlLayout.RT ? shownRt != 0
                     : (shownButtons & buttonMask(id)) != 0;
-                drawButton(canvas, x, y, unit * .45f, NAMES[id], active, opacity);
+                drawRoundRect(canvas, x, y, unit * .76f, unit * .34f, unit * .16f, NAMES[id], unit * .30f,
+                              active, opacity);
+                break;
+            }
+            case TouchControlLayout.L3:
+            case TouchControlLayout.R3:
+                drawButton(canvas, x, y, unit * .38f, NAMES[id], (shownButtons & buttonMask(id)) != 0, opacity);
+                break;
+            default:
+                drawButton(canvas, x, y, unit * .45f, NAMES[id], (shownButtons & buttonMask(id)) != 0, opacity,
+                           labelColor(id));
                 break;
         }
         if (editing && id == selected) {
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(Math.max(3f, unit * .025f));
             color(Color.argb(230, 255, 195, 67), 1f);
-            canvas.drawCircle(x, y, TouchControlLayout.hitRadius(id) * unit * 1.08f, paint);
+            if (TouchControlLayout.isRect(id)) {
+                float halfWidth = TouchControlLayout.hitHalfWidth(id) * unit * 1.08f;
+                float halfHeight = TouchControlLayout.hitHalfHeight(id) * unit * 1.15f;
+                canvas.drawRoundRect(x - halfWidth, y - halfHeight, x + halfWidth, y + halfHeight,
+                                     unit * .2f, unit * .2f, paint);
+            } else {
+                canvas.drawCircle(x, y, TouchControlLayout.hitRadius(id) * unit * 1.08f, paint);
+            }
         }
     }
 
@@ -1083,17 +1314,18 @@ final class TouchControlsView extends View {
         boolean ctrlSelected = selected == TouchControlLayout.CTRL;
         String description = selected < 0 ? "Drag a control · tap to select"
             : ctrlSelected ? "CTRL · always shown"
-            : NAMES[selected] + (draft.visible[selected] ? " · visible" : " · hidden");
+            : NAMES[selected] + (draft.visible[selected] ? " · visible" : " · hidden")
+                + " · size " + Math.round(draft.scale[selected] * 100f) + "%";
         paint.setStyle(Paint.Style.FILL);
         paint.setTextAlign(Paint.Align.CENTER);
         paint.setTextSize(Math.max(18f, unit() * .16f));
         paint.setFakeBoldText(true);
         color(Color.argb(240, 255, 255, 255), 1f);
-        canvas.drawText(description, getWidth() * .5f, getHeight() * .82f, paint);
-        for (int i = 0; i < 4; ++i) {
-            float x = getWidth() * (.37f + i * .09f);
-            float y = getHeight() * .91f;
-            float halfWidth = getWidth() * .043f;
+        canvas.drawText(description, getWidth() * .5f, getHeight() * TOOLBAR_LABEL_Y, paint);
+        for (int i = 0; i < TOOLBAR_BUTTONS; ++i) {
+            float x = getWidth() * toolbarCenter(i);
+            float y = getHeight() * TOOLBAR_Y;
+            float halfWidth = getWidth() * .041f;
             float halfHeight = getHeight() * .045f;
             paint.setStyle(Paint.Style.FILL);
             color(Color.argb(i == toolbarPressed ? 220 : 185, 22, 33, 43), 1f);
@@ -1111,8 +1343,9 @@ final class TouchControlsView extends View {
             paint.setTextSize(Math.max(11f * getResources().getDisplayMetrics().density,
                 Math.min(unit() * .18f, getWidth() * .019f)));
             paint.setFakeBoldText(true);
-            color(Color.WHITE, i == 3 && (selected < 0 || ctrlSelected) ? .45f : 1f);
+            color(Color.WHITE, i >= 3 && (selected < 0 || ctrlSelected) ? .45f : 1f);
             String label = i == 0 ? "SAVE" : i == 1 ? "CANCEL" : i == 2 ? "RESET"
+                : i == 4 ? "SIZE −" : i == 5 ? "SIZE +"
                 : selected >= 0 && !ctrlSelected && !draft.visible[selected] ? "SHOW" : "HIDE";
             canvas.drawText(label, x, y - (paint.ascent() + paint.descent()) * .5f, paint);
         }

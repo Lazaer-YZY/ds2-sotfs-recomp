@@ -179,7 +179,7 @@ public final class GameFolderActivity extends Activity {
             page.addView(dim("Pick your Xbox 360 disc images (.iso), one at a time. Disc 1: the app extracts the "
                 + "game (about 5.5 GB) into the custom folder if one is set, else into the app folder. Disc 2: it "
                 + "copies the DLC package (1.2 GB) into " + dlcDir + "; the game's first start installs it (another "
-                + "1.2 GB). The ISOs can be deleted afterwards."));
+                + "1.2 GB) on the same storage as the game. The ISOs can be deleted afterwards."));
             LinearLayout imports = new LinearLayout(this);
             imports.setOrientation(LinearLayout.HORIZONTAL);
             imports.setPadding(0, dp(8), 0, dp(8));

@@ -255,7 +255,8 @@ public final class RuntimeActivity extends SDLActivity {
             + "|" + render.getBoolean("debug_log", DEFAULT_DEBUG_LOG) + "|" + panel120Wanted(render)
             + "|" + render.getBoolean("compat_shortcuts", false) + "|" + render.getBoolean("compat_gpl", false)
             + "|" + render.getBoolean("compat_dynrender", false) + "|" + render.getString("compat_tu_mode", "")
-            + "|" + render.getBoolean("compat_tu_noubwc", false);
+            + "|" + render.getBoolean("compat_tu_noubwc", false) + "|" + render.getBoolean("compat_shader", false)
+            + "|" + render.getBoolean("compat_decode_bc", false) + "|" + render.getBoolean("compat_tu_reserve", false);
     }
 
     /**
@@ -264,6 +265,13 @@ public final class RuntimeActivity extends SDLActivity {
      * can still override them), the Turnip ones into TU_DEBUG (turnipDebugFlags).
      */
     static void addCompatArguments(java.util.List<String> args, SharedPreferences render) {
+        int first = args.size();
+        addCompatArgumentsTo(args, render);
+        if (args.size() > first)
+            android.util.Log.i("ds2recomp", "GPU compatibility: " + String.join(" ", args.subList(first, args.size())));
+    }
+
+    private static void addCompatArgumentsTo(java.util.List<String> args, SharedPreferences render) {
         if (render.getBoolean("compat_shortcuts", false)) {
             java.util.Collections.addAll(args,
                 "--direct_host_resolve=false", "--vulkan_resolve_feed_textures=false",
@@ -272,8 +280,16 @@ public final class RuntimeActivity extends SDLActivity {
                 "--gpu_skip_overwritten_color_transfers=false", "--gpu_constant_transfers_as_clears=false",
                 "--gpu_redirect_msaa_depth_clears=false", "--gpu_ownership_from_first_row=false",
                 "--vulkan_shared_memory_hoist_uploads=false", "--spirv_texture_sign_specialization=false",
-                "--spirv_texture_exp_adjust_specialization=false");
+                "--spirv_texture_exp_adjust_specialization=false", "--vulkan_memexport_coalesce_barriers=false");
         }
+        // v0.1.14-test, for the a6xx textures (#8 / #13: title right with shortcuts off, textures and text noise):
+        // the shader translation shortcuts LR's port offers too, and BC textures decoded by the load shaders.
+        if (render.getBoolean("compat_shader", false)) {
+            java.util.Collections.addAll(args, "--spirv_texture_sign_branch=false",
+                "--spirv_structured_forward_jumps=false", "--vulkan_texture_fetch_implicit_lod=false",
+                "--vulkan_shared_memory_texel_buffer=false");
+        }
+        if (render.getBoolean("compat_decode_bc", false)) args.add("--vulkan_decode_bc_textures=true");
         if (render.getBoolean("compat_gpl", false)) {
             java.util.Collections.addAll(args, "--vulkan_pipeline_libraries=false",
                                          "--vulkan_precompile_vertex_libraries=false");
@@ -718,6 +734,12 @@ public final class RuntimeActivity extends SDLActivity {
             if (syncDraw) nativeSetenv("DS2_VK_ADRENO650_SYNC_DRAW", "1");
             // TU_DEBUG: the device's needs plus CTRL's GPU compatibility choices in one list (the native side adds
             // syncdraw only while TU_DEBUG is unset, so it goes in here when other flags are set).
+            // CTRL -> GPU compatibility: let Turnip keep the descriptor set it reserves on Adreno 6xx for dynamic
+            // offsets (the native side turns the reservation off unless this is set; the renderer needs 4 sets).
+            if (renderPrefs(this).getBoolean("compat_tu_reserve", false)) {
+                nativeSetenv("tu_dont_reserve_descriptor_set", "false");
+                android.util.Log.i("ds2recomp", "tu_dont_reserve_descriptor_set=false");
+            }
             String turnipFlags = turnipDebugFlags(renderPrefs(this));
             if (GpuDriverStore.needsTurnipSysmem(GpuDriverStore.gpuModel(), driver.metadata)
                     && !turnipFlags.contains("mem")) {
@@ -751,6 +773,8 @@ public final class RuntimeActivity extends SDLActivity {
         if (render.getBoolean("cheat_stamina", false)) cheats.append("stamina,");
         if (render.getBoolean("cheat_wear", false)) cheats.append("wear,");
         if (!debuggable || getIntent().getStringExtra("DS2_CHEATS") == null) nativeSetenv("DS2_CHEATS", cheats.toString());
+        // CTRL -> Controller buttons (PadRemap, issue #9), also switched live through nativeSetOption("pad_map").
+        nativeSetenv("DS2_PAD_MAP", PadRemap.setting(render));
         if (!debuggable || getIntent().getStringExtra("DS2_PRIME_ASSIST") == null) {
             nativeSetenv("DS2_PRIME_ASSIST", render.getBoolean("prime", DEFAULT_PRIME) ? "1" : "0");
         }
@@ -769,6 +793,14 @@ public final class RuntimeActivity extends SDLActivity {
         // Development builds only: periodic copies of the save for benches in other areas (ds2_save_snapshots.cpp);
         // never in a public build. Bench launches turn it off with --es DS2_SAVE_SNAPSHOTS 0.
         nativeSetenv("DS2_SAVE_SNAPSHOTS", debuggable && !BuildConfig.PUBLIC_DEFAULTS ? "1" : "0");
+        // DLC next to the game (issue #6, GameStorage): the folders its packages are installed from and, with the
+        // game on an SD card, where the game installs them (empty = the app's user/ folder, as before).
+        StringBuilder dlcDirs = new StringBuilder();
+        for (File dir : GameStorage.dlcPackageDirs(this))
+            dlcDirs.append(dlcDirs.length() > 0 ? ";" : "").append(dir.getAbsolutePath());
+        nativeSetenv("DS2_DLC_DIRS", dlcDirs.toString());
+        File dlcRoot = GameStorage.dlcContentRoot(this);
+        nativeSetenv("DS2_DLC_ROOT", dlcRoot != null ? dlcRoot.getAbsolutePath() : "");
         // Debug launches can select an isolated fixture and forward DS2_* switches.
         if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             String override = getIntent().getStringExtra("game_root");
@@ -793,7 +825,8 @@ public final class RuntimeActivity extends SDLActivity {
         File userRoot = new File(appRoot, "user");
         File cacheRoot = new File(appRoot, "cache");
         File metadataRoot = new File(appRoot, "metadata");
-        new File(appRoot, "dlc").mkdirs(); // found natively through REX_ANDROID_APP_DIR
+        new File(appRoot, "dlc").mkdirs(); // the game finds packages through DS2_DLC_DIRS (above)
+        GameStorage.dlcDir(this).mkdirs();
         userRoot.mkdirs(); cacheRoot.mkdirs(); metadataRoot.mkdirs();
         // Public APKs carry a shader cache, so the first start precompiles at the title (ShaderSeed).
         if (ShaderSeed.install(this, cacheRoot) && bootOverlay != null) bootOverlay.setFirstStart();

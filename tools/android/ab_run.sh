@@ -4,7 +4,8 @@
 #   tools/android/ab_run.sh <out dir> "<label>|<extra cvars>" ["<label>|<extra cvars>" ...]
 # Env: DS2_RUN_SECS (145), DS2_SCREENSHOTS ("115 130 145"), AB_SCRIPT (the pad script, see below),
 #      AB_SAVE (out/bench_saves/things_betwixt_spawn, or a snapshot out/save_snapshots/<stamp>): <xuid>/465307E4/...
-#      folders pushed before every variant so runs start from the same spot ("" = off). The owner's save on the
+#      folders pushed before every variant so runs start from the same spot ("" = the owner's own save, still backed up
+#      and restored). The owner's save on the
 #      device is backed up first (out/save_backups/<stamp>-bench, checked by hash; the run stops if that fails) and
 #      exactly that save is pushed back at the end, also checked. Bench launches never take save snapshots (DS2_SAVE_SNAPSHOTS=0).
 # Every screenshot is checked after its variant (shot_check.py; verdicts printed as "<label> shot: PASS/FAIL ...");
@@ -34,7 +35,8 @@ local_hashes() {  # the same for a folder holding <xuid>/465307E4/...
 }
 OWNER=""; OWNER_OK=0
 backup_owner() {  # the save on the device now -> out/save_backups/<stamp>-bench (verified)
-  [ -n "$AB_SAVE" ] || return 0
+  # Also with AB_SAVE="" (a run on the owner's own save): the game autosaves, so a scripted run changes that save too
+  # (2026-11-21: a probe run on it changed USER_DATA / USER_DATA16 until restored by hand).
   local h x
   h=$(dev_hashes)
   [ -n "$h" ] || { echo "no save on the device to back up"; return 0; }

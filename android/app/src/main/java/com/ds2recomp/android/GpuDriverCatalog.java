@@ -93,6 +93,9 @@ final class GpuDriverCatalog {
         new Source("KIMCHI Turnip", "K11MCH1/AdrenoToolsDrivers", true, true),
         new Source("Weab-Chan Freedreno", "Weab-chan/freedreno_turnip-CI", false, false),
         new Source("Whitebelyash Turnip", "whitebelyash/freedreno_turnip-CI", false, true),
+        // The GTA IV recomp port's driver on its Adreno 650 test device (Turnip v26.3.0-R6, release v37): offered to
+        // the Adreno 6xx reporters (#8, #11). Releases also carry Gen8 (Adreno 8xx) and One UI zips.
+        new Source("StevenMXZ Turnip", "StevenMXZ/Adreno-Tools-Drivers", false, true),
         // Each release also has a glibc "-EMULATOR.zip" that cannot load on Android.
         new Source("PanVK-kbase (Mesa)", "zenithblue-oss/panvk-kbase-android", true, true,
             GpuDriverStore.Vendor.MALI, ".adpkg.zip", PANVK_RECOMMENDED_TAG)));

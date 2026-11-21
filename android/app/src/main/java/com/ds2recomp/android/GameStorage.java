@@ -102,28 +102,93 @@ final class GameStorage {
         return external != null ? external : context.getFilesDir();
     }
 
-    /** Where the game looks for DLC packages to install at startup (app/src/ds2_dlc.cpp). */
-    static File dlcDir(Context context) {
-        return new File(appRoot(context), "dlc");
+    // DLC next to the game (issue #6: with the game on an SD card or in a custom folder, the 1.2 GB package and the
+    // 1.1 GB the game unpacks from it stayed on the internal storage). Both go to the app folder on the storage that
+    // holds the game, which the app can always write; a DLC already installed on the internal storage stays there.
+
+    /**
+     * The app folder ({@code Android/data/<package>/files}) on the storage volume that holds the game: the volume's
+     * own for {@code <volume>/game}, the one on the same card for a custom folder there, else the internal one.
+     */
+    static File gameVolumeAppDir(Context context) {
+        return volumeAppDirFor(gameDir(context), volumes(context), appRoot(context));
     }
 
-    /** The first package waiting in dlc/ (regular, not hidden files, as the game takes them), or null. */
-    static File dlcPackage(Context context) {
-        File[] files = dlcDir(context).listFiles();
-        if (files == null) return null;
-        for (File file : files) if (file.isFile() && file.length() > 0 && !file.getName().startsWith(".")) return file;
-        return null;
+    /** The entry of {@code volumes} on the same storage as {@code game} (by volume root), else {@code fallback}. */
+    static File volumeAppDirFor(File game, List<File> volumes, File fallback) {
+        String path = game.getAbsolutePath();
+        for (File volume : volumes) {
+            File root = volumeRoot(volume);
+            if (root == null) continue;
+            String prefix = root.getAbsolutePath();
+            if (path.equals(prefix) || path.startsWith(prefix + File.separator)) return volume;
+        }
+        return fallback;
     }
 
     /**
-     * Disc 2's DLC (Compatibility Pack 4) is there: a package in dlc/, or already installed by the
-     * game (user/0000000000000000/465307E4/00000002/), so a player who deleted the package after the
-     * first start is not sent back to this page.
+     * Where DLC packages are copied or imported to: dlc/ inside the custom game folder when the game is there and the
+     * app can write it (it survives a reinstall, like the game), else dlc/ in the app folder on the game's storage.
+     */
+    static File dlcDir(Context context) {
+        File custom = customRoot(context), game = gameDir(context);
+        if (custom != null && game.equals(custom) && game.canWrite()) return new File(game, "dlc");
+        return new File(gameVolumeAppDir(context), "dlc");
+    }
+
+    /**
+     * The folders the game installs DLC packages from (DS2_DLC_DIRS, app/src/ds2_dlc.cpp), in order: dlc/ inside
+     * the game folder, {@link #dlcDir}, and the internal app folder's dlc/ (where packages went before).
+     */
+    static List<File> dlcPackageDirs(Context context) {
+        List<File> dirs = new ArrayList<>();
+        for (File dir : new File[] { new File(gameDir(context), "dlc"), dlcDir(context), new File(appRoot(context), "dlc") })
+            if (!dirs.contains(dir)) dirs.add(dir);
+        return dirs;
+    }
+
+    /** The first package waiting in a DLC folder (regular, not hidden files, as the game takes them), or null. */
+    static File dlcPackage(Context context) {
+        for (File dir : dlcPackageDirs(context)) {
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (File file : files) if (file.isFile() && file.length() > 0 && !file.getName().startsWith(".")) return file;
+        }
+        return null;
+    }
+
+    /** The installed marketplace content of this title under a content root. */
+    private static File installedDlcDir(File contentRoot) {
+        return new File(contentRoot, "0000000000000000/465307E4/00000002");
+    }
+
+    private static boolean hasEntries(File dir) {
+        String[] names = dir.list();
+        return names != null && names.length > 0;
+    }
+
+    /**
+     * Where the game installs DLC (DS2_DLC_ROOT), or null for its default, the app's user/ folder: {@code
+     * dlc_content/} in the app folder on the game's storage when that is not the internal one, unless a DLC is
+     * already installed internally (it keeps working where it is).
+     */
+    static File dlcContentRoot(Context context) {
+        return dlcContentRootFor(gameVolumeAppDir(context), appRoot(context));
+    }
+
+    static File dlcContentRootFor(File gameVolumeAppDir, File appRoot) {
+        if (gameVolumeAppDir.equals(appRoot) || hasEntries(installedDlcDir(new File(appRoot, "user")))) return null;
+        return new File(gameVolumeAppDir, "dlc_content");
+    }
+
+    /**
+     * Disc 2's DLC (Compatibility Pack 4) is there: a package in a DLC folder, or already installed by the game, so
+     * a player who deleted the package after the first start is not sent back to this page.
      */
     static boolean hasDlc(Context context) {
         if (dlcPackage(context) != null) return true;
-        String[] installed = new File(appRoot(context), "user/0000000000000000/465307E4/00000002").list();
-        return installed != null && installed.length > 0;
+        File root = dlcContentRoot(context);
+        return hasEntries(installedDlcDir(root != null ? root : new File(appRoot(context), "user")));
     }
 
     static boolean hasDefaultXex(File gameDir) {

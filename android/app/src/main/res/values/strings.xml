@@ -23,6 +23,19 @@
     <string name="touch_ctrl_auto_hide">Auto-hide the CTRL button</string>
     <string name="touch_hide_all">Hide all touch controls</string>
     <string name="touch_hide_all_help">To bring CTRL back for 4 s, swipe in the system bars or press Back.</string>
+    <string name="touch_look_drag">Drag on the screen to move the camera</string>
+    <string name="touch_look_drag_help">Touch the right part of the screen away from the buttons and drag. The right stick stays; hide it with Edit layout if you like.</string>
+    <string name="touch_look_speed">Camera drag speed: %1$d%%</string>
+    <!-- Controller buttons (CTRL; PadRemap.java, issue #9) -->
+    <string name="touch_section_pad">Controller</string>
+    <string name="touch_pad_remap">Controller buttons…</string>
+    <string name="pad_remap_title">Controller buttons</string>
+    <string name="pad_remap_help">Which game button each button of your controller presses. Applied at once; the touch controls keep their buttons.</string>
+    <string name="pad_remap_row">%1$s button presses</string>
+    <string name="pad_remap_none">Nothing</string>
+    <string name="pad_remap_swap_ab">Swap A and B</string>
+    <string name="pad_remap_swap_shoulders">Swap bumpers and triggers</string>
+    <string name="pad_remap_reset">Reset</string>
     <!-- Frame rate -->
     <string name="touch_frame_rate">Frame rate</string>
     <string name="touch_fps_30">30 fps (coolest, as on the Xbox 360)</string>
@@ -80,6 +93,11 @@
     <string name="touch_compat_tu_sysmem">Direct to memory (sysmem)</string>
     <string name="touch_compat_tu_gmem">Tiled (gmem)</string>
     <string name="touch_compat_tu_noubwc">Turnip image compression off * (Turnip drivers only)</string>
+    <string name="touch_compat_shader">Shader shortcuts off *</string>
+    <string name="touch_compat_shader_help">Plainer translated shaders: texture fetches and branches as the console does them.</string>
+    <string name="touch_compat_decode_bc">Decode compressed textures *</string>
+    <string name="touch_compat_decode_bc_help">The game\'s compressed (BC / DXT) textures are unpacked before use instead of read by the GPU directly. Uses more memory.</string>
+    <string name="touch_compat_tu_reserve">Turnip: keep its reserved descriptor set * (Turnip drivers only)</string>
     <!-- Save backups (CTRL, Troubleshooting; SaveBackups.java) -->
     <string name="touch_save_backups">Save backups …</string>
     <string name="backup_title">Save backups</string>
