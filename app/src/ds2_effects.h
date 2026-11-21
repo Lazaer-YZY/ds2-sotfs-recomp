@@ -10,11 +10,16 @@
 
 #pragma once
 
+#include <string_view>
+
 namespace ds2::effects {
 
 // Applies ds2_depth_of_field (and DS2_DEPTH_OF_FIELD) at start.
 void Apply();
 // Any thread.
 void SetDepthOfField(bool on);
+// Anti-aliasing of the finished frame (CTRL dialog): "off", "fxaa" or "fxaa_extreme" (the SDK's swap post effect, from
+// the next frame; at start the swap_post_effect cvar sets it). Any thread.
+void SetAntiAliasing(std::string_view mode);
 
 }  // namespace ds2::effects

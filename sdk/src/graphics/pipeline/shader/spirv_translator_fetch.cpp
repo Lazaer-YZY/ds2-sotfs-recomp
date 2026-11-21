@@ -55,6 +55,20 @@ REXCVAR_DEFINE_STRING(gpu_debug_vfetch_zero_vertex_shader, "", "GPU/Vulkan",
                       "gpu_debug_zero_scissor_vertex_shader for the same shader, the difference is what its vertex "
                       "fetches cost")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(gpu_debug_vfetch_opaque_vertex_shader, "", "GPU/Vulkan",
+                      "Diagnostics: in vertex shaders with this ucode hash (hex), each vertex fetch word is the "
+                      "fetch constant's second word xor the word's address instead of a read of guest memory (wrong "
+                      "geometry). Unlike gpu_debug_vfetch_zero_vertex_shader, the driver cannot fold the address "
+                      "math, the endian swap, the unpacking or the shader's own code away: the difference to the "
+                      "normal run is the cost of the memory reads alone")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(spirv_vfetch_endian_specialization, false, "GPU/Vulkan",
+                    "Draws whose vertex fetch constants are all 8-in-32 (the usual byte order) use a vertex "
+                    "shader variant translated for it: no run-time selection of the swap per fetch, 8_8_8_8 "
+                    "components taken straight from the unswapped word, 16-bit components after the 8-in-16 "
+                    "half of the swap only. Same results; other byte orders keep the run-time variant. New "
+                    "vertex shader variants and pipelines when switched on.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_STRING(gpu_debug_trivial_vertex_shader, "", "GPU/Vulkan",
                       "Diagnostics: vertex shaders with this ucode hash (hex) are translated without their ALU and "
                       "fetch instructions (outputs and position stay zero): the same draws and vertex counts with no "
@@ -71,6 +85,10 @@ namespace rex::graphics {
 
 bool SpirvShaderTranslator::IsTextureSignSpecializationEnabled() {
   return REXCVAR_GET(spirv_texture_sign_specialization);
+}
+
+bool SpirvShaderTranslator::IsVertexFetchEndianSpecializationEnabled() {
+  return REXCVAR_GET(spirv_vfetch_endian_specialization);
 }
 
 bool SpirvShaderTranslator::IsVertexTextureSignSpecializationEnabled() {
@@ -164,6 +182,22 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     return;
   }
 
+  static const uint64_t debug_opaque_fetch_shader =
+      std::strtoull(REXCVAR_GET(gpu_debug_vfetch_opaque_vertex_shader).c_str(), nullptr, 16);
+  spv::Id debug_opaque_word = spv::NoResult;
+  if (debug_opaque_fetch_shader &&
+      current_shader().ucode_data_hash() == debug_opaque_fetch_shader) {
+    uint32_t opaque_word_index = fetch_constant_word_0_index + 1;
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(const_int_0_);
+    id_vector_temp_.push_back(builder_->makeIntConstant(int(opaque_word_index >> 2)));
+    id_vector_temp_.push_back(builder_->makeIntConstant(int(opaque_word_index & 3)));
+    debug_opaque_word =
+        builder_->createLoad(builder_->createAccessChain(spv::StorageClassUniform,
+                                                         uniform_fetch_constants_, id_vector_temp_),
+                             spv::NoPrecision);
+  }
+
   // Load the needed words.
   unsigned int word_composite_indices[4] = {};
   spv::Id word_composite_constituents[4];
@@ -187,6 +221,16 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     // contain 0.
     static const uint64_t debug_zero_fetch_shader =
         std::strtoull(REXCVAR_GET(gpu_debug_vfetch_zero_vertex_shader).c_str(), nullptr, 16);
+    if (debug_opaque_word != spv::NoResult) {
+      // The address as the load masks it, kept alive without the load.
+      word_composite_constituents[word_count++] = builder_->createBinOp(
+          spv::OpBitwiseXor, type_uint_, debug_opaque_word,
+          builder_->createUnaryOp(
+              spv::OpBitcast, type_uint_,
+              builder_->createBinOp(spv::OpBitwiseAnd, type_int_, word_address,
+                                    builder_->makeIntConstant((1 << 27) - 1))));
+      continue;
+    }
     word_composite_constituents[word_count++] =
         debug_zero_fetch_shader && current_shader().ucode_data_hash() == debug_zero_fetch_shader
             ? builder_->makeUintConstant(0)
@@ -205,23 +249,49 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     words = word_composite_constituents[0];
   }
 
-  // Endian swap the words, getting the endianness from bits 0:1 of the second
-  // fetch constant word.
-  uint32_t fetch_constant_word_1_index = fetch_constant_word_0_index + 1;
-  id_vector_temp_.clear();
-  // The only element of the fetch constant buffer.
-  id_vector_temp_.push_back(const_int_0_);
-  // Vector index.
-  id_vector_temp_.push_back(builder_->makeIntConstant(int(fetch_constant_word_1_index >> 2)));
-  // Component index.
-  id_vector_temp_.push_back(builder_->makeIntConstant(int(fetch_constant_word_1_index & 3)));
-  spv::Id fetch_constant_word_1 =
-      builder_->createLoad(builder_->createAccessChain(spv::StorageClassUniform,
-                                                       uniform_fetch_constants_, id_vector_temp_),
-                           spv::NoPrecision);
-  words = EndianSwap32Uint(
-      words, builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, fetch_constant_word_1,
-                                   builder_->makeUintConstant(0b11)));
+  // spirv_vfetch_endian_specialization: the draw's vertex fetch constants are all 8-in-32 (the
+  // pipeline cache checked them for this modification), so the swap needs no run-time selection,
+  // and byte-aligned packed formats need less than the full swap: with S the fully swapped word
+  // and T the word after only the 8-in-16 half, S = T with its halves exchanged, and S = the
+  // loaded word with its bytes reversed. A field of S at bit offset o, width w is then the field
+  // of the partially swapped word at offset 32 - w - o: whole bytes of the unswapped word for
+  // 8_8_8_8 (no swap at all), whole halves of T for the 16-bit formats.
+  const bool endian_static =
+      is_vertex_shader() && GetSpirvShaderModification().vertex.vfetch_endian_8in32;
+  bool packed_offsets_mirrored = false;
+  if (endian_static) {
+    switch (instr.attributes.data_format) {
+      case xenos::VertexFormat::k_8_8_8_8:
+        packed_offsets_mirrored = true;
+        break;
+      case xenos::VertexFormat::k_16_16:
+      case xenos::VertexFormat::k_16_16_16_16:
+        packed_offsets_mirrored = true;
+        words = EndianSwap32UintStatic(words, xenos::Endian::k8in16);
+        break;
+      default:
+        words = EndianSwap32UintStatic(words, xenos::Endian::k8in32);
+        break;
+    }
+  } else {
+    // Endian swap the words, getting the endianness from bits 0:1 of the second
+    // fetch constant word.
+    uint32_t fetch_constant_word_1_index = fetch_constant_word_0_index + 1;
+    id_vector_temp_.clear();
+    // The only element of the fetch constant buffer.
+    id_vector_temp_.push_back(const_int_0_);
+    // Vector index.
+    id_vector_temp_.push_back(builder_->makeIntConstant(int(fetch_constant_word_1_index >> 2)));
+    // Component index.
+    id_vector_temp_.push_back(builder_->makeIntConstant(int(fetch_constant_word_1_index & 3)));
+    spv::Id fetch_constant_word_1 = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform, uniform_fetch_constants_,
+                                    id_vector_temp_),
+        spv::NoPrecision);
+    words = EndianSwap32Uint(
+        words, builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, fetch_constant_word_1,
+                                     builder_->makeUintConstant(0b11)));
+  }
 
   spv::Id result = spv::NoResult;
 
@@ -384,6 +454,13 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
 
   if (format_is_packed) {
     assert_true(result == spv::NoResult);
+    if (packed_offsets_mirrored) {
+      for (uint32_t i = 0; i < 4; ++i) {
+        if (packed_widths[i]) {
+          packed_offsets[i] = 32 - packed_widths[i] - packed_offsets[i];
+        }
+      }
+    }
     // Extract the components from the words as individual ints or uints.
     if (instr.attributes.is_signed) {
       // Sign-extending extraction - in GLSL the sign-extending overload accepts

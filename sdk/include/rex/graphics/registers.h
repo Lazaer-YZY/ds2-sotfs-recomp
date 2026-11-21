@@ -745,6 +745,10 @@ union alignas(uint32_t) RB_COLOR_INFO {
     int32_t color_exp_bias : 6;                       // +20
     uint32_t _pad_26 : 6;                             // +26
   };
+  // The base within the emulated EDRAM's addressing period: color_base on the
+  // console's 2048 tiles; with gpu_edram_tiles, also bit 11 and the first
+  // padding bit.
+  uint32_t base_tiles() const { return value & (xenos::EdramTileCount() - 1); }
   static constexpr Register register_index = XE_GPU_REG_RB_COLOR_INFO;
   // RB_COLOR[1-3]_INFO also use this format.
   static const Register rt_register_indices[4];
@@ -843,6 +847,8 @@ union alignas(uint32_t) RB_DEPTH_INFO {
     xenos::DepthRenderTargetFormat depth_format : 1;  // +16
     uint32_t _pad_17 : 15;                            // +17
   };
+  // See RB_COLOR_INFO::base_tiles.
+  uint32_t base_tiles() const { return value & (xenos::EdramTileCount() - 1); }
   static constexpr Register register_index = XE_GPU_REG_RB_DEPTH_INFO;
 };
 static_assert_size(RB_DEPTH_INFO, sizeof(uint32_t));

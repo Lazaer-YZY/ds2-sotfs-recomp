@@ -485,6 +485,11 @@ struct ResolveInfo {
   // transfers between clears and first usage if clearing a subregion.
   uint32_t depth_original_base;
   uint32_t color_original_base;
+  // depth_edram_info.base_tiles / color_edram_info.base_tiles within the whole
+  // emulated EDRAM (xenos::EdramTileCount(), gpu_edram_tiles): the packed
+  // fields are what the shaders get, modulo the console's 2048 tiles.
+  uint32_t depth_edram_base_tiles;
+  uint32_t color_edram_base_tiles;
 
   ResolveCoordinateInfo coordinate_info;
   // Like coordinate_info.width_div_8, but not needed for shaders.
@@ -522,6 +527,9 @@ struct ResolveInfo {
     ResolveEdramInfo edram_info = IsCopyingDepth() ? depth_edram_info : color_edram_info;
     GetResolveEdramTileSpan(edram_info, coordinate_info, height_div_8, base_out,
                             row_length_used_out, rows_out);
+    // From the packed base (modulo 2048 tiles) to the base in the whole EDRAM.
+    base_out += (IsCopyingDepth() ? depth_edram_base_tiles : color_edram_base_tiles) -
+                edram_info.base_tiles;
     pitch_out = edram_info.pitch_tiles;
   }
 

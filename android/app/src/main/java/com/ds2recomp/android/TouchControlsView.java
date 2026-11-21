@@ -409,9 +409,13 @@ final class TouchControlsView extends View {
      */
     private RadioButton radio(LinearLayout content, String label, String a, String b, String c,
                               int checked) {
+        return radio(content, label, checked, c != null ? new String[] { a, b, c } : new String[] { a, b });
+    }
+
+    /** The same with any number of choices. */
+    private RadioButton radio(LinearLayout content, String label, int checked, String... texts) {
         if (label != null) header(content, label);
         RadioGroup group = new RadioGroup(content.getContext());
-        String[] texts = c != null ? new String[] { a, b, c } : new String[] { a, b };
         RadioButton first = null;
         for (int i = 0; i < texts.length; ++i) {
             RadioButton button = new RadioButton(content.getContext());
@@ -544,12 +548,45 @@ final class TouchControlsView extends View {
         TextView resolutionLabel = new TextView(activity);
         resolutionLabel.setText(strings.getString(R.string.touch_resolution));
         content.addView(resolutionLabel);
-        RadioButton resolutionChoice = radio(content, null,
+        // Fill screen (RuntimeActivity.wideWidth), first in the resolution section and off by default (the owner,
+        // 2026-11-21): only offered on displays wider than 16:9.
+        CheckBox wide = option(content, strings.getString(R.string.touch_wide),
+            strings.getString(R.string.touch_wide_help), render.getBoolean("wide", false));
+        if (activity.displayAspect() <= 16f / 9f + 0.01f) {
+            wide.setEnabled(false);
+            wide.setText(strings.getString(R.string.touch_wide) + " " + strings.getString(R.string.touch_wide_na));
+        }
+        java.util.List<String> heights = java.util.Arrays.asList(RuntimeActivity.RENDER_HEIGHTS);
+        RadioButton resolutionChoice = radio(content, null, Math.max(0, heights.indexOf(renderHeight)),
             strings.getString(R.string.touch_resolution_540), strings.getString(R.string.touch_resolution_720),
-            strings.getString(R.string.touch_resolution_1440),
-            "540".equals(renderHeight) ? 0 : "1440".equals(renderHeight) ? 2 : 1);
+            strings.getString(R.string.touch_resolution_1080), strings.getString(R.string.touch_resolution_1440));
+        // Fill screen follows the resolution (the owner, 2026-11-21: "if someone select unsupported resolution it should
+        // untick/grey automatically"): greyed out and unticked at 1080p and 1440p (RuntimeActivity.wideSupported).
+        final boolean wideDisplay = activity.displayAspect() > 16f / 9f + 0.01f;
+        Runnable syncWide = () -> {
+            boolean supported = wideDisplay
+                && RuntimeActivity.wideSupported(RuntimeActivity.RENDER_HEIGHTS[radioChoice(resolutionChoice)]);
+            if (!supported) wide.setChecked(false);
+            wide.setEnabled(supported);
+        };
+        ((RadioGroup) resolutionChoice.getParent()).setOnCheckedChangeListener((group, id) -> syncWide.run());
+        syncWide.run();
         CheckBox fsr = option(content, strings.getString(R.string.touch_fsr),
             strings.getString(R.string.touch_fsr_help), render.getBoolean("fsr", false));
+        // Anti-aliasing (RuntimeActivity.aaMode): FXAA on the finished frame, applied at once. Hidden while
+        // RuntimeActivity.SHOW_AA is false: it runs after the menus and HUD and blurs their text (the owner's S25,
+        // 2026-11-21); it comes back once FXAA runs before the 2D layer.
+        RadioButton aaChoice = null;
+        if (RuntimeActivity.SHOW_AA) {
+            TextView aaLabel = new TextView(activity);
+            aaLabel.setText(strings.getString(R.string.touch_aa));
+            content.addView(aaLabel);
+            String aa = render.getString("aa", "off");
+            aaChoice = radio(content, null, strings.getString(R.string.touch_aa_off),
+                strings.getString(R.string.touch_aa_fxaa), strings.getString(R.string.touch_aa_fxaa_strong),
+                "fxaa".equals(aa) ? 1 : "fxaa_extreme".equals(aa) ? 2 : 0);
+        }
+        final RadioButton aaRadio = aaChoice;
         // The game's depth of field (off by default: it blurs the character on this renderer and costs frames).
         CheckBox depthOfField = option(content, strings.getString(R.string.touch_depth_of_field),
             strings.getString(R.string.touch_depth_of_field_help), render.getBoolean("dof", false));
@@ -559,9 +596,24 @@ final class TouchControlsView extends View {
         header(content, strings.getString(R.string.touch_section_performance));
         CheckBox primeCore = option(content, strings.getString(R.string.touch_prime_core),
             strings.getString(R.string.touch_prime_core_help), render.getBoolean("prime", RuntimeActivity.DEFAULT_PRIME));
-        // Performance overlay (fps, 1% low, frame time graph of the game's own frames): applied at once.
-        CheckBox perfOverlay = option(content, strings.getString(R.string.touch_perf_overlay),
-            strings.getString(R.string.touch_perf_overlay_help), render.getBoolean("overlay", false));
+
+        // Cheats (the owner, 2026-11-21; ds2_cheats.cpp): applied at once, remembered for the next start.
+        header(content, strings.getString(R.string.touch_section_cheats));
+        CheckBox cheatHp = option(content, strings.getString(R.string.touch_cheat_hp), null,
+            render.getBoolean("cheat_hp", false));
+        CheckBox cheatStamina = option(content, strings.getString(R.string.touch_cheat_stamina), null,
+            render.getBoolean("cheat_stamina", false));
+        CheckBox cheatWear = option(content, strings.getString(R.string.touch_cheat_wear), null,
+            render.getBoolean("cheat_wear", false));
+        Button addSouls = new Button(activity);
+        addSouls.setText(strings.getString(R.string.touch_cheat_add_souls));
+        addSouls.setAllCaps(false);
+        addSouls.setOnClickListener(v -> {
+            RuntimeActivity.nativeSetOption("cheat_add_souls", "10000");
+            android.widget.Toast.makeText(activity, strings.getString(R.string.touch_cheat_souls_added),
+                android.widget.Toast.LENGTH_SHORT).show();
+        });
+        content.addView(addSouls);
 
         // Troubleshooting. Diagnostics (the owner, 2026-11-11: off for regular play): read at start.
         header(content, strings.getString(R.string.touch_section_troubleshooting));
@@ -583,9 +635,27 @@ final class TouchControlsView extends View {
         folderButton.setText(strings.getString(R.string.touch_game_folder));
         folderButton.setAllCaps(false);
         content.addView(folderButton);
+        // A zip of the game's logs through the system file picker, so a player can attach it to a bug report from the
+        // phone (Android 11+ hides Android/data from file managers; LR's public #4, the owner's S25).
+        Button logsButton = new Button(activity);
+        logsButton.setText(strings.getString(R.string.touch_save_logs));
+        logsButton.setAllCaps(false);
+        content.addView(logsButton);
         TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
         nextStart.setPadding(0, Math.round(8f * getResources().getDisplayMetrics().density), 0,
                              Math.round(8f * getResources().getDisplayMetrics().density));
+
+        // Performance overlay (fps, 1% low, frame time graph of the game's own frames): applied at once. Last in the
+        // dialog with a warning (the owner, 2026-11-21): it is an Android view over the game, which some phones'
+        // display hardware hands to the GPU (issue #2: lost GPU device on an Adreno 825; the owner's S25 smoother
+        // without it). DECISIONS.md, 2026-11-21 morning.
+        CheckBox perfOverlay = option(content, strings.getString(R.string.touch_perf_overlay), null,
+            render.getBoolean("overlay", false));
+        TextView overlayWarning = hint(content, strings.getString(R.string.touch_perf_overlay_help));
+        overlayWarning.setTextColor(Color.rgb(255, 196, 80));
+        overlayWarning.setAlpha(1f);
+        overlayWarning.setPadding(overlayWarning.getPaddingLeft(), 0, 0,
+                                  Math.round(8f * getResources().getDisplayMetrics().density));
 
         ScrollView scroll = new ScrollView(activity);
         scroll.addView(content);
@@ -595,19 +665,33 @@ final class TouchControlsView extends View {
             .setPositiveButton(strings.getString(R.string.touch_apply), (dialog, which) -> {
                 applySettings(toggle.isChecked(), size.getProgress() + 60,
                               opacity.getProgress() + 25, ctrlAutoHide.isChecked(), hideAll.isChecked());
+                final String nextStartBefore = RuntimeActivity.nextStartState(RuntimeActivity.renderPrefs(activity));
                 RuntimeActivity.renderPrefs(activity).edit()
                     .putBoolean("debug_log", debugLog.isChecked())
                     .putBoolean("overlay", perfOverlay.isChecked())
                     .putBoolean("dof", depthOfField.isChecked())
-                    .putString("render_height", new String[] { "540", "720", "1440" }[radioChoice(resolutionChoice)])
+                    .putString("render_height", RuntimeActivity.RENDER_HEIGHTS[radioChoice(resolutionChoice)])
                     .putBoolean("fsr", fsr.isChecked())
+                    .putBoolean("wide", wide.isChecked())
+                    .putString("aa", aaRadio == null ? "off"
+                        : new String[] { "off", "fxaa", "fxaa_extreme" }[radioChoice(aaRadio)])
                     .putString("language", RuntimeActivity.LANGUAGE_IDS[language.getSelectedItemPosition()])
-                    .putBoolean("prime", primeCore.isChecked()).apply();
+                    .putBoolean("cheat_hp", cheatHp.isChecked())
+                    .putBoolean("cheat_stamina", cheatStamina.isChecked())
+                    .putBoolean("cheat_wear", cheatWear.isChecked())
+                    .putBoolean("prime", primeCore.isChecked()).commit();  // on disk before a restart below
+                RuntimeActivity.nativeSetOption("cheat_hp", cheatHp.isChecked() ? "1" : "0");
+                RuntimeActivity.nativeSetOption("cheat_stamina", cheatStamina.isChecked() ? "1" : "0");
+                RuntimeActivity.nativeSetOption("cheat_wear", cheatWear.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("prime", primeCore.isChecked() ? "1" : "0");
                 activity.setPerfOverlay(perfOverlay.isChecked());
                 RuntimeActivity.nativeSetOption("dof", depthOfField.isChecked() ? "1" : "0");
+                RuntimeActivity.nativeSetOption("aa", aaRadio == null ? "off"
+                    : new String[] { "off", "fxaa", "fxaa_extreme" }[radioChoice(aaRadio)]);
                 activity.applyFrameRate(radioChoice(fpsChoice) == 0 ? "30" : radioChoice(fpsChoice) == 1 ? "40" : "60",
                                         panel120.isChecked());
+                if (!nextStartBefore.equals(RuntimeActivity.nextStartState(RuntimeActivity.renderPrefs(activity))))
+                    activity.offerRestart();
             })
             .setNeutralButton(strings.getString(R.string.touch_edit_layout), (dialog, which) -> {
                 applySettings(toggle.isChecked(), size.getProgress() + 60,
@@ -632,6 +716,10 @@ final class TouchControlsView extends View {
         folderButton.setOnClickListener(v -> {
             settingsDialog.dismiss();
             activity.openGameFolderPage();
+        });
+        logsButton.setOnClickListener(v -> {
+            settingsDialog.dismiss();
+            activity.startLogExport();
         });
         settingsDialogOpen = true;
         syncCtrlPin();

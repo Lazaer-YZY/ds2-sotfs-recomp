@@ -1707,6 +1707,29 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
       device_properties.shaderCullDistance &&
       (shader.writes_point_size_edge_flag_kill_vertex() & 0b100) && !pa_cl_clip_cntl.vtx_kill_or);
 
+  // spirv_vfetch_endian_specialization: the variant translated for 8-in-32 vertex data when every
+  // fetch constant the shader's vertex fetches read has that byte order in this draw (operand 1
+  // of each fetch that loads anything, which is where the translator takes the byte order from;
+  // every such fetch is an attribute of a binding); any other draw keeps the run-time selection.
+  if (SpirvShaderTranslator::IsVertexFetchEndianSpecializationEnabled() &&
+      !shader.vertex_bindings().empty()) {
+    bool all_8in32 = true;
+    for (const Shader::VertexBinding& vertex_binding : shader.vertex_bindings()) {
+      for (const Shader::VertexBinding::Attribute& attribute : vertex_binding.attributes) {
+        uint32_t attribute_fetch_constant = attribute.fetch_instr.operands[1].storage_index;
+        if (attribute_fetch_constant >= 96 ||
+            regs.GetVertexFetch(attribute_fetch_constant).endian != xenos::Endian::k8in32) {
+          all_8in32 = false;
+          break;
+        }
+      }
+      if (!all_8in32) {
+        break;
+      }
+    }
+    modification.vertex.vfetch_endian_8in32 = uint32_t(all_8in32);
+  }
+
   return modification;
 }
 
@@ -5469,7 +5492,9 @@ void VulkanPipelineCache::PrecompileThread() {
                                 (uint32_t(REXCVAR_GET(vulkan_shader_xenos_multiply_vertex)) << 10) |
                                 (uint32_t(REXCVAR_GET(vulkan_texture_fetch_implicit_lod)) << 11) |
                                 (uint32_t(REXCVAR_GET(vulkan_shared_memory_texel_buffer)) << 13) |
-                                (uint32_t(REXCVAR_GET(spirv_structured_forward_jumps)) << 14);
+                                (uint32_t(REXCVAR_GET(spirv_structured_forward_jumps)) << 14) |
+                                (uint32_t(SpirvShaderTranslator::IsVertexFetchEndianSpecializationEnabled())
+                                 << 15);
   std::memcpy(marker + 24, &precompile_version, 4);
   if (FILE* file = rex::filesystem::OpenFile(precompile_marker_path_, "rb")) {
     uint8_t existing[28];
@@ -5644,6 +5669,10 @@ void VulkanPipelineCache::PrecompileThread() {
           canonical.vertex.vertex_kill_and =
               uint32_t(vulkan_device->properties().shaderCullDistance &&
                        (vertex_shader.writes_point_size_edge_flag_kill_vertex() & 0b100));
+          // The draws request the 8-in-32 vertex fetch variant (the usual guest byte order).
+          canonical.vertex.vfetch_endian_8in32 =
+              uint32_t(SpirvShaderTranslator::IsVertexFetchEndianSpecializationEnabled() &&
+                       !vertex_shader.vertex_bindings().empty());
           modification = canonical.value;
           if (IsLibraryAvailable(
                   PreRasterizationLibraryKeyHash(vertex_entry.hash, modification, 0, 0))) {

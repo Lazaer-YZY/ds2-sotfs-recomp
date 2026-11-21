@@ -807,6 +807,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   static constexpr uint32_t kLinkedTypeDescriptorPoolSetCount = 32768;
   static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
   static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
+  // vulkan_dynamic_constant_offsets: one set per uniform buffer pool page, so few sets are ever needed.
+  static constexpr uint32_t kDynamicConstantsDescriptorPoolSetCount = 64;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBufferDynamic;
   static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_uniform_buffer_;
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_storage_buffer_;
@@ -816,6 +819,18 @@ class VulkanCommandProcessor : public CommandProcessor {
   // <Usage frame, set>.
   std::deque<std::pair<uint64_t, VkDescriptorSet>> constants_transient_descriptors_used_;
   std::vector<VkDescriptorSet> constants_transient_descriptors_free_;
+  // vulkan_dynamic_constant_offsets (read once in SetupContext): the constants descriptor set layout has
+  // UNIFORM_BUFFER_DYNAMIC bindings, and there is one long-lived descriptor set per uniform_buffer_pool_ page
+  // (<page buffer, set>, all five bindings at offset 0 of that buffer with the largest range) instead of one
+  // transient set per constants change.
+  bool constants_dynamic_offsets_ = false;
+  // False with vulkan_dynamic_constant_offsets_per_change_sets (diagnostic): dynamic layout, a set per change.
+  bool constants_dynamic_per_page_sets_ = false;
+  uint32_t constants_dynamic_binds_logged_ = 0;
+  size_t constants_dynamic_page_size_ = 0;
+  ui::vulkan::LinkedTypeDescriptorSetAllocator
+      transient_descriptor_allocator_uniform_buffer_dynamic_;
+  std::vector<std::pair<VkBuffer, VkDescriptorSet>> constants_dynamic_descriptor_sets_;
 
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_textures_;
   std::deque<UsedTextureTransientDescriptorSet> texture_transient_descriptor_sets_used_;
@@ -961,6 +976,8 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t host_index = UINT32_MAX;
     bool valid = false;
   } active_occlusion_query_;
+  // vulkan_skip_no_effect_draws: draws left out since the last GPU timing line.
+  uint64_t no_effect_draws_skipped_ = 0;
   struct VertexBufferState {
     uint32_t address = UINT32_MAX;
     uint32_t size = UINT32_MAX;
@@ -1071,6 +1088,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Whether up-to-date data has been written to constant (uniform) buffers, and
   // the buffer infos in current_constant_buffer_infos_ point to them.
   uint32_t current_constant_buffers_up_to_date_;
+  // vulkan_dynamic_constant_offsets: offsets of current_constant_buffer_infos_ in their (common) pool page.
+  uint32_t current_constant_buffer_dynamic_offsets_[SpirvShaderTranslator::kConstantBufferCount] = {};
   VkDescriptorSet current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetCount];
   // Whether descriptor sets in current_graphics_descriptor_sets_ point to
   // up-to-date data.

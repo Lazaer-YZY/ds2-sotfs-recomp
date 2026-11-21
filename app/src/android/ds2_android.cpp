@@ -11,6 +11,7 @@
 #if defined(__ANDROID__)
 
 #include "android/ds2_android.h"
+#include "ds2_cheats.h"
 #include "ds2_effects.h"
 #include "ds2_framerate.h"
 #include "ds2_frame_overlay.h"
@@ -28,6 +29,7 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <csignal>
@@ -359,6 +361,15 @@ void ApplyDefaults() {
       // (Snapdragon 8s Gen 4) flickered with Eco on and, together with the performance overlay, crashed at a bonfire
       // and a fog wall; the saving was small anyway (-5.7 % GPU time on the Thor). DECISIONS.md, 2026-11-20.
       {"vulkan_dynamic_fragment_shading_rate", "false"},
+      // Draws that cannot write anything (no pixel shader, no depth / stencil test or write, no memexport, no occlusion
+      // query) are left out: ~290 of ~1,600 per frame at the burning gate (1-vertex point lists), each of which went
+      // through the whole draw path on the CPU and the GPU (DECISIONS.md, 2026-11-21 night).
+      {"vulkan_skip_no_effect_draws", "true"},
+      // Movies (game:\movie\*.wmv, drawn by the game's movie player with this pixel shader, seen only while a movie
+      // file is open) keep their 16:9 shape on a wide screen instead of stretching across it (the owner's S25,
+      // 2026-11-21: the prologue 1.22x wide at 1568x720), scaled up to the full width with the top and bottom cropped
+      // (the movies' own letterbox bars; the owner: "could it better use screen real estate?"). No effect at 16:9.
+      {"gpu_keep_aspect_pixel_shaders", "47094F2C2592E81B"},
   };
   for (const auto& [name, value] : kDefaults) {
     if (rex::cvar::GetFlagInfo(name) == nullptr) {
@@ -371,6 +382,13 @@ void ApplyDefaults() {
     rex::cvar::SetFlagByName(name, value);
   }
   REXLOG_INFO("ds2 android: {} defaults applied", std::size(kDefaults));
+  // The kernel in every log: kernels before 4.17 behave differently in the guest memory code (issue #4).
+  {
+    struct utsname name {};
+    if (uname(&name) == 0) {
+      REXLOG_INFO("ds2 android: kernel {} {}, page size {}", name.release, name.machine, sysconf(_SC_PAGESIZE));
+    }
+  }
   // "Debug logging" off in the CTRL dialog (DS2_DIAG=0, the public build's default): the GPU command thread's
   // per-draw timers and slow-frame lines and the WAIT_REG_MEM statistics are off (Majula arch view: that thread
   // 9.52 -> 9.34 ms per frame over four interleaved pairs). The switch existed but nothing native read DS2_DIAG
@@ -474,8 +492,14 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, 
     ds2::frame_overlay::Show(val == "1" || val == "true");
   } else if (key == "fps") {
     ds2::framerate::SetFrameRate(val);
+  } else if (key == "aa") {
+    ds2::effects::SetAntiAliasing(val);
   } else if (key == "dof") {
     ds2::effects::SetDepthOfField(val == "1" || val == "true");
+  } else if (key == "cheat_add_souls") {
+    ds2::cheats::AddSouls(uint32_t(std::strtoul(std::string(val).c_str(), nullptr, 10)));
+  } else if (key.rfind("cheat_", 0) == 0) {
+    ds2::cheats::Set(key.substr(6), val == "1" || val == "true");
   } else if (key == "prime") {
     ds2::android::SetPrimeGovernor(val == "1" || val == "true");
   } else {

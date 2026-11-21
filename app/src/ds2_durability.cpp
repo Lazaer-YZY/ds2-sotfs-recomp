@@ -20,6 +20,8 @@
 //                                                      sub_823F3668 are the same for the other equipment kinds)
 // ds2_durability_log: every call with its guest caller (lr), the arguments and the durability after.
 
+#include "ds2_cheats.h"
+
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -100,7 +102,8 @@ REX_HOOK_RAW(sub_823F3410) {
   if (t_halve_strike && uint32_t(ctx.lr) == kStrikeApplyReturn) {
     ctx.f1.f64 *= 0.5;  // f1 = the (negative) change; a float value, halved exactly
   }
-  if (bench_no_wear && ctx.f1.f64 < 0) ctx.f1.f64 = 0;
+  // The CTRL cheat "No equipment wear" (ds2_cheats.cpp) does the same.
+  if ((bench_no_wear || ds2::cheats::NoWear()) && ctx.f1.f64 < 0) ctx.f1.f64 = 0;
   if (!log) {
     __imp__sub_823F3410(ctx, base);
     return;

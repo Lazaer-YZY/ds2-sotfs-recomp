@@ -72,6 +72,14 @@ REXCVAR_DEFINE_BOOL(vulkan_resolve_feed_lazy_dump, true, "GPU/Vulkan",
                     "recorded from the fed texture. Saves the full-size memory write of every "
                     "fed resolve.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(vulkan_resolve_feed_lazy_dump_padded, false, "GPU/Vulkan",
+                    "vulkan_resolve_feed_lazy_dump also when the resolve rectangle is the fed "
+                    "texture's size rounded up to the resolve granularity of 8 pixels (a 320x184 "
+                    "resolve into a 320x180 texture): the up to 7 extra rows and columns are "
+                    "texture padding, written (with undefined texels) only if the memory is "
+                    "requested later. Dark Souls II's quarter, eighth and sixteenth size "
+                    "post-processing resolves (23 a frame) otherwise write guest memory nobody "
+                    "reads and feed the texture as well.");
 REXCVAR_DEFINE_BOOL(vulkan_direct_resolve_float24, true, "GPU/Vulkan",
                     "With direct_host_resolve: resolve 1x / 4x kD24FS8 (float24) depth "
                     "straight from the host depth render target to guest memory (20e4 "
@@ -471,6 +479,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
       gamma_render_target_as_unorm16_requested = false;
     }
   }
+  // The path is final: the EDRAM tile address space (gpu_edram_tiles), before
+  // anything sized or generated from it.
+  ApplyEdramTileCountConfig();
   VkFormatProperties color_rg16_uint_properties;
   ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_R16G16_UINT,
                                           &color_rg16_uint_properties);
@@ -1174,7 +1185,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         vulkan_device, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         std::max(
             ui::vulkan::VulkanUploadBufferPool::kDefaultPageSize,
-            sizeof(float) * 2 * 6 * Transfer::kMaxCutoutBorderRectangles * xenos::kEdramTileCount));
+            sizeof(float) * 2 * 6 * Transfer::kMaxCutoutBorderRectangles * xenos::EdramTileCount()));
 
     // Transfer vertex shader.
     transfer_passthrough_vertex_shader_ =
@@ -1721,6 +1732,20 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           uint32_t dump_rows;
           uint32_t dump_pitch;
           resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+          if (dump_rows &&
+              (dump_rows - 1) * dump_pitch + dump_row_length_used > xenos::kEdramTileCount) {
+            // edram_buffer_ and the resolve shaders have the console's
+            // 2048-tile period also with gpu_edram_tiles above 2048.
+            static bool span_warned = false;
+            if (!span_warned) {
+              span_warned = true;
+              REXGPU_WARN(
+                  "VulkanRenderTargetCache: a resolve spans {} EDRAM tiles (pitch {}, {} rows), "
+                  "more than the EDRAM buffer's {}: its rows alias",
+                  (dump_rows - 1) * dump_pitch + dump_row_length_used, dump_pitch, dump_rows,
+                  xenos::kEdramTileCount);
+            }
+          }
           if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
             REXGPU_ERROR("VulkanRenderTargetCache: Failed to dump host render targets for resolve");
             return false;
@@ -1890,8 +1915,13 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
               int32_t(resolve_info.coordinate_info.edram_offset_x_div_8 * 8) &&
           resolve_feeds[0].dest_y ==
               int32_t(resolve_info.coordinate_info.edram_offset_y_div_8 * 8) &&
-          resolve_feeds[0].width == resolve_info.coordinate_info.width_div_8 * 8 &&
-          resolve_feeds[0].height == resolve_info.height_div_8 * 8 &&
+          (resolve_feeds[0].width == resolve_info.coordinate_info.width_div_8 * 8 ||
+           (REXCVAR_GET(vulkan_resolve_feed_lazy_dump_padded) &&
+            ((resolve_feeds[0].width + 7) & ~uint32_t(7)) ==
+                resolve_info.coordinate_info.width_div_8 * 8)) &&
+          (resolve_feeds[0].height == resolve_info.height_div_8 * 8 ||
+           (REXCVAR_GET(vulkan_resolve_feed_lazy_dump_padded) &&
+            ((resolve_feeds[0].height + 7) & ~uint32_t(7)) == resolve_info.height_div_8 * 8)) &&
           (!resolve_feeds[0].swap_red_blue ||
            direct_host_resolve.pipeline == direct_host_resolve_7e3_to_8888_pipeline_ ||
            vulkan_device->properties().imageViewFormatSwizzle);
@@ -2365,10 +2395,35 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
       RenderTarget* const* depth_and_color_render_targets =
           last_update_accumulated_render_targets();
 
-      PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
-                                       depth_and_color_render_targets, last_update_transfers(),
-                                       last_update_transfer_clear_values(),
-                                       last_update_transfer_cutout());
+      if (last_update_transfer_clear_values()) {
+        // Constant transfers as clears: the cut-out and the clear only for the render targets of
+        // the mask, plain transfers for the others.
+        RenderTarget* cleared_render_targets[1 + xenos::kMaxColorRenderTargets] = {};
+        RenderTarget* other_render_targets[1 + xenos::kMaxColorRenderTargets] = {};
+        bool any_other = false;
+        uint32_t clear_mask = last_update_transfer_clear_mask();
+        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+          if ((clear_mask >> i) & 1) {
+            cleared_render_targets[i] = depth_and_color_render_targets[i];
+          } else if (depth_and_color_render_targets[i] && !last_update_transfers()[i].empty()) {
+            other_render_targets[i] = depth_and_color_render_targets[i];
+            any_other = true;
+          }
+        }
+        PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets, cleared_render_targets,
+                                         last_update_transfers(),
+                                         last_update_transfer_clear_values(),
+                                         last_update_transfer_cutout());
+        if (any_other) {
+          PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets, other_render_targets,
+                                           last_update_transfers());
+        }
+      } else {
+        PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+                                         depth_and_color_render_targets, last_update_transfers(),
+                                         last_update_transfer_clear_values(),
+                                         last_update_transfer_cutout());
+      }
 
       if (depth_and_color_render_targets[0]) {
         render_pass_key.depth_and_color_used |= 1 << 0;
@@ -3653,7 +3708,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
           spv::OpIMul, type_uint,
           builder.createTriOp(spv::OpBitFieldUExtract, type_uint, address_constant,
                               builder.makeUintConstant(0),
-                              builder.makeUintConstant(xenos::kEdramPitchTilesBits)),
+                              builder.makeUintConstant(kTransferPitchTilesBits)),
           dest_tile_index_y),
       dest_tile_index_x);
 
@@ -3990,15 +4045,15 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
               builder.createUnaryOp(spv::OpBitcast, type_int, dest_tile_index),
               builder.createTriOp(spv::OpBitFieldSExtract, type_int,
                                   builder.createUnaryOp(spv::OpBitcast, type_int, address_constant),
-                                  builder.makeUintConstant(xenos::kEdramPitchTilesBits * 2),
-                                  builder.makeUintConstant(xenos::kEdramBaseTilesBits + 1)))),
-      builder.makeUintConstant(xenos::kEdramTileCount - 1));
+                                  builder.makeUintConstant(kTransferPitchTilesBits * 2),
+                                  builder.makeUintConstant(xenos::kEdramMaxBaseTilesBits + 1)))),
+      builder.makeUintConstant(xenos::EdramTileCount() - 1));
   // Split the source 32bpp tile index into X and Y tile index within the source
   // image.
   spv::Id source_pitch_tiles =
       builder.createTriOp(spv::OpBitFieldUExtract, type_uint, address_constant,
-                          builder.makeUintConstant(xenos::kEdramPitchTilesBits),
-                          builder.makeUintConstant(xenos::kEdramPitchTilesBits));
+                          builder.makeUintConstant(kTransferPitchTilesBits),
+                          builder.makeUintConstant(kTransferPitchTilesBits));
   spv::Id source_tile_index_y =
       builder.createBinOp(spv::OpUDiv, type_uint, source_tile_index, source_pitch_tiles);
   spv::Id source_tile_index_x =
@@ -4995,15 +5050,15 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
                             spv::OpBitFieldSExtract, type_int,
                             builder.createUnaryOp(spv::OpBitcast, type_int,
                                                   host_depth_address_constant),
-                            builder.makeUintConstant(xenos::kEdramPitchTilesBits * 2),
-                            builder.makeUintConstant(xenos::kEdramBaseTilesBits + 1)))),
-                builder.makeUintConstant(xenos::kEdramTileCount - 1));
+                            builder.makeUintConstant(kTransferPitchTilesBits * 2),
+                            builder.makeUintConstant(xenos::kEdramMaxBaseTilesBits + 1)))),
+                builder.makeUintConstant(xenos::EdramTileCount() - 1));
             // Split the host depth source tile index into X and Y tile index
             // within the source image.
             spv::Id host_depth_source_pitch_tiles =
                 builder.createTriOp(spv::OpBitFieldUExtract, type_uint, host_depth_address_constant,
-                                    builder.makeUintConstant(xenos::kEdramPitchTilesBits),
-                                    builder.makeUintConstant(xenos::kEdramPitchTilesBits));
+                                    builder.makeUintConstant(kTransferPitchTilesBits),
+                                    builder.makeUintConstant(kTransferPitchTilesBits));
             spv::Id host_depth_source_tile_index_y =
                 builder.createBinOp(spv::OpUDiv, type_uint, host_depth_source_tile_index,
                                     host_depth_source_pitch_tiles);
@@ -6607,7 +6662,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
       builder.createAccessChain(spv::StorageClassPushConstant, push_constants, id_vector_temp),
       spv::NoPrecision);
   spv::Id const_edram_base_tiles_bits_plus_1 =
-      builder.makeUintConstant(xenos::kEdramBaseTilesBits + 1);
+      builder.makeUintConstant(xenos::kEdramMaxBaseTilesBits + 1);
   spv::Id edram_tile_index_non_wrapped =
       builder.createBinOp(spv::OpIAdd, type_uint,
                           builder.createTriOp(spv::OpBitFieldUExtract, type_uint, offsets_constant,
@@ -6620,6 +6675,8 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
       spv::OpIAdd, type_uint,
       builder.createBinOp(
           spv::OpIMul, type_uint, builder.makeUintConstant(tile_width * tile_height),
+          // The EDRAM buffer's period (the console's 2048 tiles), not
+          // xenos::EdramTileCount(): what the resolve shaders read with.
           builder.createBinOp(spv::OpBitwiseAnd, type_uint, edram_tile_index_non_wrapped,
                               builder.makeUintConstant(xenos::kEdramTileCount - 1))),
       builder.createBinOp(
@@ -6648,7 +6705,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
       spv::OpISub, type_uint, edram_tile_index_non_wrapped,
       builder.createTriOp(spv::OpBitFieldUExtract, type_uint, offsets_constant,
                           const_edram_base_tiles_bits_plus_1,
-                          builder.makeUintConstant(xenos::kEdramBaseTilesBits)));
+                          builder.makeUintConstant(xenos::kEdramMaxBaseTilesBits)));
   // Split the linear tile index in the source texture into X and Y in tiles.
   spv::Id source_pitch_tiles =
       builder.createTriOp(spv::OpBitFieldUExtract, type_uint, pitches_constant,

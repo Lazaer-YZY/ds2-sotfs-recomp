@@ -420,6 +420,24 @@ constexpr uint32_t kEdramPitchPixelsBits = 14;
 // usable on the Xenos, which has periodic 11-bit EDRAM tile addressing.
 constexpr uint32_t kEdramBaseTilesBits = 11;
 
+// Extended EDRAM (gpu_edram_tiles, host render targets only): the tile address
+// space the render target cache tracks may be 4096 or 8192 tiles, so a title
+// laying out more than 10 MiB of surfaces (a 1920x1080 screen) doesn't alias
+// them. kEdramTileCount / kEdramBaseTilesBits remain the console's values:
+// the EDRAM buffer the resolves go through and the precompiled resolve shaders
+// keep the 2048-tile period (one resolve never spans more than that), and no
+// host render target is taller than the console's EDRAM.
+constexpr uint32_t kEdramMaxBaseTilesBits = 13;
+constexpr uint32_t kEdramMaxTileCount = uint32_t(1) << kEdramMaxBaseTilesBits;
+// Defined in pipeline/render_target/cache.cpp, set once by the render target
+// cache initialization (RenderTargetCache::ApplyEdramTileCountConfig).
+extern uint32_t edram_tile_count_configured;
+// The period of EDRAM tile addressing: a power of two, kEdramTileCount to
+// kEdramMaxTileCount.
+inline uint32_t EdramTileCount() {
+  return edram_tile_count_configured;
+}
+
 constexpr uint32_t GetSurfacePitchTiles(uint32_t pitch_pixels, MsaaSamples msaa_samples,
                                         bool is_64bpp) {
   uint32_t pitch_samples = pitch_pixels << uint32_t(msaa_samples >= MsaaSamples::k4X);

@@ -76,6 +76,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // first kVertexTextureSignClassSlots textures of their used mask.
   static bool IsVertexTextureSignSpecializationEnabled();
   static constexpr uint32_t kVertexTextureSignClassSlots = 3;
+  // Whether draws whose vertex fetch constants are all 8-in-32 get vertex shaders translated for
+  // that byte order (spirv_vfetch_endian_specialization, Modification::vertex.vfetch_endian_8in32).
+  static bool IsVertexFetchEndianSpecializationEnabled();
 
   union Modification {
     // If anything in this is structure is changed in a way not compatible with
@@ -126,6 +129,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
       // is clipped at the near and far planes. Zero in descriptions stored before it existed, which is right for
       // devices with depthClamp (never set there).
       uint32_t clamp_depth : 1;
+      // spirv_vfetch_endian_specialization: every vertex fetch constant this shader reads has
+      // xenos::Endian::k8in32 in the draw (VulkanPipelineCache::GetCurrentVertexShaderModification
+      // checks them per draw), so the vertex fetches are translated for that byte order instead of
+      // selecting the swap from the fetch constant at run time. Zero in descriptions stored before
+      // it existed and with the switch off: the run-time selection, right for any byte order.
+      uint32_t vfetch_endian_8in32 : 1;
     } vertex;
     struct PixelShaderModification {
       // uint32_t 0.
@@ -743,6 +752,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
   // Perform endian swap of a uint scalar or vector.
   spv::Id EndianSwap32Uint(spv::Id value, spv::Id endian);
+  // The same operations as EndianSwap32Uint for a byte order known at translation time, without
+  // the run-time selection.
+  spv::Id EndianSwap32UintStatic(spv::Id value, xenos::Endian endian);
   // Perform endian swap of a uint4 vector.
   spv::Id EndianSwap128Uint4(spv::Id value, spv::Id endian);
 

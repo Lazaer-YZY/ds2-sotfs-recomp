@@ -4194,6 +4194,47 @@ spv::Id SpirvShaderTranslator::EndianSwap32Uint(spv::Id value, spv::Id endian) {
   return value;
 }
 
+spv::Id SpirvShaderTranslator::EndianSwap32UintStatic(spv::Id value, xenos::Endian endian) {
+  if (endian == xenos::Endian::kNone) {
+    return value;
+  }
+  spv::Id type = builder_->getTypeId(value);
+  int num_components = builder_->getNumTypeComponents(type);
+  auto make_uint_typed = [&](unsigned int scalar_value) -> spv::Id {
+    spv::Id scalar = builder_->makeUintConstant(scalar_value);
+    if (num_components <= 1) {
+      return scalar;
+    }
+    id_vector_temp_.clear();
+    id_vector_temp_.insert(id_vector_temp_.cend(), num_components, scalar);
+    return builder_->makeCompositeConstant(type, id_vector_temp_);
+  };
+  if (endian == xenos::Endian::k8in16 || endian == xenos::Endian::k8in32) {
+    // 8-in-16 or one half of 8-in-32 (doing 8-in-16 swap).
+    spv::Id const_uint_8_typed = make_uint_typed(8);
+    spv::Id const_uint_00ff00ff_typed = make_uint_typed(0x00FF00FF);
+    value = builder_->createBinOp(
+        spv::OpBitwiseOr, type,
+        builder_->createBinOp(
+            spv::OpBitwiseAnd, type,
+            builder_->createBinOp(spv::OpShiftRightLogical, type, value, const_uint_8_typed),
+            const_uint_00ff00ff_typed),
+        builder_->createBinOp(
+            spv::OpShiftLeftLogical, type,
+            builder_->createBinOp(spv::OpBitwiseAnd, type, value, const_uint_00ff00ff_typed),
+            const_uint_8_typed));
+  }
+  if (endian == xenos::Endian::k8in32 || endian == xenos::Endian::k16in32) {
+    // 16-in-32 or another half of 8-in-32 (doing 16-in-32 swap).
+    spv::Id const_uint_16_typed = make_uint_typed(16);
+    value = builder_->createQuadOp(
+        spv::OpBitFieldInsert, type,
+        builder_->createBinOp(spv::OpShiftRightLogical, type, value, const_uint_16_typed), value,
+        builder_->makeIntConstant(16), builder_->makeIntConstant(16));
+  }
+  return value;
+}
+
 spv::Id SpirvShaderTranslator::EndianSwap128Uint4(spv::Id value, spv::Id endian) {
   // Change 8-in-64 and 8-in-128 to 8-in-32, and then swap within 32 bits.
 

@@ -207,6 +207,11 @@ class RenderTargetCache {
   // Call last in implementation-specific initialization (when things like path
   // are initialized by the implementation).
   void InitializeCommon();
+  // Sets xenos::EdramTileCount() from gpu_edram_tiles. Call in
+  // implementation-specific initialization once the path is known, before
+  // anything sized or generated from the tile count (implementations not
+  // calling this keep the console's 2048 tiles).
+  void ApplyEdramTileCountConfig();
   // May be called from the destructor, or from the implementation shutdown to
   // destroy all render targets before destroying what they depend on in the
   // implementation.
@@ -234,14 +239,14 @@ class RenderTargetCache {
   union RenderTargetKey {
     uint32_t key;
     struct {
-      uint32_t base_tiles : xenos::kEdramBaseTilesBits;  // 11
+      uint32_t base_tiles : xenos::kEdramMaxBaseTilesBits;  // 13
       // At 4x MSAA (2 horizontal samples), max. align(8192 * 2, 80) / 80 = 205.
       // For pitch at 64bpp, multiply by 2 (or use GetPitchTiles).
-      uint32_t pitch_tiles_at_32bpp : 8;                          // 19
-      xenos::MsaaSamples msaa_samples : xenos::kMsaaSamplesBits;  // 21
-      uint32_t is_depth : 1;                                      // 22
+      uint32_t pitch_tiles_at_32bpp : 8;                          // 21
+      xenos::MsaaSamples msaa_samples : xenos::kMsaaSamplesBits;  // 23
+      uint32_t is_depth : 1;                                      // 24
       // Ignoring the blending precision and sRGB.
-      uint32_t resource_format : xenos::kRenderTargetFormatBits;  // 26
+      uint32_t resource_format : xenos::kRenderTargetFormatBits;  // 28
     };
 
     RenderTargetKey() : key(0) { static_assert_size(*this, sizeof(key)); }
@@ -525,6 +530,10 @@ class RenderTargetCache {
   const uint64_t* last_update_transfer_clear_values() const {
     return last_update_transfer_clear_ ? last_update_transfer_clear_values_ : nullptr;
   }
+  // Which render targets of the last update (bit 0 = depth) the cut-out and the
+  // clear values apply to when last_update_transfer_clear_values() is not null:
+  // the others get plain ownership transfers without a cut-out.
+  uint32_t last_update_transfer_clear_mask() const { return last_update_transfer_clear_mask_; }
 
   HostDepthStoreRenderTargetConstant GetHostDepthStoreRenderTargetConstant(
       uint32_t pitch_tiles, bool msaa_2x_supported) const {
@@ -589,12 +598,16 @@ class RenderTargetCache {
   bool last_update_transfer_cutout_valid_ = false;
   uint64_t last_update_transfer_clear_values_[1 + xenos::kMaxColorRenderTargets] = {};
   bool last_update_transfer_clear_ = false;
+  uint32_t last_update_transfer_clear_mask_ = 0;
   // Depth render targets whose content within a rectangle is a single raw
   // guest depth / stencil value (written by a clear-like rectangle and not
   // drawn to since), by RenderTargetKey::key.
   struct ConstantDepthRegion {
     Transfer::Rectangle rectangle;
     uint32_t raw_value;
+    // Whether the stencil byte of raw_value was written by the rectangle (not
+    // just assumed 0 because the stencil wasn't touched).
+    bool stencil_known;
   };
   std::unordered_map<uint32_t, ConstantDepthRegion> constant_depth_regions_;
 

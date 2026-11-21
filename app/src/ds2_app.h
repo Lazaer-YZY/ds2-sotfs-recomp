@@ -7,6 +7,7 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+#include "ds2_cheats.h"
 #include "ds2_hp_probe.h"
 #include "ds2_capture.h"
 #include "ds2_cpu_settings.h"
@@ -171,6 +172,7 @@ class Ds2App : public rex::ReXApp {
     ds2::capture::Start(runtime());   // diagnostic frame capture, off unless --ds2_capture_dir is given
     ds2::watchdog::Start(runtime());  // load/hang telemetry in the log
     ds2::hp_probe::Start(runtime());  // bench helper, DS2_HP_PROBE only
+    ds2::cheats::Start(runtime());    // CTRL cheats (idle while all are off)
   }
   void OnShutdown() override {
     ds2::frame_overlay::Shutdown();

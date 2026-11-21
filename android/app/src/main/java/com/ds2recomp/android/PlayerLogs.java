@@ -36,18 +36,23 @@ final class PlayerLogs {
     static final String DIRECTORY = "logs";
     static final String README = "README.txt";
     static final int JAVA_CRASHES_KEPT = 5;
-    private static final String README_TEXT =
-        "Dark Souls II (Android port) logs. For a bug report, attach the newest runtime-*.log,\n"
-        + "native-stderr.log and any java-crash-*.txt. Open the app once after a crash\n"
-        + "so a PC sees the complete files.\n";
+    static final String README_TEXT =
+        "Dark Souls II (Android port) logs. For a bug report, use CTRL -> Save logs in the game (a zip\n"
+        + "you can attach from the phone), or copy ds2*.log and ds2_wd_last.txt from here over USB.\n"
+        + "Open the app once after a crash so a PC sees the complete files.\n";
     private static final Pattern LOG_FILE = Pattern.compile(
-        "runtime-\\d+\\.log|shader-\\d+\\.jsonl|native-stderr(\\.previous)?\\.log|java-crash-\\d+\\.txt|README\\.txt");
+        "ds2(\\.\\d+)?\\.log|ds2_wd_last\\.txt|runtime-\\d+\\.log|shader-\\d+\\.jsonl"
+        + "|native-stderr(\\.previous)?\\.log|java-crash-\\d+\\.txt|README\\.txt");
     private static final Pattern JAVA_CRASH = Pattern.compile("java-crash-(\\d+)\\.txt");
     private static final Pattern RUNTIME_LOG = Pattern.compile("runtime-(\\d+)\\.log");
+    /** The game's log: ds2.log, rotated at 5 MB into ds2.1.log (the newest older one), ds2.2.log, ... */
+    private static final Pattern GAME_LOG = Pattern.compile("ds2(?:\\.(\\d+))?\\.log");
     private static final Pattern EXPORTED = Pattern.compile(
-        "native-stderr(\\.previous)?\\.log|java-crash-\\d+\\.txt");
+        "ds2_wd_last\\.txt|native-stderr(\\.previous)?\\.log|java-crash-\\d+\\.txt");
     /** Runtime logs in an export: this run and the two before it, for a crash in the last one. */
     static final int RUNTIME_LOGS_EXPORTED = 3;
+    /** Game log files in an export: ds2.log and the newest rotated ones (5 MB each, a few MB zipped in all). */
+    static final int GAME_LOGS_EXPORTED = 5;
 
     private PlayerLogs() {}
 
@@ -95,23 +100,44 @@ final class PlayerLogs {
     }
 
     /**
-     * The files a log export holds: the newest runtime logs, native stderr and the
-     * Java crash reports. Shader logs stay out; they are large and rarely needed.
+     * The files a log export holds: ds2.log and its newest rotated files, the watchdog's last
+     * snapshot, native stderr and the Java crash reports (and Lost Odyssey's runtime-*.log
+     * names, should they ever appear). Shader logs stay out; they are large and rarely needed.
      */
     static List<File> exportable(File directory) {
         File[] files = directory.listFiles();
         List<File> runtime = new ArrayList<>();
+        List<File> game = new ArrayList<>();
         List<File> result = new ArrayList<>();
         if (files == null) return result;
         for (File file : files) {
             if (!file.isFile()) continue;
             if (RUNTIME_LOG.matcher(file.getName()).matches()) runtime.add(file);
+            else if (GAME_LOG.matcher(file.getName()).matches()) game.add(file);
             else if (EXPORTED.matcher(file.getName()).matches()) result.add(file);
         }
         Collections.sort(runtime, (a, b) -> Long.compare(runtimeStamp(b), runtimeStamp(a)));
         result.addAll(runtime.subList(0, Math.min(RUNTIME_LOGS_EXPORTED, runtime.size())));
+        Collections.sort(game, (a, b) -> Long.compare(gameLogIndex(a), gameLogIndex(b)));
+        result.addAll(game.subList(0, Math.min(GAME_LOGS_EXPORTED, game.size())));
         Collections.sort(result, (a, b) -> a.getName().compareTo(b.getName()));
         return result;
+    }
+
+    /** 0 for ds2.log, n for ds2.n.log (older the higher). */
+    private static long gameLogIndex(File log) {
+        Matcher matcher = GAME_LOG.matcher(log.getName());
+        if (!matcher.matches() || matcher.group(1) == null) return 0;
+        try {
+            return Long.parseLong(matcher.group(1));
+        } catch (NumberFormatException e) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    /** The suggested file name of a log export, e.g. DS2-logs-20261121-0830.zip. */
+    static String exportName(java.util.Date when) {
+        return "DS2-logs-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(when) + ".zip";
     }
 
     private static long runtimeStamp(File log) {

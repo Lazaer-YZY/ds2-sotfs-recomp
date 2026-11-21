@@ -9,9 +9,11 @@
  * @modified    Tom Clay & Rien Gupta, 2026 - Adapted for ReXGlue runtime (POSIX + macOS)
  */
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -284,7 +286,13 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
     flags |= MAP_FIXED;
   }
 #elif defined(MAP_FIXED_NOREPLACE)
-  if (base_address) {
+  // Debug launches: REX_DEBUG_MMAP_HINT_ONLY=1 behaves like a kernel before 4.17 (the address only a
+  // hint), =2 the same without the fallback below, which reproduces DS2 issue #4.
+  static const int debug_hint_only = [] {
+    const char* value = std::getenv("REX_DEBUG_MMAP_HINT_ONLY");
+    return value ? std::atoi(value) : 0;
+  }();
+  if (base_address && !debug_hint_only) {
     flags |= MAP_FIXED_NOREPLACE;
   }
 #else
@@ -294,6 +302,26 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
 #endif
 
   void* result = mmap(base_address, length, prot_initial, flags, -1, 0);
+#if !REX_PLATFORM_MAC && defined(MAP_FIXED_NOREPLACE)
+  // Kernels before 4.17 don't know MAP_FIXED_NOREPLACE and take the address as a hint: an occupied
+  // range comes back mapped somewhere else instead of failing with EEXIST, so a commit inside a
+  // reservation never reached the mprotect below and kept the pages' old protection (DS2 issue #4,
+  // a 4.14 kernel: a released stack guard page stayed no-access, and filling the next thread's
+  // stack faulted forever). Undo the stray mapping and take the EEXIST path, as newer kernels do.
+  if (result != MAP_FAILED && base_address && result != base_address) {
+    static std::atomic<uint32_t> hint_results{0};
+    const uint32_t count = ++hint_results;
+    if (count <= 3) {
+      REXSYS_WARN("AllocFixed: the kernel took {} as a hint (mapped at {}; kernel before 4.17?){}", base_address,
+                  result, debug_hint_only == 2 ? ", fallback off (REX_DEBUG_MMAP_HINT_ONLY=2)" : "");
+    }
+    if (debug_hint_only != 2) {
+      munmap(result, length);
+      result = MAP_FAILED;
+      errno = EEXIST;
+    }
+  }
+#endif
   if (result != MAP_FAILED) {
     return result;
   }

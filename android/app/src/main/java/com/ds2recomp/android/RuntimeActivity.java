@@ -75,6 +75,9 @@ public final class RuntimeActivity extends SDLActivity {
     // about 24 fps on the AYN Thor); "fsr": the image is upscaled to the screen with AMD FSR 1 (sharper) instead of
     // the display's own scaler. The video mode stays 1280x720: the game ignores it, the presenter takes the shape.
     static final String DEFAULT_RENDER_HEIGHT = "720";
+    // The CTRL dialog's choices, in order. "1080": the game's own 1920x1080 screen; its colour and depth targets do not
+    // fit the console's 10 MB EDRAM, so the emulated EDRAM is made larger (gpu_edram_tiles, ds2_render_size.cpp).
+    static final String[] RENDER_HEIGHTS = { "540", "720", "1080", "1440" };
 
     // Game language (CTRL dialog, from the next start): one of LANGUAGE_IDS, English by default (the owner,
     // 2026-11-20), or "auto": the device's language when the game has it, English otherwise. The game reads the console's language setting (user_language: Xbox 360
@@ -148,22 +151,85 @@ public final class RuntimeActivity extends SDLActivity {
             + ", device " + java.util.Locale.getDefault().toLanguageTag() + "), game region " + region);
     }
 
+    /**
+     * "Fill wide screens" (CTRL, from the next start; ds2_render_size.cpp): the game's screen as wide as the display
+     * at the same height (Hor+: more to the sides, the HUD and menus kept 16:9 in the middle). The colour and depth
+     * targets must fit the emulated EDRAM together (4096 tiles: at most 2400 wide at 540, 1760 at 720). Only at 540p
+     * and 720p: at 1080p (2352x1080, 8192 tiles) the post-processing came out blue and washed out on the Thor
+     * (2026-11-21), and 1440p (720p scaled 2x) is untested. Returns the width, or 0 for the console's 16:9.
+     */
+    /** Whether Fill screen is offered at this CTRL resolution choice (540p and 720p; see wideWidth). */
+    static boolean wideSupported(String renderHeight) {
+        return "540".equals(renderHeight) || "720".equals(renderHeight);
+    }
+
+    static int wideWidth(SharedPreferences render, int height, float displayAspect) {
+        if (!render.getBoolean("wide", false) || displayAspect <= 16f / 9f + 0.01f) return 0;
+        int width = Math.round(height * displayAspect / 16f) * 16;
+        if (height > 720) return 0;
+        int max = height <= 540 ? 2400 : 1760;
+        width = Math.min(width, max);
+        return width > (height * 16 / 9 + 15) / 16 * 16 ? width : 0;
+    }
+
+    /** The display's long side over its short side (the game runs in landscape). */
+    float displayAspect() {
+        android.graphics.Point size = new android.graphics.Point();
+        getWindowManager().getDefaultDisplay().getRealSize(size);
+        int longSide = Math.max(size.x, size.y), shortSide = Math.min(size.x, size.y);
+        return shortSide > 0 ? (float) longSide / shortSide : 16f / 9f;
+    }
+
+    /**
+     * CTRL's anti-aliasing option is hidden (and FXAA off) until FXAA runs before the 2D layer: on the finished frame
+     * it blurs the menus' and HUD's text (the owner's S25, 2026-11-21: "fxaa actually makes the text more difficult
+     * to read").
+     */
+    static final boolean SHOW_AA = false;
+
+    /** The CTRL anti-aliasing choice as the SDK's swap post effect: "none", "fxaa" or "fxaa_extreme". */
+    static String aaMode(SharedPreferences render) {
+        if (!SHOW_AA) return "none";
+        String aa = render.getString("aa", "off");
+        return "fxaa".equals(aa) || "fxaa_extreme".equals(aa) ? aa : "none";
+    }
+
     /** The display options' runtime arguments (render size, presentation). */
-    static void addDisplayArguments(java.util.List<String> args, SharedPreferences render) {
+    static void addDisplayArguments(java.util.List<String> args, SharedPreferences render, float displayAspect) {
         String height = render.getString("render_height", DEFAULT_RENDER_HEIGHT);
         boolean fsr = render.getBoolean("fsr", false);
+        int gameHeight = "540".equals(height) ? 540 : "1080".equals(height) ? 1080 : 720;
+        int wide = wideSupported(height) ? wideWidth(render, gameHeight, displayAspect) : 0;
+        if (wide != 0) {
+            // The game's screen, and the presenter's shape (it letterboxes to the video mode).
+            args.add("--ds2_render_height=" + gameHeight);
+            args.add("--ds2_render_width=" + wide);
+            args.add("--video_mode_width=" + wide);
+            args.add("--video_mode_height=" + gameHeight);
+            // Colour, depth and the post-processing pool of a wider screen do not fit the console's 10 MB EDRAM
+            // side by side: the emulated EDRAM is doubled (ds2_render_size.cpp).
+            args.add("--gpu_edram_tiles=4096");
+            android.util.Log.i("ds2recomp", "display: wide screen " + wide + "x" + gameHeight + " (display aspect "
+                + displayAspect + ")");
+        }
         // Without FSR the swapchain is the game's height and the display hardware scales it to the screen (cheapest);
         // with FSR, or a picture larger than the screen, it is the screen's own size and the presenter scales.
         int presentHeight = PRESENT_MAX_HEIGHT;
         if ("540".equals(height)) {
             args.add("--ds2_render_height=540");
             presentHeight = 540;
+        } else if ("1080".equals(height)) {
+            args.add("--ds2_render_height=1080");
+            args.add("--gpu_edram_tiles=8192");
+            presentHeight = 1080;
         } else if ("1440".equals(height)) {
             args.add("--draw_resolution_scale_x=2");
             args.add("--draw_resolution_scale_y=2");
             presentHeight = 0;
         }
         args.add("--present_max_height=" + (fsr ? 0 : presentHeight));
+        // Anti-aliasing (CTRL, also switched live): FXAA on the finished frame before it is scaled to the screen.
+        args.add("--swap_post_effect=" + aaMode(render));
         args.add("--present_effect=" + (fsr ? "fsr" : "bilinear"));
         android.util.Log.i("ds2recomp", "display: render height " + height + ", " + (fsr ? "FSR upscaling" : "display scaling"));
     }
@@ -172,6 +238,33 @@ public final class RuntimeActivity extends SDLActivity {
     static boolean panel120Wanted(SharedPreferences render) {
         String fps = render.getString("fps", DEFAULT_FPS);
         return "40".equals(fps) || ("60".equals(fps) && render.getBoolean("panel120", false));
+    }
+
+    /**
+     * The CTRL settings read only when the game starts (marked * in the dialog): language, resolution, FSR, wide
+     * screens, debug logging, the 120 Hz panel (40 fps, Smoother 60). The dialog offers a restart when they change
+     * (the owner, 2026-11-21: "Change in resolution etc didn't seem to apply till after restart").
+     */
+    static String nextStartState(SharedPreferences render) {
+        return render.getString("language", DEFAULT_LANGUAGE) + "|" + render.getString("render_height", DEFAULT_RENDER_HEIGHT)
+            + "|" + render.getBoolean("fsr", false) + "|" + render.getBoolean("wide", false)
+            + "|" + render.getBoolean("debug_log", DEFAULT_DEBUG_LOG) + "|" + panel120Wanted(render);
+    }
+
+    /** After CTRL changed a next-start setting: restart now (progress since the last save is lost) or later. */
+    void offerRestart() {
+        new android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.restart_title))
+            .setMessage(getString(R.string.restart_message))
+            .setPositiveButton(getString(R.string.restart_now), (dialog, which) -> {
+                // As the game folder page: the pending activity outlives the process; Android starts a new one for it.
+                Intent intent = new Intent(this, RuntimeActivity.class);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                startActivity(intent);
+                Runtime.getRuntime().exit(0);
+            })
+            .setNegativeButton(getString(R.string.restart_later), null)
+            .show();
     }
 
     /** Asks for the panel's 120 Hz mode at the current resolution (the Thor: 60 and 120 Hz). */
@@ -194,7 +287,7 @@ public final class RuntimeActivity extends SDLActivity {
 
     /** CTRL dialog: saves the frame rate; the cap changes at once, the panel / vertical blank rate at the next start. */
     void applyFrameRate(String fps, boolean panel120) {
-        renderPrefs(this).edit().putString("fps", fps).putBoolean("panel120", panel120).apply();
+        renderPrefs(this).edit().putString("fps", fps).putBoolean("panel120", panel120).commit();
         nativeSetOption("fps", fps);
     }
 
@@ -314,6 +407,69 @@ public final class RuntimeActivity extends SDLActivity {
         Intent intent = new Intent(this, GameFolderActivity.class);
         intent.putExtra(GameFolderActivity.EXTRA_FROM_GAME, true);
         startActivity(intent);
+    }
+
+    private static final int REQUEST_EXPORT_LOGS = 0x4453;  // 'DS'
+
+    /**
+     * CTRL dialog's "Save logs": the system file picker, then a zip of the game's logs there. Android 11+ hides
+     * Android/data from the phone's file managers, so this is how a player attaches a log from the phone (the
+     * owner's S25, 2026-11-21; ported from LR's public #4 fix).
+     */
+    void startLogExport() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("application/zip")
+            .putExtra(Intent.EXTRA_TITLE, PlayerLogs.exportName(new java.util.Date()));
+        try {
+            startActivityForResult(intent, REQUEST_EXPORT_LOGS);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, getString(R.string.logs_no_picker), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQUEST_EXPORT_LOGS) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) exportLogs(data.getData());
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    private void exportLogs(android.net.Uri uri) {
+        java.util.List<File> files = PlayerLogs.exportable(PlayerLogs.directory(this));
+        String version;
+        try {
+            version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            version = "?";
+        }
+        GpuDriverStore.Installed driver = GpuDriverStore.selectedDriver(this);
+        SharedPreferences prefs = renderPrefs(this);
+        String device = PlayerLogs.deviceDescription() + "\napp=" + getPackageName() + " " + version
+            + "\ngpu=" + GpuDriverStore.gpuModel()
+            + "\ndriver=" + (driver != null ? driver.metadata.name : GpuDriverStore.SYSTEM_DRIVER_NAME)
+            + "\nsettings=" + new java.util.TreeMap<>(prefs.getAll());
+        new Thread(() -> {
+            String message;
+            try (java.io.OutputStream output = getContentResolver().openOutputStream(uri, "w")) {
+                if (output == null) throw new java.io.IOException("the file could not be opened");
+                PlayerLogs.exportZip(files, device, output);
+                String name = null;
+                try (android.database.Cursor row = getContentResolver().query(uri,
+                        new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                    if (row != null && row.moveToFirst()) name = row.getString(0);
+                } catch (RuntimeException ignored) {
+                    // The name is only for the message.
+                }
+                message = getString(R.string.logs_saved, name != null ? name : "a zip");
+            } catch (java.io.IOException | RuntimeException e) {
+                message = getString(R.string.logs_save_failed, String.valueOf(e.getMessage()));
+            }
+            final String shown = message;
+            runOnUiThread(() -> Toast.makeText(this, shown, Toast.LENGTH_LONG).show());
+        }, "DS2 log export").start();
     }
 
     @Override
@@ -476,6 +632,12 @@ public final class RuntimeActivity extends SDLActivity {
         // UI thread, which cost frames in play (2026-11-20).
         nativeSetenv("DS2_FRAME_OVERLAY", "0");
         nativeSetenv("DS2_DEPTH_OF_FIELD", render.getBoolean("dof", false) ? "1" : "0");
+        // CTRL cheats (ds2_cheats.cpp), also switched live through nativeSetOption.
+        StringBuilder cheats = new StringBuilder();
+        if (render.getBoolean("cheat_hp", false)) cheats.append("hp,");
+        if (render.getBoolean("cheat_stamina", false)) cheats.append("stamina,");
+        if (render.getBoolean("cheat_wear", false)) cheats.append("wear,");
+        if (!debuggable || getIntent().getStringExtra("DS2_CHEATS") == null) nativeSetenv("DS2_CHEATS", cheats.toString());
         if (!debuggable || getIntent().getStringExtra("DS2_PRIME_ASSIST") == null) {
             nativeSetenv("DS2_PRIME_ASSIST", render.getBoolean("prime", DEFAULT_PRIME) ? "1" : "0");
         }
@@ -529,7 +691,7 @@ public final class RuntimeActivity extends SDLActivity {
             "--metadata_root=" + metadataRoot.getAbsolutePath(),
             "--log_file=" + new File(logDir, "ds2.log").getAbsolutePath(),
             "--gpu_plugin=xenos"));
-        addDisplayArguments(args, render);
+        addDisplayArguments(args, render, displayAspect());
         boolean debuggableBuild = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
         addLanguageArguments(args, render, debuggableBuild ? getIntent().getStringExtra("cvars") : null);
         // Debug launches can add runtime cvars: `am start ... --es cvars "--dump_shaders=/sdcard/... --log_level=debug"`.

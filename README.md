@@ -33,11 +33,15 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
 - Playable from the start of the game through Majula, with saves, cutscenes, audio and the Scholar DLC data.
 - **Performance (AYN Thor, 60 fps setting, a walk through Majula):** 60 fps average, 1% low 48-56 fps, no frame over
   26 ms; GPU ~13.6 ms per frame at ~640 MHz; about 7.7 W for the whole device, CPU ~79 C and GPU ~68 C.
-- Frame-rate options: 30, 40 and 60 fps, and "Smoother 60" on 120 Hz panels. Render resolution 540p / 720p / 1440p
-  and AMD FSR 1 upscaling.
+- Frame-rate options: 30, 40 and 60 fps, and "Smoother 60" on 120 Hz panels. Render resolution 540p / 720p / 1080p /
+  1440p and AMD FSR 1 upscaling.
+- **Fill screen** for phones wider than 16:9 (540p and 720p): the game is drawn as wide as the screen, with more to
+  see at the sides; the HUD and menus stay 16:9 in the middle and movies keep their shape.
 - The game's own languages: English, French, German, Italian, Spanish, Brazilian Portuguese, Polish, Russian,
   Japanese, Korean and Traditional Chinese (CTRL, "Game language").
-- Touch controls (or any game controller), a GPU driver manager, a performance overlay.
+- Simple cheats in CTRL: infinite HP, infinite stamina, no equipment wear, and +10,000 souls.
+- Touch controls (or any game controller), a GPU driver manager, a performance overlay, and **Save logs** for bug
+  reports straight from the phone.
 - Known issues: short frame-time dips while new areas stream in; the heaviest views (the burning gate in the Forest
   of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. See the issue list.
 
@@ -90,8 +94,9 @@ Releases are numbered 0.x while they are test builds; 1.0 comes once they have b
 
 Snapdragon (Adreno) devices use the Turnip driver the app ships. Other GPUs (Mali, Xclipse, PowerVR) use the device's
 own Vulkan driver: untested, and the game may not start. The **CTRL** button (top centre) has the frame rate (30 / 40 /
-60), render resolution, game language, depth of field, the performance overlay and the touch layout. If the game crashes, the newest
-`ds2*.log` in `Android/data/com.ds2recomp.android/files/logs/` helps in an issue.
+60), render resolution, Fill screen, game language, depth of field, cheats, the performance overlay and the touch layout.
+Settings marked * apply at the next start (CTRL offers to restart). If the game crashes, turn on **Debug logging** in
+CTRL, reproduce it, then use **Save logs for a bug report** in CTRL and attach the zip to an issue.
 
 You can also build the APK yourself (below).
 

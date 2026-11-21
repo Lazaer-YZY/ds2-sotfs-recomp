@@ -17,6 +17,10 @@ namespace rex::graphics {
 void SetSkippedPixelShaders(const uint64_t* hashes, uint32_t count);  // the GPU plugin (command_processor.cpp)
 }
 
+// The GPU plugin's live swap post effect (sdk/src/graphics/plugin_main.cpp): 0 off, 1 FXAA, 2 FXAA extreme; returns 0
+// while the renderer is not up.
+extern "C" int32_t lr_set_post_effect(int32_t choice);
+
 namespace ds2::effects {
 
 namespace {
@@ -24,6 +28,13 @@ namespace {
 // scene still shows the blur with this off).
 constexpr uint64_t kDepthOfFieldComposite[] = {0x314624F986DCD563ull};
 }  // namespace
+
+void SetAntiAliasing(std::string_view mode) {
+  const int32_t choice = mode == "fxaa_extreme" ? 2 : mode == "fxaa" ? 1 : 0;
+  const int32_t applied = lr_set_post_effect(choice);
+  REXLOG_INFO("ds2: anti-aliasing {}{}", choice == 2 ? "FXAA (strong)" : choice == 1 ? "FXAA" : "off",
+              applied ? "" : " (renderer not up yet: the start setting applies)");
+}
 
 void SetDepthOfField(bool on) {
   if (on) {

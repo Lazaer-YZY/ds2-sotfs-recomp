@@ -1049,13 +1049,16 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
     depth_edram_info.is_depth = 1;
     // If wrapping happens, it's fine, it doesn't matter how many times and
     // where modulo xenos::kEdramTileCount is applied in this context.
-    depth_edram_info.base_tiles = rb_depth_info.depth_base + edram_base_offset_tiles;
+    info_out.depth_edram_base_tiles =
+        (rb_depth_info.base_tiles() + edram_base_offset_tiles) & (xenos::EdramTileCount() - 1);
+    depth_edram_info.base_tiles = info_out.depth_edram_base_tiles;
     depth_edram_info.format = uint32_t(rb_depth_info.depth_format);
     depth_edram_info.format_is_64bpp = 0;
     depth_edram_info.fill_half_pixel_offset = uint32_t(fill_half_pixel_offset);
-    info_out.depth_original_base = rb_depth_info.depth_base;
+    info_out.depth_original_base = rb_depth_info.base_tiles();
   } else {
     info_out.depth_original_base = 0;
+    info_out.depth_edram_base_tiles = 0;
   }
   info_out.depth_edram_info = depth_edram_info;
   ResolveEdramInfo color_edram_info;
@@ -1070,7 +1073,10 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
     color_edram_info.is_depth = 0;
     // If wrapping happens, it's fine, it doesn't matter how many times and
     // where modulo xenos::kEdramTileCount is applied in this context.
-    color_edram_info.base_tiles = color_info.color_base + (edram_base_offset_tiles << is_64bpp);
+    info_out.color_edram_base_tiles =
+        (color_info.base_tiles() + (edram_base_offset_tiles << is_64bpp)) &
+        (xenos::EdramTileCount() - 1);
+    color_edram_info.base_tiles = info_out.color_edram_base_tiles;
     color_edram_info.format = uint32_t(color_info.color_format);
     color_edram_info.format_is_64bpp = is_64bpp;
     color_edram_info.fill_half_pixel_offset = uint32_t(fill_half_pixel_offset);
@@ -1084,9 +1090,10 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
       // to create a new copy info structure with one more bit just for this).
       exp_bias = std::min(exp_bias + int32_t(5), int32_t(31));
     }
-    info_out.color_original_base = color_info.color_base;
+    info_out.color_original_base = color_info.base_tiles();
   } else {
     info_out.color_original_base = 0;
+    info_out.color_edram_base_tiles = 0;
   }
   info_out.color_edram_info = color_edram_info;
 
