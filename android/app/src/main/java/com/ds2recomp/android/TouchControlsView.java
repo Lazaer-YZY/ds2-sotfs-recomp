@@ -641,6 +641,31 @@ final class TouchControlsView extends View {
         logsButton.setText(strings.getString(R.string.touch_save_logs));
         logsButton.setAllCaps(false);
         content.addView(logsButton);
+        // Copies of the save in a folder the player picks, outside the app (SaveBackups; off until a folder is chosen).
+        Button backupsButton = new Button(activity);
+        backupsButton.setText(strings.getString(R.string.touch_save_backups));
+        backupsButton.setAllCaps(false);
+        content.addView(backupsButton);
+        // GPU compatibility (testing): renderer paths for GPUs that draw the game wrongly (issues #8, #11).
+        header(content, strings.getString(R.string.touch_section_compat));
+        hint(content, strings.getString(R.string.touch_compat_help)).setPadding(0, 0, 0,
+            Math.round(4f * getResources().getDisplayMetrics().density));
+        CheckBox compatShortcuts = option(content, strings.getString(R.string.touch_compat_shortcuts),
+            strings.getString(R.string.touch_compat_shortcuts_help), render.getBoolean("compat_shortcuts", false));
+        CheckBox compatGpl = option(content, strings.getString(R.string.touch_compat_gpl),
+            strings.getString(R.string.touch_compat_gpl_help), render.getBoolean("compat_gpl", false));
+        CheckBox compatDynrender = option(content, strings.getString(R.string.touch_compat_dynrender),
+            strings.getString(R.string.touch_compat_dynrender_help), render.getBoolean("compat_dynrender", false));
+        TextView tuLabel = new TextView(activity);
+        tuLabel.setText(strings.getString(R.string.touch_compat_tu_mode));
+        content.addView(tuLabel);
+        final String[] tuModes = { "", "sysmem", "gmem" };
+        int tuMode = java.util.Arrays.asList(tuModes).indexOf(render.getString("compat_tu_mode", ""));
+        RadioButton compatTuMode = radio(content, null, Math.max(tuMode, 0),
+            strings.getString(R.string.touch_compat_tu_auto), strings.getString(R.string.touch_compat_tu_sysmem),
+            strings.getString(R.string.touch_compat_tu_gmem));
+        CheckBox compatNoUbwc = option(content, strings.getString(R.string.touch_compat_tu_noubwc), null,
+            render.getBoolean("compat_tu_noubwc", false));
         TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
         nextStart.setPadding(0, Math.round(8f * getResources().getDisplayMetrics().density), 0,
                              Math.round(8f * getResources().getDisplayMetrics().density));
@@ -679,6 +704,11 @@ final class TouchControlsView extends View {
                     .putBoolean("cheat_hp", cheatHp.isChecked())
                     .putBoolean("cheat_stamina", cheatStamina.isChecked())
                     .putBoolean("cheat_wear", cheatWear.isChecked())
+                    .putBoolean("compat_shortcuts", compatShortcuts.isChecked())
+                    .putBoolean("compat_gpl", compatGpl.isChecked())
+                    .putBoolean("compat_dynrender", compatDynrender.isChecked())
+                    .putString("compat_tu_mode", tuModes[radioChoice(compatTuMode)])
+                    .putBoolean("compat_tu_noubwc", compatNoUbwc.isChecked())
                     .putBoolean("prime", primeCore.isChecked()).commit();  // on disk before a restart below
                 RuntimeActivity.nativeSetOption("cheat_hp", cheatHp.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("cheat_stamina", cheatStamina.isChecked() ? "1" : "0");
@@ -720,6 +750,10 @@ final class TouchControlsView extends View {
         logsButton.setOnClickListener(v -> {
             settingsDialog.dismiss();
             activity.startLogExport();
+        });
+        backupsButton.setOnClickListener(v -> {
+            settingsDialog.dismiss();
+            activity.openSaveBackupsPage();
         });
         settingsDialogOpen = true;
         syncCtrlPin();

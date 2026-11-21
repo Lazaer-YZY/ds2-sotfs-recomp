@@ -268,6 +268,8 @@ bool LoadCustomVulkanDriver() {
   if (sync_draw && std::strcmp(sync_draw, "1") == 0 && !std::getenv("TU_DEBUG")) {
     setenv("TU_DEBUG", "syncdraw", 0);
   }
+  // CTRL -> GPU compatibility puts its Turnip choices here too: say which flags this run used.
+  if (const char* tu_debug = std::getenv("TU_DEBUG")) REXLOG_INFO("vulkan: TU_DEBUG={}", tu_debug);
   // Turnip reserves one of the Adreno 6xx bindless sets for dynamic offsets unless told not to; Mesa reads driconf
   // options from the environment.
   setenv("tu_dont_reserve_descriptor_set", "true", 0);

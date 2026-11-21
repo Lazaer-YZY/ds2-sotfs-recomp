@@ -127,3 +127,12 @@ $users"
 echo "== $APK ($(du -m "$APK" | cut -f1) MB)"
 cat "$OUT/$NAME.apk.sha256"
 unzip -l "$APK" | awk '/lib\/arm64-v8a\/|assets\// { printf "   %9d  %s\n", $1, $4 }'
+# The unstripped native libraries of this APK, for symbolising a player's crash backtrace later (librexgpu-xenos.so+0x...
+# in a log; issue #4's Mali crash could not be named because 0.1.12's were not kept). out/ is git-ignored.
+SYMS="$OUT/symbols_$VERSION${SUFFIX:+_$SUFFIX}"
+mkdir -p "$SYMS"
+for lib in out/build/android-arm64/libmain.so sdk/out/android-arm64/librexruntime.so \
+           sdk/out/android-arm64/librexgpu-xenos.so sdk/out/android-arm64/libSDL3.so; do
+  [ -f "$lib" ] && cp -p "$lib" "$SYMS/"
+done
+echo "== symbols: $SYMS"

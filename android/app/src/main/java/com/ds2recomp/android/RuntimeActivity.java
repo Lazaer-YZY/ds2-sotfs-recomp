@@ -36,6 +36,10 @@ public final class RuntimeActivity extends SDLActivity {
     private static final int PRESENT_MAX_HEIGHT = 720;
 
     private TouchControlsView touchControls;
+    /** Save backups while the game runs, when the player chose a folder (SaveBackups; null otherwise). */
+    private SaveBackups.Worker saveBackups;
+    /** Set when the SDL thread starts the game (getArguments): a restored save is put in place only before that. */
+    private static volatile boolean gameStarted;
 
     private PerfOverlayView perfOverlay;
     /** Why the renderer could not start with the selected driver; set from native code. */
@@ -248,7 +252,42 @@ public final class RuntimeActivity extends SDLActivity {
     static String nextStartState(SharedPreferences render) {
         return render.getString("language", DEFAULT_LANGUAGE) + "|" + render.getString("render_height", DEFAULT_RENDER_HEIGHT)
             + "|" + render.getBoolean("fsr", false) + "|" + render.getBoolean("wide", false)
-            + "|" + render.getBoolean("debug_log", DEFAULT_DEBUG_LOG) + "|" + panel120Wanted(render);
+            + "|" + render.getBoolean("debug_log", DEFAULT_DEBUG_LOG) + "|" + panel120Wanted(render)
+            + "|" + render.getBoolean("compat_shortcuts", false) + "|" + render.getBoolean("compat_gpl", false)
+            + "|" + render.getBoolean("compat_dynrender", false) + "|" + render.getString("compat_tu_mode", "")
+            + "|" + render.getBoolean("compat_tu_noubwc", false);
+    }
+
+    /**
+     * CTRL -> GPU compatibility (testing; issues #8 Adreno 650 and #11 Adreno 660 draw the game wrongly): renderer
+     * paths to try one at a time. Each is off by default; the runtime settings go on the command line (debug launches
+     * can still override them), the Turnip ones into TU_DEBUG (turnipDebugFlags).
+     */
+    static void addCompatArguments(java.util.List<String> args, SharedPreferences render) {
+        if (render.getBoolean("compat_shortcuts", false)) {
+            java.util.Collections.addAll(args,
+                "--direct_host_resolve=false", "--vulkan_resolve_feed_textures=false",
+                "--vulkan_direct_resolve_float24=false", "--vulkan_direct_resolve_7e3=false",
+                "--vulkan_direct_resolve_7e3_to_8888=false", "--vulkan_direct_resolve_4x_as_1x=false",
+                "--gpu_skip_overwritten_color_transfers=false", "--gpu_constant_transfers_as_clears=false",
+                "--gpu_redirect_msaa_depth_clears=false", "--gpu_ownership_from_first_row=false",
+                "--vulkan_shared_memory_hoist_uploads=false", "--spirv_texture_sign_specialization=false",
+                "--spirv_texture_exp_adjust_specialization=false");
+        }
+        if (render.getBoolean("compat_gpl", false)) {
+            java.util.Collections.addAll(args, "--vulkan_pipeline_libraries=false",
+                                         "--vulkan_precompile_vertex_libraries=false");
+        }
+        if (render.getBoolean("compat_dynrender", false)) args.add("--vulkan_dynamic_rendering=false");
+    }
+
+    /** Turnip's TU_DEBUG flags from CTRL's GPU compatibility choices ("" = none). */
+    static String turnipDebugFlags(SharedPreferences render) {
+        StringBuilder flags = new StringBuilder();
+        String mode = render.getString("compat_tu_mode", "");
+        if ("sysmem".equals(mode) || "gmem".equals(mode)) flags.append(mode);
+        if (render.getBoolean("compat_tu_noubwc", false)) flags.append(flags.length() > 0 ? "," : "").append("noubwc");
+        return flags.toString();
     }
 
     /** After CTRL changed a next-start setting: restart now (progress since the last save is lost) or later. */
@@ -256,15 +295,18 @@ public final class RuntimeActivity extends SDLActivity {
         new android.app.AlertDialog.Builder(this)
             .setTitle(getString(R.string.restart_title))
             .setMessage(getString(R.string.restart_message))
-            .setPositiveButton(getString(R.string.restart_now), (dialog, which) -> {
-                // As the game folder page: the pending activity outlives the process; Android starts a new one for it.
-                Intent intent = new Intent(this, RuntimeActivity.class);
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-                startActivity(intent);
-                Runtime.getRuntime().exit(0);
-            })
+            .setPositiveButton(getString(R.string.restart_now), (dialog, which) -> restartGame())
             .setNegativeButton(getString(R.string.restart_later), null)
             .show();
+    }
+
+    /** Restarts the game in a new process (CTRL's next-start settings, a restored save backup). */
+    void restartGame() {
+        // As the game folder page: the pending activity outlives the process; Android starts a new one for it.
+        Intent intent = new Intent(this, RuntimeActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(intent);
+        Runtime.getRuntime().exit(0);
     }
 
     /** Asks for the panel's 120 Hz mode at the current resolution (the Thor: 60 and 120 Hz). */
@@ -310,7 +352,11 @@ public final class RuntimeActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         PlayerLogs.installCrashHandler(this);
+        // A save backup restored from CTRL goes in place first, before SDL starts the game and it reads its save
+        // (SaveBackups.applyPendingRestore; never under a game already running in this process).
+        String restored = gameStarted ? null : SaveBackups.applyPendingRestore(this);
         super.onCreate(savedInstanceState);
+        if (restored != null) Toast.makeText(this, restored, Toast.LENGTH_LONG).show();
         hideSystemBars();
         applySustainedPerformanceMode();
         // 40 fps and Smoother 60 run on the panel's 120 Hz mode (debug launches: --es DS2_VBLANK120 1|0 decides).
@@ -334,6 +380,8 @@ public final class RuntimeActivity extends SDLActivity {
         });
         GameStorage.prepare(this);
         GpuDriverStore.markBootPending(this);
+        // Off unless the player chose a backup folder in CTRL (nothing runs for anyone else).
+        if (SaveBackups.folderSetting(this) != null) startSaveBackups(false);
         if (mLayout != null && !mBrokenLibraries) {
             // "Loading…" over the black screen at boot, under the touch controls (CTRL stays reachable).
             bootOverlay = new BootOverlay(this);
@@ -428,10 +476,63 @@ public final class RuntimeActivity extends SDLActivity {
         }
     }
 
+    private static final int REQUEST_SAVE_BACKUP_FOLDER = 0x4454;  // 'DT'
+
+    /** Opens CTRL's save backup page (SaveBackups.Page). */
+    void openSaveBackupsPage() {
+        new SaveBackups.Page(this, false).show();
+    }
+
+    /** The system folder picker for save backups; the folder's permission is kept in onActivityResult. */
+    void chooseSaveBackupFolder() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        android.net.Uri previous = SaveBackups.folderSetting(this);
+        if (previous != null) {
+            try {
+                // The picker opens in the current folder (it takes a document, not a tree).
+                intent.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                    android.provider.DocumentsContract.buildDocumentUriUsingTree(previous,
+                        android.provider.DocumentsContract.getTreeDocumentId(previous)));
+            } catch (RuntimeException ignored) {
+                // The picker's own starting place.
+            }
+        }
+        try {
+            startActivityForResult(intent, REQUEST_SAVE_BACKUP_FOLDER);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, getString(R.string.backup_no_picker), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** Starts the save backup thread if it is not running; checkNow: one check right away (a new folder). */
+    void startSaveBackups(boolean checkNow) {
+        if (saveBackups == null) saveBackups = new SaveBackups.Worker(this);
+        if (checkNow) saveBackups.checkSoon();
+    }
+
+    void stopSaveBackups() {
+        if (saveBackups != null) saveBackups.shutdown();
+        saveBackups = null;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQUEST_EXPORT_LOGS) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null) exportLogs(data.getData());
+            return;
+        }
+        if (requestCode == REQUEST_SAVE_BACKUP_FOLDER) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+            try {
+                SaveBackups.setFolder(this, data.getData());
+            } catch (RuntimeException e) {
+                Toast.makeText(this, getString(R.string.backup_failed, String.valueOf(e.getMessage())),
+                    Toast.LENGTH_LONG).show();
+                return;
+            }
+            startSaveBackups(true);
+            // The page again, offering the folder's newest backup when it has some (a reinstall picks its old folder).
+            new SaveBackups.Page(this, true).show();
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
@@ -477,6 +578,8 @@ public final class RuntimeActivity extends SDLActivity {
         if (touchControls != null) touchControls.onHostPause();
         // Leaving the game is when a player connects USB to fetch the log.
         PlayerLogs.publish(this);
+        // The player may be done for now: back up a changed save (on the backup thread, onPause does not wait).
+        if (saveBackups != null) saveBackups.checkSoon();
         super.onPause();
     }
 
@@ -545,6 +648,7 @@ public final class RuntimeActivity extends SDLActivity {
     @Override
     protected void onDestroy() {
         if (touchControls != null) touchControls.clearTouches();
+        stopSaveBackups();
         bootHandler.removeCallbacks(bootSettled);
         bootHandler.removeCallbacks(hideSystemBarsRunnable);
         // A normal exit is not a failed start, however short it was.
@@ -574,6 +678,7 @@ public final class RuntimeActivity extends SDLActivity {
      */
     @Override
     protected String[] getArguments() {
+        gameStarted = true;
         File game = GameStorage.gameDir(this);
         // Custom Vulkan driver (libadrenotools): the hook libraries sit in the
         // extracted native library directory, the chosen package in its own folder.
@@ -609,11 +714,19 @@ public final class RuntimeActivity extends SDLActivity {
             nativeSetenv("DS2_CUSTOM_DRIVER_DIR", driver.directory.getAbsolutePath() + "/");
             nativeSetenv("DS2_VK_CUSTOM_DRIVER", driver.metadata.libraryName);
             nativeSetenv("DS2_VK_CUSTOM_DRIVER_MODE", GpuDriverStore.loadMode(this, driver));
-            if (GpuDriverStore.needsAdreno650SyncDraw(GpuDriverStore.gpuModel(), driver.metadata)) {
-                nativeSetenv("DS2_VK_ADRENO650_SYNC_DRAW", "1");
+            boolean syncDraw = GpuDriverStore.needsAdreno650SyncDraw(GpuDriverStore.gpuModel(), driver.metadata);
+            if (syncDraw) nativeSetenv("DS2_VK_ADRENO650_SYNC_DRAW", "1");
+            // TU_DEBUG: the device's needs plus CTRL's GPU compatibility choices in one list (the native side adds
+            // syncdraw only while TU_DEBUG is unset, so it goes in here when other flags are set).
+            String turnipFlags = turnipDebugFlags(renderPrefs(this));
+            if (GpuDriverStore.needsTurnipSysmem(GpuDriverStore.gpuModel(), driver.metadata)
+                    && !turnipFlags.contains("mem")) {
+                turnipFlags = turnipFlags.isEmpty() ? "sysmem" : "sysmem," + turnipFlags;
             }
-            if (GpuDriverStore.needsTurnipSysmem(GpuDriverStore.gpuModel(), driver.metadata)) {
-                nativeSetenv("TU_DEBUG", "sysmem");
+            if (!turnipFlags.isEmpty()) {
+                if (syncDraw) turnipFlags = "syncdraw," + turnipFlags;
+                nativeSetenv("TU_DEBUG", turnipFlags);
+                android.util.Log.i("ds2recomp", "TU_DEBUG=" + turnipFlags);
             }
             // PanVK refuses the Mali GPUs Mesa marks experimental without this.
             if (driver.metadata.isPanVk()) nativeSetenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1");
@@ -692,6 +805,7 @@ public final class RuntimeActivity extends SDLActivity {
             "--log_file=" + new File(logDir, "ds2.log").getAbsolutePath(),
             "--gpu_plugin=xenos"));
         addDisplayArguments(args, render, displayAspect());
+        addCompatArguments(args, render);
         boolean debuggableBuild = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
         addLanguageArguments(args, render, debuggableBuild ? getIntent().getStringExtra("cvars") : null);
         // Debug launches can add runtime cvars: `am start ... --es cvars "--dump_shaders=/sdcard/... --log_level=debug"`.

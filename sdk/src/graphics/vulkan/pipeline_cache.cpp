@@ -4092,6 +4092,12 @@ uint64_t FragmentLibraryKeyHash(uint64_t pixel_shader_hash, uint64_t pixel_shade
       (uint32_t(REXCVAR_GET(vulkan_texture_fetch_implicit_lod)) << 2) |
       (uint32_t(SpirvShaderTranslator::IsTextureSignSpecializationEnabled()) << 3) |
       (uint32_t(REXCVAR_GET(spirv_structured_forward_jumps)) << 4);
+  // Point-sprite pixel shaders read the point coordinates at location 16 since 2026-11-21: a new
+  // key for those only, so a library list entry never claims a library of the old SPIR-V.
+  if (pixel_shader_hash &&
+      SpirvShaderTranslator::Modification(pixel_shader_variant).pixel.param_gen_point) {
+    key.translation_switches |= UINT32_C(1) << 5;
+  }
   key.texture_sign_classes = texture_sign_classes;
   return XXH3_64bits(&key, sizeof(key));
 }

@@ -3023,6 +3023,13 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
         main_interface_.push_back(interpolator);
         ++input_location;
       }
+      // With fixed locations the producers (the point-sprite VS expansion and the point geometry
+      // shader) put the point coordinates after all the interpolator locations, not after the
+      // used ones: reading them at the packed location took another interpolator as the sprite's
+      // texture coordinates (the HUD and fonts without geometry shaders, PanVK, 2026-11-21).
+      if (fixed_interpolator_locations_) {
+        input_location = xenos::kMaxInterpolators;
+      }
     }
 
     // Point coordinate input.
