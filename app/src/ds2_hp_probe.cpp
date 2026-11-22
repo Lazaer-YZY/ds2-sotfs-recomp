@@ -20,6 +20,7 @@
 // respawn, and every 30 s), and every 50 ms its HP is set back to the cap when it fell. Characters found are logged
 // (object, its first word, HP / maximum / cap) to tell the player's class apart later. The thread runs at nice 19.
 #include "ds2_hp_probe.h"
+#include "ds2_player.h"
 
 #include <rex/logging.h>
 #include <rex/runtime.h>
@@ -197,9 +198,126 @@ void GodMode(const uint8_t* base, uint32_t want_max) {
   }
 }
 
+// DS2_EQUIP_PROBE="t1,t2,..." (debug): where the game keeps the equipped rings (the second screen names the item behind
+// an effect icon; the owner, 2026-11-22: "you should only list the item equipped that's triggering it"). Ring item ids
+// are 40xx000n (menu/text/english/itemname.fmg). At each time: the places where two ring ids are next to each other
+// (the owner's save: Stone Ring, Life Ring, then the item belt), with 48 words around them; then the pointer paths (up
+// to three steps, fields 0-0xFFC) from the player object to a block holding one of them, with the distance.
+bool IsRing(uint32_t v) { return v >= 40000000u && v <= 40999999u && v % 10000 < 16; }
+
+void EquipProbe(const uint8_t* base, std::vector<double> times) {
+  setpriority(PRIO_PROCESS, uint32_t(syscall(SYS_gettid)), 19);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (size_t scan = 0; scan < times.size(); ++scan) {
+    std::this_thread::sleep_until(t0 + std::chrono::milliseconds(int64_t(times[scan] * 1000)));
+    const auto ranges = GuestRanges(base);
+    auto readable = [&](uint32_t x, uint32_t n) {
+      for (const auto& [lo, hi] : ranges)
+        if (x >= lo && x + n <= hi) return true;
+      return false;
+    };
+    std::vector<uint32_t> targets;
+    for (const auto& [lo, hi] : ranges)
+      for (uint32_t x = lo; x + 8 <= hi; x += 4)
+        if (IsRing(Load(base, x)) && IsRing(Load(base, x + 4))) targets.push_back(x);
+    REXLOG_INFO("ds2 equip probe: scan {}: {} ring pairs", scan, targets.size());
+    for (size_t i = 0; i < targets.size() && i < 0; ++i) {
+      const uint32_t x = targets[i];
+      std::string ctx;
+      for (int k = -24; k < 24; ++k) {
+        const uint32_t y = x + k * 4;
+        char w[16];
+        std::snprintf(w, sizeof(w), "%s%08X%s", k == 0 ? " [" : " ", readable(y, 4) ? Load(base, y) : 0u, k == 0 ? "]" : "");
+        ctx += w;
+      }
+      REXLOG_INFO("ds2 equip probe: scan {} pair at {:08X}:{}", scan, x, ctx);
+    }
+    // Pointer paths from the player object (type 1) to a block that holds a pair within 0x1000 bytes.
+    uint32_t players[8];
+    const int n = ds2::player::Players(players, 8);
+    for (int i = 0; i < n; ++i) {
+      const uint32_t p = players[i];
+      uint32_t type = 0;
+      if (!readable(p, 0x20) || (type = Load(base, p + ds2::player::kType)) != 1) continue;
+      struct Node { uint32_t obj; uint32_t path[3]; int depth; };
+      std::vector<Node> queue{{p, {0, 0, 0}, 0}};
+      std::vector<uint32_t> seen{p};
+      int found = 0;
+      for (size_t q = 0; q < queue.size() && q < 20000 && found < 30; ++q) {
+        const Node nd = queue[q];
+        for (uint32_t t : targets)
+          if (t >= nd.obj && t < nd.obj + 0x1000) {
+            REXLOG_INFO("ds2 equip probe: scan {} player {:08X} path +{:X} +{:X} +{:X} (depth {}) -> {:08X}, pair at +{:X}",
+                        scan, p, nd.path[0], nd.path[1], nd.path[2], nd.depth, nd.obj, t - nd.obj);
+            ++found;
+          }
+        if (nd.depth == 3) continue;
+        for (uint32_t off = 0; off < 0x1000; off += 4) {
+          if (!readable(nd.obj + off, 4)) break;
+          const uint32_t v = Load(base, nd.obj + off);
+          if (v < 0x40000000u || v >= 0x50000000u || (v & 3) || !readable(v, 0x40)) continue;
+          if (std::find(seen.begin(), seen.end(), v) != seen.end()) continue;
+          seen.push_back(v);
+          Node next = nd;
+          next.obj = v;
+          next.path[nd.depth] = off;
+          next.depth = nd.depth + 1;
+          queue.push_back(next);
+        }
+      }
+      REXLOG_INFO("ds2 equip probe: scan {} player {:08X}: {} objects searched, {} paths", scan, p, queue.size(), found);
+      // Every ring id in the player object and in the objects it points to (depth 1), with the 12 words from 8 before:
+      // the equipped set should sit with the weapons' and armour's item ids.
+      auto list = [&](uint32_t obj, uint32_t via) {
+        int k = 0;
+        for (uint32_t off = 0; off < 0x1000 && k < 6; off += 4) {
+          if (!readable(obj + off, 4)) break;
+          if (!IsRing(Load(base, obj + off))) continue;
+          ++k;
+          std::string ctx;
+          for (int j = -8; j < 12; ++j) {
+            const uint32_t y = obj + off + j * 4;
+            char w[16];
+            std::snprintf(w, sizeof(w), "%s%08X%s", j == 0 ? " [" : " ", readable(y, 4) ? Load(base, y) : 0u, j == 0 ? "]" : "");
+            ctx += w;
+          }
+          REXLOG_INFO("ds2 equip probe: scan {} via +{:X} obj {:08X} +{:X}:{}", scan, via, obj, off, ctx);
+          off += 44;  // past this block
+        }
+      };
+      // The player object's equipment entries (20 bytes: item id, ?, ?, durability, ?), +0x400 to +0x800.
+      for (uint32_t off = 0x400; off < 0x800; off += 20) {
+        char row[96];
+        std::snprintf(row, sizeof(row), "%08X %08X %08X %08X %08X", Load(base, p + off), Load(base, p + off + 4),
+                      Load(base, p + off + 8), Load(base, p + off + 12), Load(base, p + off + 16));
+        REXLOG_INFO("ds2 equip probe: scan {} player +{:03X}: {}", scan, off, row);
+      }
+      list(p, 0xFFFF);
+      for (uint32_t off = 0; off < 0x1000; off += 4) {
+        if (!readable(p + off, 4)) break;
+        const uint32_t v = Load(base, p + off);
+        if (v >= 0x40000000u && v < 0x50000000u && !(v & 3) && readable(v, 0x40)) list(v, off);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 void Start(rex::Runtime* runtime) {
+  if (const char* spec = std::getenv("DS2_EQUIP_PROBE"); spec && *spec && runtime && runtime->memory()) {
+    std::vector<double> times;
+    for (const char* p = spec; *p;) {
+      char* end = nullptr;
+      const double t = std::strtod(p, &end);
+      if (end == p) break;
+      times.push_back(t);
+      p = *end == ',' ? end + 1 : end;
+    }
+    g_memory = runtime->memory();
+    REXLOG_INFO("ds2 equip probe: {} scans", times.size());
+    std::thread(EquipProbe, runtime->memory()->virtual_membase(), times).detach();
+  }
   if (const char* god = std::getenv("DS2_GODMODE"); god && god[0] == '1' && runtime && runtime->memory()) {
     const char* max = std::getenv("DS2_GODMODE_MAXHP");
     const uint32_t want = max ? uint32_t(std::strtoul(max, nullptr, 10)) : 0;

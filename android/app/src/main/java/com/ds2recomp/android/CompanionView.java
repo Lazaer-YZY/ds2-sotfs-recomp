@@ -99,6 +99,8 @@ final class CompanionView {
     private int effectCount, labelId;
     private long labelUntil;
     private final android.util.SparseArray<String[]> effectLabels = new android.util.SparseArray<>();
+    // Item id -> {effect, name}: the equipped items that give an effect (strings.xml companion_effect_sources).
+    private final java.util.HashMap<Integer, Object[]> effectSources = new java.util.HashMap<>();
 
     CompanionView(Context context) {
         this.context = context;
@@ -109,6 +111,10 @@ final class CompanionView {
         for (String e : context.getResources().getStringArray(R.array.companion_effects)) {
             String[] f = e.split("\\|", 3);  // id|name|where it comes from
             if (f.length == 3) effectLabels.put(Integer.parseInt(f[0]), new String[] { f[1], f[2] });
+        }
+        for (String e : context.getResources().getStringArray(R.array.companion_effect_sources)) {
+            String[] f = e.split("\\|", 3);  // effect|item id|name
+            if (f.length == 3) effectSources.put(Integer.parseInt(f[1]), new Object[] { Integer.parseInt(f[0]), f[2] });
         }
         artGeneration = CompanionAssets.generation();
         art = new CompanionArt(context);
@@ -333,7 +339,8 @@ final class CompanionView {
         // at 10x what its Status screen shows (920 = "Stamina 92"; Thor, 2026-11-22).
         float ty = ST_Y + ST_H + 16;
         String hpText = s.hp + " / " + Math.round(cap);
-        String stText = Math.round(s.stamina / 10f) + " / " + Math.round(s.staminaMax / 10f);
+        // A guard break takes stamina below 0 (Thor, 2026-11-22: "-15 / 92"); the game draws the bar empty.
+        String stText = Math.max(0, Math.round(s.stamina / 10f)) + " / " + Math.round(s.staminaMax / 10f);
         text(c, hpText, IN_X, ty, 1.15f, TEXT_HP, -1);
         float stRight = Math.max(IN_X + stW, IN_X + textWidth(hpText, 1.15f) + 40 + textWidth(stText, 1.0f));
         text(c, stText, stRight, ty + 3, 1.0f, TEXT_ST, 1);
@@ -450,7 +457,7 @@ final class CompanionView {
         float l = effectRects[4 * k], t = effectRects[4 * k + 1], r = effectRects[4 * k + 2], b = effectRects[4 * k + 3];
         String[] lab = effectLabels.get(labelId);
         String name = lab != null ? lab[0] : context.getString(R.string.companion_effect_unknown);
-        java.util.List<String> lines = wrap(lab != null ? lab[1] : "", 0.95f, 620);
+        java.util.List<String> lines = wrap(effectSource(labelId, lab), 0.95f, 620);
         final float pad = 22, nameSc = 1.25f, lineSc = 0.95f, lineH = 28 * lineSc + 6;
         float w = textWidth(name, nameSc);
         for (String line : lines) w = Math.max(w, textWidth(line, lineSc));
@@ -477,6 +484,31 @@ final class CompanionView {
             text(c, line, px + pad, y, lineSc, TEXT, -1);
             y += lineH;
         }
+    }
+
+    /**
+     * The label's second line (the owner, 2026-11-22: "you should only list the item equipped that's triggering it"):
+     * for an effect that equipment gives, the equipped item(s) that give it, nothing when none is (a spell or an item in
+     * use); otherwise the label's own line (a broken piece, the effigy, invasion protection).
+     */
+    private String effectSource(int effect, String[] lab) {
+        boolean fromGear = false;
+        for (Object[] src : effectSources.values()) {
+            if ((Integer) src[0] == effect) {
+                fromGear = true;
+                break;
+            }
+        }
+        if (!fromGear) return lab != null ? lab[1] : "";
+        // Every equipped item that gives it, in slot order (the owner, 2026-11-22: "If two or more equipped items gave
+        // the same effect. They should be listed"); one name once (exact names: "Ring of Blades" is not "+2").
+        java.util.ArrayList<String> items = new java.util.ArrayList<>();
+        for (int id : state.gearIds) {
+            Object[] src = id < 0 ? null : effectSources.get(id);
+            if (src == null || (Integer) src[0] != effect) continue;
+            if (!items.contains((String) src[1])) items.add((String) src[1]);
+        }
+        return String.join(", ", items);
     }
 
     /** Words of s in lines at most maxW wide at text scale sc. */

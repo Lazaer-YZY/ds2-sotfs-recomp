@@ -152,6 +152,110 @@
         <item>300|Invasion protection|For a while after defeating a boss</item>
         <item>310|No souls gained|Agape Ring</item>
     </string-array>
+    <!-- The equipped items that give each effect icon (effect|item id|the game's English item name), from
+         out/hudprobe/effect_sources.py: the label names the one that is equipped. -->
+    <string-array name="companion_effect_sources">
+disc 2: no package found (DLC icons missing)
+        <item>10|40020000|Chloranthy Ring</item>
+        <item>10|40020001|Chloranthy Ring+1</item>
+        <item>10|40020002|Chloranthy Ring+2</item>
+        <item>10|11730000|Blossom Kite Shield</item>
+        <item>10|11330000|Shield of the Insolent</item>
+        <item>10|11390000|Slumbering Dragon Shield</item>
+        <item>20|40090000|Dark Quartz Ring</item>
+        <item>20|40090001|Dark Quartz Ring+1</item>
+        <item>20|40090002|Dark Quartz Ring+2</item>
+        <item>20|40090003|Dark Quartz Ring+3</item>
+        <item>20|40140000|Dispelling Ring</item>
+        <item>20|40140001|Dispelling Ring+1</item>
+        <item>20|40070000|Flame Quartz Ring</item>
+        <item>20|40070001|Flame Quartz Ring+1</item>
+        <item>20|40070002|Flame Quartz Ring+2</item>
+        <item>20|40070003|Flame Quartz Ring+3</item>
+        <item>20|40050000|Ring of Steel Protection</item>
+        <item>20|40050001|Ring of Steel Protection+1</item>
+        <item>20|40050002|Ring of Steel Protection+2</item>
+        <item>20|40060000|Spell Quartz Ring</item>
+        <item>20|40060001|Spell Quartz Ring+1</item>
+        <item>20|40060002|Spell Quartz Ring+2</item>
+        <item>20|40060003|Spell Quartz Ring+3</item>
+        <item>20|40080000|Thunder Quartz Ring</item>
+        <item>20|40080001|Thunder Quartz Ring+1</item>
+        <item>20|40080002|Thunder Quartz Ring+2</item>
+        <item>20|40080003|Thunder Quartz Ring+3</item>
+        <item>20|41130000|Yorgh\'s Ring</item>
+        <item>30|40135000|Ash Knuckle Ring</item>
+        <item>30|40120000|Bracing Knuckle Ring</item>
+        <item>30|40120001|Bracing Knuckle Ring+1</item>
+        <item>30|40120002|Bracing Knuckle Ring+2</item>
+        <item>30|40100000|Poisonbite Ring</item>
+        <item>30|40100001|Poisonbite Ring+1</item>
+        <item>30|40130000|Cursebite Ring</item>
+        <item>30|40150000|Ring of Resistance</item>
+        <item>30|40150001|Ring of Resistance+1</item>
+        <item>30|40110000|Bloodbite Ring</item>
+        <item>30|40110001|Bloodbite Ring+1</item>
+        <item>40|41050000|Lightning Clutch Ring</item>
+        <item>40|41070000|Dark Clutch Ring</item>
+        <item>40|41060000|Fire Clutch Ring</item>
+        <item>40|41040000|Sorcery Clutch Ring</item>
+        <item>40|41100000|Flynn\'s Ring</item>
+        <item>40|41030000|Ivory Warrior Ring</item>
+        <item>40|40160000|Ring of Blades</item>
+        <item>40|40160001|Ring of Blades+1</item>
+        <item>40|40160002|Ring of Blades+2</item>
+        <item>40|40230000|Stone Ring</item>
+        <item>60|40260000|Red Tearstone Ring</item>
+        <item>60|40280000|Blue Tearstone Ring</item>
+        <item>70|40290000|Ring of Giants</item>
+        <item>70|40290001|Ring of Giants+1</item>
+        <item>70|40290002|Ring of Giants+2</item>
+        <item>80|40300000|Ring of Soul Protection</item>
+        <item>80|40310000|Ring of Life Protection</item>
+        <item>90|40360000|Covetous Gold Serpent Ring</item>
+        <item>90|40360001|Covetous Gold Serpent Ring+1</item>
+        <item>90|40360002|Covetous Gold Serpent Ring+2</item>
+        <item>90|21140100|Traveling Merchant Hat</item>
+        <item>90|22270100|Prisoner\'s Hood</item>
+        <item>90|22271100|Prisoner\'s Hood</item>
+        <item>90|892001700|Prisoner\'s Hood</item>
+        <item>90|892001800|Prisoner\'s Hood</item>
+        <item>90|21210100|Jester\'s Cap</item>
+        <item>90|22270101|Prisoner\'s Tatters</item>
+        <item>90|22271101|Prisoner\'s Tatters</item>
+        <item>90|892001701|Prisoner\'s Tatters</item>
+        <item>90|892001801|Prisoner\'s Tatters</item>
+        <item>90|11720000|Watchdragon Parma</item>
+        <item>100|40370000|Covetous Silver Serpent Ring</item>
+        <item>100|40370001|Covetous Silver Serpent Ring+1</item>
+        <item>100|40370002|Covetous Silver Serpent Ring+2</item>
+        <item>100|21210102|Jester\'s Gloves</item>
+        <item>100|22370100|Warlock Mask</item>
+        <item>110|40390000|Ring of the Evil Eye</item>
+        <item>110|40390001|Ring of the Evil Eye+1</item>
+        <item>110|40390002|Ring of the Evil Eye+2</item>
+        <item>120|40400000|Ring of Restoration</item>
+        <item>130|21460103|Flying Feline Boots</item>
+        <item>130|21210103|Jester\'s Tights</item>
+        <item>130|40420000|Silvercat Ring</item>
+        <item>130|26650103|Sanctum Knight Leggings</item>
+        <item>140|40430000|Redeye Ring</item>
+        <item>150|40040000|First Dragon Ring</item>
+        <item>150|40040001|Second Dragon Ring</item>
+        <item>150|40040002|Third Dragon Ring</item>
+        <item>160|40330000|Clear Bluestone Ring</item>
+        <item>160|40330001|Clear Bluestone Ring+1</item>
+        <item>160|40330002|Clear Bluestone Ring+2</item>
+        <item>160|40320000|Lingering Dragoncrest Ring</item>
+        <item>160|40320001|Lingering Dragoncrest Ring+1</item>
+        <item>160|40320002|Lingering Dragoncrest Ring+2</item>
+        <item>160|27680100|Black Hood</item>
+        <item>160|892001300|Black Hood</item>
+        <item>170|21430100|Durgo\'s Hat</item>
+        <item>170|40470000|Hawk Ring</item>
+        <item>180|40480000|Old Sun Ring</item>
+        <item>310|42000000|Agape Ring</item>
+    </string-array>
     <string name="touch_companion_hide">Hide them on the main screen</string>
     <string name="touch_companion_hide_help">HP, stamina, the item slots, effect icons and souls show on the second screen only. Status build-up, boss and enemy bars and messages stay.</string>
     <!-- Save backups (CTRL, Troubleshooting; SaveBackups.java) -->

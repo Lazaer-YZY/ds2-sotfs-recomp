@@ -25,6 +25,7 @@
 //                             screen's icons.json maps them to icon / item ids (ds2_hud_sprites.cpp)
 //   fx=<hash>,...             64x64 textures drawn in the last 0.5 s (effect icons among them, mapped the same way)
 //   cnt, name                 the belt item's count and name as the HUD draws them (the game's language)
+//   gear=<id>:<dur>,...       the equipped items: six hands, four armour, four rings (item id, durability; -1 empty)
 //   hit, hitage, combo        the last hit on an enemy (HP lost between two polls while the game shows an enemy's or
 //                             the boss's bar), ms since, and the sum of
 //                             hits less than 3 s apart; tgt=<hp>:<max> that enemy now; taken = the player's last loss
@@ -139,6 +140,34 @@ void AppendBuildups(uint32_t player, std::string& out) {
 bool CompanionProbe() {  // read every time: the second screen polls before the launch extras are in the environment
   const char* v = std::getenv("DS2_COMPANION_PROBE");
   return v && *v == '1';
+}
+
+// The equipped items, for the effect icons' labels (the owner, 2026-11-22: "you should only list the item equipped
+// that's triggering it"). The player object keeps 20-byte entries from +0x5B8: item id, kind << 24 in the next word (0
+// weapon, 1 armour, 2 ring, 3 spell, 4 item), the count, the durability (float), 0. Six hands (left and right
+// alternating), four armour, two ammunition, four spells, four rings from +0x6F8, then the belt items (Thor probe,
+// DS2_EQUIP_PROBE, the owner's save: Iron Parma, Club, armour, Stone Ring and Life Ring in the last two ring slots,
+// Estus Flask). gear=<id>:<durability>,... for the six hands, four armour and four rings (-1 for an empty slot or an
+// entry of another kind).
+void AppendGear(uint32_t player, std::string& out) {
+  constexpr uint32_t kGear = 0x5B8, kStride = 20;
+  struct Range { uint32_t first, count, kind; };
+  constexpr Range kRanges[] = {{0, 6, 0}, {6, 4, 1}, {16, 4, 2}};
+  std::string list;
+  for (const Range& r : kRanges) {
+    for (uint32_t i = r.first; i < r.first + r.count; ++i) {
+      const uint32_t e = player + kGear + i * kStride;
+      uint32_t id = 0, kind = 0;
+      float dur = 0;
+      const bool ok = U32(e, &id) && U32(e + 4, &kind) && F32(e + 12, &dur) && (kind >> 24) == r.kind &&
+                      id != 0xFFFFFFFFu;
+      char item[40];
+      std::snprintf(item, sizeof(item), "%s%d:%d", list.empty() ? "" : ",", ok ? int32_t(id) : -1,
+                    ok ? int(std::lround(dur)) : 0);
+      list += item;
+    }
+  }
+  out += ";gear=" + list;
 }
 
 // Damage figures: HP drops of the characters between two polls (the reader runs every 100 ms; this thread only).
@@ -307,6 +336,7 @@ std::string State() {
     }
   }
   AppendBuildups(p, out);
+  AppendGear(p, out);
   const ds2::hud_sprites::Slots slots = ds2::hud_sprites::ReadSlots();
   char eq[200];
   std::snprintf(eq, sizeof(eq), ";hud=%d;ui=%d;gauge=%d;eqL=%llx;eqR=%llx;eqU=%llx;eqD=%llx;eqN=%llx", slots.hud ? 1 : 0,

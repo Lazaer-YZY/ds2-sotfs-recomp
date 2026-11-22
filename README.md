@@ -3,7 +3,8 @@
 <h1 align="center">Dark Souls II: Scholar of the First Sin, native on Android</h1>
 
 <p align="center">An unofficial native Android (arm64) port of the <b>Xbox 360</b> release, made by static recompilation.<br>
-Bring your own copy of the game. No game files are included.</p>
+Bring your own copy of the game. No game files are included.<br>
+On dual-screen handhelds such as the AYN Thor, the HUD can live on the second screen (<a href="#second-screen-ayn-thor-and-other-dual-screen-handhelds">see below</a>).</p>
 
 <p align="center">
 <img src="docs/media/motion/majula.gif" width="640" alt="Walking through Majula">
@@ -18,6 +19,13 @@ Bring your own copy of the game. No game files are included.</p>
 
 <p align="center"><sub>Walking through Majula; the very first scene (Things Betwixt by moonlight) and Majula; the opening
 cutscene in the witches' hut, rendered in real time. All captured on an AYN Thor at the 60 fps setting.</sub></p>
+
+<p align="center">
+<img src="docs/media/screens/dual_combat.jpg" width="40%" alt="The AYN Thor's two screens: the game on top, the HUD on the bottom screen">
+</p>
+
+<p align="center"><sub>Both screens of an AYN Thor: the game on top, its HUD (HP, stamina, equipment, effects, souls,
+damage figures) on the second screen.</sub></p>
 
 ## What it is
 
@@ -35,15 +43,36 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
   26 ms; GPU ~13.6 ms per frame at ~640 MHz; about 7.7 W for the whole device, CPU ~79 C and GPU ~68 C.
 - Frame-rate options: 30, 40 and 60 fps, and "Smoother 60" on 120 Hz panels. Render resolution 540p / 720p / 1080p /
   1440p and AMD FSR 1 upscaling.
-- **Fill screen** for phones wider than 16:9 (540p and 720p): the game is drawn as wide as the screen, with more to
-  see at the sides; the HUD and menus stay 16:9 in the middle and movies keep their shape.
+- **Fill screen** for phones wider than 16:9, at every resolution: the game is drawn as wide as the screen, with more
+  to see at the sides; the HUD and menus stay 16:9 in the middle and movies keep their shape.
+- **Anti-aliasing** (FXAA) on the 3D scene only, so the HUD and text stay sharp.
+- **Second screen HUD** on dual-screen handhelds such as the AYN Thor (see below).
 - The game's own languages: English, French, German, Italian, Spanish, Brazilian Portuguese, Polish, Russian,
   Japanese, Korean and Traditional Chinese (CTRL, "Game language").
 - Simple cheats in CTRL: infinite HP, infinite stamina, no equipment wear, and +10,000 souls.
-- Touch controls (or any game controller), a GPU driver manager, a performance overlay, and **Save logs** for bug
-  reports straight from the phone.
+- Touch controls with an editable layout and optional drag-to-look, or any game controller with its own button
+  mapping; save backups to a folder of your choice; a GPU driver manager, GPU compatibility options, a performance
+  overlay, and **Save logs** for bug reports straight from the phone.
 - Known issues: short frame-time dips while new areas stream in; the heaviest views (the burning gate in the Forest
-  of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. See the issue list.
+  of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. At 1080p, rare single frames
+  of the wrong picture on the Adreno 830 (720p has none); wrong colours in gameplay on the Adreno 650 / 660. See the
+  issue list.
+
+## Second screen (AYN Thor and other dual-screen handhelds)
+
+On a device with a second display, CTRL → **Second screen HUD** moves the HUD to the bottom screen: HP and stamina,
+the four equipment slots, effect icons (tap one to see the equipped items behind it), souls and damage figures, drawn
+with the game's own art from your discs. Without a character it shows the game's logo; menus keep it, warps and
+loading screens dim it.
+
+<p align="center">
+<img src="docs/media/motion/dual_buff_label.gif" width="400" alt="Tapping a buff on the second screen names the equipped ring behind it">
+</p>
+
+<p align="center">
+<img src="docs/media/screens/dual_majula.jpg" width="40%" alt="Majula with the HUD on the second screen">
+<img src="docs/media/screens/dual_title.jpg" width="40%" alt="The title screen: the game's logo on the second screen">
+</p>
 
 ## Gallery
 
@@ -61,7 +90,8 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
 - Your own **Dark Souls II: Scholar of the First Sin** for Xbox 360: **disc 1 and disc 2** (disc 2 carries
   Compatibility Pack 4 with the three Crown DLC areas; the game does not start without it).
 - An arm64 Android device with Vulkan, Android 8 or newer (9 or newer for the bundled Turnip driver). Snapdragon
-  (Adreno 6xx / 7xx) is the tested path; Mali and other GPUs use the system driver and are untested. About 8 GB free
+  (Adreno 7xx / 8xx) is the tested path (Adreno 6xx: see the GPU compatibility options in CTRL); Mali GPUs use the
+  system driver or PanVK and are little tested (#16); other GPUs use the system driver and are untested. About 8 GB free
   for the game, plus room for one disc image (7.8 GB) while importing it.
 
 ## Install
@@ -90,11 +120,14 @@ Releases are numbered 0.x while they are test builds; 1.0 comes once they have b
    dependencies). Windows Explorer can browse `Android/data` on most phones over USB; if it can't, use
    `adb push <folder>/. /sdcard/Android/data/com.ds2recomp.android/files/game/` (and the same for `dlc/`).
 4. **Start the game.** The first start installs the DLC package and loads the bundled shader cache at the title screen
-   (a minute or two); later starts are quick. The game asks for its "offline" confirmations at boot; that is normal.
+   (a minute or two; let it finish, as closing the app during it leaves the DLC half installed until the next start
+   redoes it); later starts are quick. The game asks for its "offline" confirmations at boot; that is normal.
 
-Snapdragon (Adreno) devices use the Turnip driver the app ships. Other GPUs (Mali, Xclipse, PowerVR) use the device's
-own Vulkan driver: untested, and the game may not start. The **CTRL** button (top centre) has the frame rate (30 / 40 /
-60), render resolution, Fill screen, game language, depth of field, cheats, the performance overlay and the touch layout.
+Snapdragon (Adreno) devices use the Turnip driver the app ships (on Adreno 8xx it renders straight to memory, as its
+author recommends). Other GPUs (Mali, Xclipse, PowerVR) use the device's own Vulkan driver, or PanVK for Mali (GPU
+driver page): little tested, and the game may not start. The **CTRL** button (top centre) has the frame rate (30 / 40 /
+60), render resolution, Fill screen, anti-aliasing, game language, depth of field, cheats, controller buttons, save
+backups, the second screen, GPU compatibility options, the performance overlay and the touch layout.
 Settings marked * apply at the next start (CTRL offers to restart). If the game crashes, turn on **Debug logging** in
 CTRL, reproduce it, then use **Save logs for a bug report** in CTRL and attach the zip to an issue.
 

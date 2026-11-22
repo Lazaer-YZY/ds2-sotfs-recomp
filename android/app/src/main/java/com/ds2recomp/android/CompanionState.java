@@ -32,6 +32,10 @@ final class CompanionState {
     // Equipment as the game's HUD draws it (hashes of the icon textures, 0 = empty; CompanionIcons decodes them).
     boolean hud, ui;  // ui: another layout drew lately (menus, dialogs, messages, the loading screen)
     boolean gauge;    // the game's HP gauge drawn lately: its HUD is up, the player can act
+    // The equipped items: six hands, four armour, four rings (item id, -1 empty; durability).
+    final int[] gearIds = new int[14];
+    final int[] gearDur = new int[14];
+    { java.util.Arrays.fill(gearIds, -1); }
     long eqLeft, eqRight, eqSpell, eqItem, eqNext;
     String itemCount = "", itemName = "";
     final List<Long> smallIcons = new ArrayList<>();
@@ -51,6 +55,16 @@ final class CompanionState {
                     case "player": s.player = "1".equals(v); break;
                     case "pid": s.pid = Long.parseLong(v, 16); break;
                     case "gauge": s.gauge = "1".equals(v); break;
+                    case "gear": {
+                        String[] items = v.split(",");
+                        for (int i = 0; i < items.length && i < s.gearIds.length; i++) {
+                            String[] f = items[i].split(":");
+                            if (f.length != 2) continue;
+                            s.gearIds[i] = Integer.parseInt(f[0]);
+                            s.gearDur[i] = Integer.parseInt(f[1]);
+                        }
+                        break;
+                    }
                     case "hp": s.hp = Integer.parseInt(v); break;
                     case "hpmax": s.hpMax = Integer.parseInt(v); break;
                     case "hpcap": s.hpCap = Integer.parseInt(v); break;
@@ -134,7 +148,11 @@ final class CompanionState {
         if (tol.length() > 0) b.append(";tol=").append(tol);
         b.append(";hud=1;cnt=12;name=Lifegem;hit=").append(87 + (int) (t * 7) % 50).append(";hitage=").append((long) (t * 1000) % 4000)
          .append(";combo=233;tgt=145:400;taken=37")
-         .append(";fx=bafea98102e7c240,80c2959f32387a8a,10049de63c53eec0");  // attack up, the cat, a broken ring
+         .append(";fx=bafea98102e7c240,80c2959f32387a8a,10049de63c53eec0")  // attack up, the cat, a broken ring
+         // An Iron Parma and a Club, armour, Ring of Blades+2 and Stone Ring (both attack up: the label lists both) and
+         // a broken Ring of Giants.
+         .append(";gear=11020000:80,2400000:50,-1:0,-1:0,-1:0,-1:0,17440100:65,17440101:65,17440102:65,17440103:65,")
+         .append("-1:0,40230000:110,40160002:110,40290000:0");
         return b.toString();
     }
 }
