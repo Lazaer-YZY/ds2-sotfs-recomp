@@ -80,6 +80,8 @@ echo "== shader seed: $(cat "$SEED_DIR/stamp.txt") (sha prefix, bytes of shaders
 cleanup_seed() { rm -rf "$SEED_DIR"; }
 trap cleanup_seed EXIT
 
+# The second screen's art is cut from the owner's discs (build_android.sh stage): never in a public APK.
+rm -rf "$REPO/android/app/src/main/assets/companion"
 SUFFIX=""; NAME=ds2-sotfs-android-arm64
 [ "$TEST" = 1 ] && { SUFFIX=.test; NAME=$NAME-test; }
 echo "== APK $VERSION${SUFFIX:+ ($SUFFIX)} (log: $LOG)"

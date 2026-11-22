@@ -31,9 +31,12 @@ constexpr uint64_t kDepthOfFieldComposite[] = {0x314624F986DCD563ull};
 
 void SetAntiAliasing(std::string_view mode) {
   const int32_t choice = mode == "fxaa_extreme" ? 2 : mode == "fxaa" ? 1 : 0;
-  const int32_t applied = lr_set_post_effect(choice);
+  // FXAA on the finished 3D scene before the game's 2D layer (vulkan_scene_fxaa, the resolve feed of the scene), so
+  // the HUD's and menus' text stays sharp; the swap post effect (FXAA on the whole finished frame) stays off.
+  lr_set_post_effect(0);
+  const bool applied = rex::cvar::SetFlagByName("vulkan_scene_fxaa", choice == 2 ? "2" : choice == 1 ? "1" : "0");
   REXLOG_INFO("ds2: anti-aliasing {}{}", choice == 2 ? "FXAA (strong)" : choice == 1 ? "FXAA" : "off",
-              applied ? "" : " (renderer not up yet: the start setting applies)");
+              applied ? "" : " (vulkan_scene_fxaa not found: the start setting applies)");
 }
 
 void SetDepthOfField(bool on) {

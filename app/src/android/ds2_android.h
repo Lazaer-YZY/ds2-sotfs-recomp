@@ -50,6 +50,11 @@ void SchedHintsOnFrame(double busy_ms);
 // Development builds only (DS2_SAVE_SNAPSHOTS=1, set by RuntimeActivity): periodic copies of the owner's save for
 // benches in other areas (ds2_save_snapshots.cpp).
 void StartSaveSnapshots();
+// The second screen's reader (ds2_companion_android.cpp): guest memory for RuntimeActivity.nativeCompanionState, and
+// the debug probes DS2_COMPANION_PROBE / DS2_STATUS_TEST. Call once the runtime's memory exists.
+void StartCompanion(rex::Runtime* runtime);
+// Lock-free copy of guest memory (process_vm_readv; false when not mapped).
+bool CopyGuest(uint32_t addr, void* dst, size_t len);
 // Debug launches (DS2_GPU_COUNTERS=1): Adreno hardware counters every DS2_GPU_COUNTERS_S s in the log
 // (ds2_gpu_counters.cpp).
 void StartGpuCounters();

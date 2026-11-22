@@ -904,6 +904,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
 #endif
 #if REX_PLATFORM_ANDROID
     android_pre_api_26_name_[0] = '\0';
+    if (pthread_equal(thread, pthread_self())) tid_.store(gettid(), std::memory_order_release);
 #endif
   }
 
@@ -989,7 +990,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
 #else
     cpu_set_t cpu_set;
 #if REX_PLATFORM_ANDROID
-    if (sched_getaffinity(pthread_gettid_np(thread_), sizeof(cpu_set_t), &cpu_set) != 0) {
+    if (sched_getaffinity(android_tid(), sizeof(cpu_set_t), &cpu_set) != 0) {
       assert_always();
     }
 #else
@@ -1022,7 +1023,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
       }
     }
 #if REX_PLATFORM_ANDROID
-    if (sched_setaffinity(pthread_gettid_np(thread_), sizeof(cpu_set_t), &cpu_set) != 0) {
+    if (sched_setaffinity(android_tid(), sizeof(cpu_set_t), &cpu_set) != 0) {
       assert_always();
     }
 #else
@@ -1068,6 +1069,12 @@ class PosixCondition<Thread> : public PosixConditionBase {
   void QueueUserCallback(std::function<void()> callback) {
     WaitStarted();
     {
+      // A thread that has run to its end has nothing to wake (TerminateTitle wakes every guest thread it saw
+      // running, and some exit in between).
+      std::unique_lock<std::mutex> lock(state_mutex_);
+      if (state_ == State::kFinished) return;
+    }
+    {
       std::unique_lock<std::mutex> lock(callback_mutex_);
       user_callbacks_.push_back(std::move(callback));
       has_pending_user_callbacks_.store(true, std::memory_order_release);
@@ -1090,7 +1097,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
     sigval value{};
     value.sival_ptr = this;
 #if REX_PLATFORM_ANDROID
-    int result = sigqueue(pthread_gettid_np(thread_),
+    int result = sigqueue(android_tid(),
                           GetSystemSignal(SignalType::kThreadUserCallback), value);
 #else
     int result = pthread_sigqueue(thread_, GetSystemSignal(SignalType::kThreadUserCallback), value);
@@ -1210,6 +1217,17 @@ class PosixCondition<Thread> : public PosixConditionBase {
     }
   }
 
+#if REX_PLATFORM_ANDROID
+  // The kernel thread id, cached when the thread starts. bionic's pthread_gettid_np aborts the process ("invalid
+  // pthread_t ... passed to pthread_gettid_np") once the thread has exited and been joined: TerminateTitle's
+  // wake-up of every guest thread raced into that when the game closed (S25, 2026-11-22). On a thread that has
+  // gone, the syscalls fail with ESRCH instead.
+  pid_t android_tid() const {
+    pid_t tid = tid_.load(std::memory_order_acquire);
+    return tid ? tid : pthread_gettid_np(thread_);
+  }
+#endif
+
   void WaitStarted() const {
     std::unique_lock<std::mutex> lock(state_mutex_);
     state_signal_.wait(lock, [this] { return state_ != State::kUninitialized; });
@@ -1242,6 +1260,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
 #endif
   }
   pthread_t thread_;
+#if REX_PLATFORM_ANDROID
+  std::atomic<pid_t> tid_{0};
+#endif
   bool signaled_;
   int exit_code_;
   State state_;             // Protected by state_mutex_
@@ -1664,6 +1685,10 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 
   current_thread_ = thread;
   current_thread_condition_ = &thread->handle_;
+#if REX_PLATFORM_ANDROID
+  // Before the started state is published: WaitStarted() callers read it.
+  thread->handle_.tid_.store(gettid(), std::memory_order_release);
+#endif
   {
     std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
     thread->handle_.state_ = create_suspended ? State::kSuspended : State::kRunning;

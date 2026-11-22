@@ -58,6 +58,12 @@ REXCVAR_DEFINE_UINT32(vulkan_resolve_feed_debug, 0, "GPU/Vulkan",
                       "Diagnostic: resolve feeding writes solid magenta instead of the render "
                       "target contents: 1 = every fed resolve, other values = only resolves "
                       "to that guest address (decimal).");
+REXCVAR_DEFINE_UINT32(vulkan_scene_fxaa, 0, "GPU/Vulkan",
+                      "FXAA on the finished 3D scene before the game draws its 2D layer over it (HUD, menus, "
+                      "text stay sharp): applied to full-screen 1x k_8_8_8_8 resolves fed into textures "
+                      "(vulkan_resolve_feed_textures) whose size is the last presented frame's and whose "
+                      "destination is not a front buffer. 0 off, 1 FXAA, 2 FXAA strong. Can change while running")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(vulkan_resolve_feed_textures, true, "GPU/Vulkan",
                     "Experimental: draw 1x k_8_8_8_8 resolves straight from the render target "
                     "into the cached texture that samples the resolved memory (same format, "
@@ -189,6 +195,7 @@ namespace shaders {
 #include "../shaders/vulkan_spirv/resolve_fast_32bpp_host_rt_4x_7e3_cs.h"
 #include "../shaders/vulkan_spirv/resolve_feed_7e3_ps.h"
 #include "../shaders/vulkan_spirv/resolve_feed_7e3_8888_ps.h"
+#include "../shaders/vulkan_spirv/resolve_feed_fxaa_ps.h"
 #include "../shaders/vulkan_spirv/resolve_feed_depth_float24_stencil_ps.h"
 #include "../shaders/vulkan_spirv/resolve_fast_32bpp_host_rt_1x_d24fs8_fed_cs.h"
 #include "../shaders/vulkan_spirv/resolve_fast_32bpp_host_rt_1x_7e3_to_8888_cs.h"
@@ -1024,6 +1031,31 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         }
         dfn.vkDestroyShaderModule(device, feed_7e3_8888_ps, nullptr);
       }
+      // k_8_8_8_8 -> R8G8B8A8_UNORM through FXAA (vulkan_scene_fxaa): offset, flags, the fed rectangle.
+      // std430 push constant layout of resolve_feed_fxaa.frag: ivec2 offset, uint flags, a pad (the ivec2s are
+      // 8-byte aligned), ivec2 dest_min, ivec2 dest_max.
+      VkPushConstantRange feed_fxaa_push_constant_range = {VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                                           sizeof(int32_t) * 8};
+      VkPipelineLayoutCreateInfo feed_fxaa_layout_create_info = feed_layout_create_info;
+      feed_fxaa_layout_create_info.pPushConstantRanges = &feed_fxaa_push_constant_range;
+      VkShaderModule feed_fxaa_ps = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_feed_fxaa_ps, sizeof(shaders::resolve_feed_fxaa_ps));
+      if (feed_fxaa_ps != VK_NULL_HANDLE &&
+          dfn.vkCreatePipelineLayout(device, &feed_fxaa_layout_create_info, nullptr,
+                                     &resolve_feed_pipeline_layout_fxaa_) == VK_SUCCESS) {
+        feed_stages[1].module = feed_fxaa_ps;
+        feed_color_format = VK_FORMAT_R8G8B8A8_UNORM;
+        feed_pipeline_create_info.layout = resolve_feed_pipeline_layout_fxaa_;
+        if (dfn.vkCreateGraphicsPipelines(device, vulkan_device->pipeline_cache(), 1,
+                                          &feed_pipeline_create_info, nullptr,
+                                          &resolve_feed_pipeline_fxaa_) != VK_SUCCESS) {
+          resolve_feed_pipeline_fxaa_ = VK_NULL_HANDLE;
+        }
+        feed_pipeline_create_info.layout = resolve_feed_pipeline_layout_;
+      }
+      if (feed_fxaa_ps != VK_NULL_HANDLE) {
+        dfn.vkDestroyShaderModule(device, feed_fxaa_ps, nullptr);
+      }
     }
     if (feed_vs != VK_NULL_HANDLE) {
       dfn.vkDestroyShaderModule(device, feed_vs, nullptr);
@@ -1507,6 +1539,9 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
                                          resolve_feed_pipeline_7e3_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
                                          resolve_feed_pipeline_7e3_8888_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, resolve_feed_pipeline_fxaa_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                         resolve_feed_pipeline_layout_fxaa_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
                                          resolve_feed_pipeline_depth_float24_stencil_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
@@ -1825,6 +1860,12 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
             } else if (resolve_feed.source == FeedSource::kColor8888 &&
                        feed_rt_key.GetColorFormat() == xenos::ColorRenderTargetFormat::k_8_8_8_8) {
               feed_pipeline = resolve_feed_pipeline_;
+              if (IsSceneFxaaResolve(resolve_info.copy_dest_base, resolve_feed.width,
+                                     resolve_feed.height) &&
+                  REXCVAR_GET(vulkan_scene_fxaa) && resolve_feed_pipeline_fxaa_ != VK_NULL_HANDLE) {
+                feed_pipeline = resolve_feed_pipeline_fxaa_;
+                feed_layout = resolve_feed_pipeline_layout_fxaa_;
+              }
             } else if (resolve_feed.source == FeedSource::kColorFloat32 &&
                        feed_rt_key.GetColorFormat() == xenos::ColorRenderTargetFormat::k_32_FLOAT) {
               bool transfer_is_uint = false;
@@ -2246,9 +2287,28 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                     ((resolve_feed_pipelines[feed_index] == resolve_feed_pipeline_7e3_8888_)
                          ? int32_t((uint32_t(resolve_info.copy_dest_info.copy_dest_exp_bias) & 63u) << 8)
                          : 0)};
-            command_buffer.CmdVkPushConstants(resolve_feed_layouts[feed_index],
-                                              VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                                              sizeof(feed_constants), feed_constants);
+            if (resolve_feed_pipelines[feed_index] == resolve_feed_pipeline_fxaa_) {
+              // FXAA: the preset in bits 4-5, the fed rectangle for the taps' clamp.
+              int32_t fxaa_constants[8] = {
+                  feed_constants[0], feed_constants[1],
+                  (feed_constants[2] & 3) |
+                      int32_t((std::min(REXCVAR_GET(vulkan_scene_fxaa), uint32_t(2)) & 3u) << 4),
+                  0, resolve_feed.dest_x, resolve_feed.dest_y,
+                  resolve_feed.dest_x + int32_t(resolve_feed.width) - 1,
+                  resolve_feed.dest_y + int32_t(resolve_feed.height) - 1};
+              command_buffer.CmdVkPushConstants(resolve_feed_layouts[feed_index],
+                                                VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                                sizeof(fxaa_constants), fxaa_constants);
+              static std::unordered_set<uint32_t> fxaa_logged;
+              if (fxaa_logged.size() < 20 && fxaa_logged.insert(resolve_info.copy_dest_base).second) {
+                REXGPU_INFO("Scene FXAA: resolve feed @{:08X} {}x{} (preset {})", resolve_info.copy_dest_base,
+                            resolve_feed.width, resolve_feed.height, REXCVAR_GET(vulkan_scene_fxaa));
+              }
+            } else {
+              command_buffer.CmdVkPushConstants(resolve_feed_layouts[feed_index],
+                                                VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                                sizeof(feed_constants), feed_constants);
+            }
             command_buffer.CmdVkDraw(3, 1, 0, 0);
             command_buffer.CmdVkEndRendering();
             texture_cache.EndResolveFeed(resolve_feed);
@@ -7795,6 +7855,20 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
     MarkEdramBufferModified();
   }
   return all_pipelines_available;
+}
+
+bool VulkanRenderTargetCache::IsSceneFxaaResolve(uint32_t dest_base, uint32_t width,
+                                                 uint32_t height) const {
+  // The finished scene before the 2D layer: as large as the presented frame, not the front buffer (the frame with
+  // its HUD), and the last such resolve of the previous frame (the G-buffer and other full-screen passes come
+  // earlier: DS2 resolves its normals @11B52000 and @11EEA000 before the scene @10951000). Each candidate is noted;
+  // the swap keeps the last one. Before the first swaps the size is unknown and nothing is smoothed.
+  if (!width || width != command_processor_.last_swap_width() ||
+      height != command_processor_.last_swap_height() || command_processor_.IsRecentFrontBuffer(dest_base)) {
+    return false;
+  }
+  command_processor_.NoteSceneFxaaCandidate(dest_base);
+  return dest_base == command_processor_.scene_fxaa_address();
 }
 
 }  // namespace rex::graphics::vulkan

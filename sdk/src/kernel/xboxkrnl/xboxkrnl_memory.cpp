@@ -12,6 +12,7 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <atomic>
 #include <cstring>
 
 #include <rex/assert.h>
@@ -399,8 +400,37 @@ u32 MmAllocatePhysicalMemoryEx_entry(u32 flags, u32 region_size, u32 protect_bit
   uint32_t base_address;
   if (!heap->AllocRange(heap_min_addr, heap_max_addr, adjusted_size, adjusted_alignment,
                         allocation_type, protect, top_down, &base_address)) {
-    // Failed - assume no memory available.
+    // Failed - assume no memory available. Logged (first 16, then every 256th) with the physical heaps' use: a game
+    // that ignores the failure writes through a null pointer later (DS2 at wide 1080p, 2026-11-22).
+    static std::atomic<uint32_t> failures{0};
+    const uint32_t n = failures.fetch_add(1) + 1;
+    if (n <= 16 || !(n % 256)) {
+      uint32_t unreserved = 0, reserved = 0, used = 0, reserved_bytes = 0;
+      const memory::BaseHeap* physical_heaps[3] = {
+          REX_KERNEL_MEMORY()->LookupHeapByType(true, 0x1000),
+          REX_KERNEL_MEMORY()->LookupHeapByType(true, 0x10000),
+          REX_KERNEL_MEMORY()->LookupHeapByType(true, 0x1000000)};
+      REX_KERNEL_MEMORY()->GetHeapsPageStatsSummary(physical_heaps, std::size(physical_heaps), unreserved,
+                                                    reserved, used, reserved_bytes);
+      REXKRNL_WARN("MmAllocatePhysicalMemoryEx failed ({} so far): {:#x} bytes, {} KB pages, align {:#x}, range "
+                   "{:#x}-{:#x}; physical heaps: {} MB used, {} MB reserved",
+                   n, adjusted_size, page_size / 1024, adjusted_alignment, (uint32_t)min_addr_range,
+                   (uint32_t)max_addr_range, uint64_t(used) * 4096 >> 20, uint64_t(reserved_bytes) >> 20);
+    }
     return 0;
+  }
+  {
+    // High-water mark of the physical heaps in 16 MB steps from 256 MB (how close a title runs to the 512 MB).
+    static std::atomic<uint32_t> logged_mb{240};
+    uint32_t used_mb = 0;
+    for (uint32_t size : {0x1000u, 0x10000u, 0x1000000u}) {
+      const memory::BaseHeap* h = REX_KERNEL_MEMORY()->LookupHeapByType(true, size);
+      used_mb += uint32_t(uint64_t(h->total_page_count() - h->unreserved_page_count()) * h->page_size() >> 20);
+    }
+    uint32_t last = logged_mb.load();
+    if (used_mb >= last + 16 && logged_mb.compare_exchange_strong(last, used_mb & ~15u)) {
+      REXKRNL_INFO("Physical memory in use: {} MB (high-water mark, after {:#x} bytes)", used_mb, adjusted_size);
+    }
   }
   REXKRNL_IMPORT_RESULT("MmAllocatePhysicalMemoryEx", "addr={:#x}", base_address);
 

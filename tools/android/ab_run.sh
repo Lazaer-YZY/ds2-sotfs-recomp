@@ -97,6 +97,9 @@ for variant in "$@"; do
   stamp=$(sed -n 's|^logs: .*/logcat_\(.*\)\.txt,.*|\1|p' "$out/$label.txt" | tail -1)
   for t in $DS2_SCREENSHOTS; do
     [ -n "$stamp" ] && [ -f "out/device/shot_${stamp}_${t}s.png" ] && mv "out/device/shot_${stamp}_${t}s.png" "$out/${i}_${label}_${t}s.png"
+    for d in out/device/shot_${stamp}_${t}s_d*.png; do  # second screens (dual-screen devices)
+      [ -n "$stamp" ] && [ -f "$d" ] && mv "$d" "$out/${i}_${label}_${t}s_${d##*_}"
+    done
   done
   log=$( [ -n "$stamp" ] && find "out/device/logs_$stamp" -name ds2.log 2>/dev/null | head -1 || true)
   [ -n "$log" ] && cp "$log" "$out/$label.log"

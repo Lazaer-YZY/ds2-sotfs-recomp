@@ -751,6 +751,10 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                                         ? edram_bases_sorted[i + 1].first
                                         : (xenos::EdramTileCount() + edram_bases_sorted[0].first)) -
                                        rt_base);
+    // At most the console's EDRAM, as the wrap above caps it there: with the
+    // extended EDRAM a lone render target would otherwise own more than the
+    // 2048-tile EDRAM buffer and its host image (see GetRenderTargetHeight).
+    rt_lengths_tiles[i] = std::min(rt_lengths_tiles[i], xenos::kEdramTileCount);
   }
 
   if (interlock_barrier_only) {
@@ -1162,8 +1166,13 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
       uint32_t pitch_tiles = twin_key.pitch_tiles_at_32bpp;
       uint32_t start_tiles = row0 * pitch_tiles;
       uint32_t length_tiles = (row1 - row0) * pitch_tiles;
+      // Within the twin's image too: with the extended EDRAM the period check
+      // no longer implies it (at most the console's 2048 tiles, and the
+      // pitch's width).
       if (length_tiles && rect.width_pixels &&
-          twin_key.base_tiles + start_tiles + length_tiles <= xenos::EdramTileCount()) {
+          twin_key.base_tiles + start_tiles + length_tiles <= xenos::EdramTileCount() &&
+          start_tiles + length_tiles <= xenos::kEdramTileCount &&
+          rect.x_pixels + rect.width_pixels <= pitch_tiles * xenos::kEdramTileWidthSamples) {
         last_update_redirected_clear_transfers_.clear();
         ChangeOwnership(twin_key, start_tiles, length_tiles, &last_update_redirected_clear_transfers_,
                         &rect);
@@ -1428,7 +1437,16 @@ uint32_t RenderTargetCache::GetRenderTargetHeight(uint32_t pitch_tiles_at_32bpp,
   // host render targets stay as tall as on the console's EDRAM (not 2-4 times
   // the memory), and a resolve's tile offset within one stays below the
   // 2048-tile period of the EDRAM buffer and the resolve shaders.
-  uint32_t tile_rows = (xenos::kEdramTileCount + (pitch_tiles_at_32bpp - 1)) / pitch_tiles_at_32bpp;
+  // With the extended EDRAM, rounded down: rounding up (69 rows of a 30-tile
+  // pitch = 2070 tiles at 2336x1080) let one render target own more than the
+  // 2048 tiles of the EDRAM buffer, which the host depth store / load index
+  // without wrapping (a GPU fault on the Adreno 830) and the resolve shaders
+  // wrap to the first row (frames of the wrong surface). 68 rows = 1088 px
+  // still holds a 1080-high screen (2026-11-22).
+  uint32_t tile_rows =
+      xenos::EdramTileCount() > xenos::kEdramTileCount
+          ? std::max(xenos::kEdramTileCount / pitch_tiles_at_32bpp, uint32_t(1))
+          : (xenos::kEdramTileCount + (pitch_tiles_at_32bpp - 1)) / pitch_tiles_at_32bpp;
   // Clamp to the guest limit (tile padding should exceed it) and to the host
   // limit (tile padding mustn't exceed it).
   static_assert(!(xenos::kTexture2DCubeMaxWidthHeight % xenos::kEdramTileHeightSamples),

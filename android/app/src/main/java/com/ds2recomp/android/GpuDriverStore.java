@@ -215,13 +215,19 @@ final class GpuDriverStore {
     }
 
     /**
-     * Adreno 710/720/722: the bundled Stable Turnip v2 supports them in sysmem mode only
-     * (whitebelyash's release notes: "unstable, sysmem only"), so Turnip runs with TU_DEBUG=sysmem.
+     * Turnip runs with TU_DEBUG=sysmem (no tiled GMEM rendering) on:
+     * - Adreno 710/720/722: the bundled Stable Turnip v2 supports them in sysmem mode only
+     *   (whitebelyash's release notes: "unstable, sysmem only").
+     * - Adreno 8xx: every whitebelyash release, Stable Turnip v2 included, says "GMEM rendering produces glitchy
+     *   picture on A830 (write page faults), disable it with TU_DEBUG=sysmem". The owner's S25 (Adreno 830) hung
+     *   the GPU at 1080p in GMEM (KGSL "GPU hang detected" in our context, 2026-11-22: frames of the G-buffer
+     *   normals, then VK_ERROR_DEVICE_LOST), and issue #2's Adreno 825 reported the same flashes and crash. The
+     *   other 8xx share the gen8 backend. CTRL -> GPU compatibility "gmem" still overrides this.
      */
     static boolean needsTurnipSysmem(String model, Metadata metadata) {
         if (model == null || metadata == null || metadata.isPanVk()) return false;
         int number = GpuDriverCatalog.adrenoModel(model);
-        return number == 710 || number == 720 || number == 722;
+        return number == 710 || number == 720 || number == 722 || (number >= 800 && number < 900);
     }
 
     /** DS2_VK_CUSTOM_DRIVER_MODE for a package: the player's choice, else its default. */

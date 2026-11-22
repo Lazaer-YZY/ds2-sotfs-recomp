@@ -188,7 +188,18 @@ final class GameStorage {
     static boolean hasDlc(Context context) {
         if (dlcPackage(context) != null) return true;
         File root = dlcContentRoot(context);
-        return hasEntries(installedDlcDir(root != null ? root : new File(appRoot(context), "user")));
+        return hasFinishedDlcInstall(root != null ? root : new File(appRoot(context), "user"));
+    }
+
+    /**
+     * The game finished installing a DLC under this content root: its folder and the header the game writes last
+     * (an install that failed or was cut short has the folder without it and counted as installed: issue #6).
+     */
+    static boolean hasFinishedDlcInstall(File contentRoot) {
+        String[] headers = new File(contentRoot, "0000000000000000/465307E4/Headers/00000002").list();
+        if (headers == null || !hasEntries(installedDlcDir(contentRoot))) return false;
+        for (String header : headers) if (header.endsWith(".header")) return true;
+        return false;
     }
 
     static boolean hasDefaultXex(File gameDir) {

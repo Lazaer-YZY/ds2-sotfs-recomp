@@ -42,6 +42,8 @@ public final class RuntimeActivity extends SDLActivity {
     private static volatile boolean gameStarted;
 
     private PerfOverlayView perfOverlay;
+    /** The bottom screen of dual-screen devices (CompanionScreen), null until the game's views exist. */
+    private CompanionScreen companion;
     /** Why the renderer could not start with the selected driver; set from native code. */
     private volatile String graphicsFailure;
     private final Handler bootHandler = new Handler(Looper.getMainLooper());
@@ -60,6 +62,12 @@ public final class RuntimeActivity extends SDLActivity {
     static native void nativeSetOption(String name, String value);
     /** The game's recent frame times (ms, oldest first) into out; returns how many (PerfOverlayView). */
     static native int nativeFrameTimes(float[] out);
+    /** Second screen: what the game's HUD shows now (ds2_companion_android.cpp), key=value pairs. */
+    static native String nativeCompanionState();
+    /** Pins the calling thread (the second screen's drawing thread) to the little cores; a line for the log. */
+    static native String nativeCompanionPinLittleCores();
+    /** Second screen: an equipment icon's texture data by its hash from the state line, or null. */
+    static native byte[] nativeCompanionIcon(long hash);
 
     /** Display settings of the CTRL dialog (frame rate, anti-aliasing, upscaling). */
     static SharedPreferences renderPrefs(Context context) {
@@ -158,20 +166,22 @@ public final class RuntimeActivity extends SDLActivity {
     /**
      * "Fill wide screens" (CTRL, from the next start; ds2_render_size.cpp): the game's screen as wide as the display
      * at the same height (Hor+: more to the sides, the HUD and menus kept 16:9 in the middle). The colour and depth
-     * targets must fit the emulated EDRAM together (4096 tiles: at most 2400 wide at 540, 1760 at 720). Only at 540p
-     * and 720p: at 1080p (2352x1080, 8192 tiles) the post-processing came out blue and washed out on the Thor
-     * (2026-11-21), and 1440p (720p scaled 2x) is untested. Returns the width, or 0 for the console's 16:9.
+     * targets must fit the emulated EDRAM together (4096 tiles: at most 2400 wide at 540, 1760 at 720; 8192 tiles at
+     * 1080: at most 2400, since the game's D3D device is not created at 2560 x 1080, the boot crashes; 2400 covers 20:9
+     * phones, 2026-11-22). At every resolution since 2026-11-22: 1080p wide had come out lavender (the game's Clear
+     * dropped bit 12 of a post-processing target's EDRAM base, fixed in ds2_render_size.cpp); 1440p is 720p wide
+     * scaled 2x. Returns the width, or 0 for the console's 16:9.
      */
-    /** Whether Fill screen is offered at this CTRL resolution choice (540p and 720p; see wideWidth). */
+    /** Whether Fill screen is offered at this CTRL resolution choice (all of them; see wideWidth). */
     static boolean wideSupported(String renderHeight) {
-        return "540".equals(renderHeight) || "720".equals(renderHeight);
+        return "540".equals(renderHeight) || "720".equals(renderHeight) || "1080".equals(renderHeight)
+            || "1440".equals(renderHeight);
     }
 
     static int wideWidth(SharedPreferences render, int height, float displayAspect) {
         if (!render.getBoolean("wide", false) || displayAspect <= 16f / 9f + 0.01f) return 0;
         int width = Math.round(height * displayAspect / 16f) * 16;
-        if (height > 720) return 0;
-        int max = height <= 540 ? 2400 : 1760;
+        int max = height <= 540 ? 2400 : height <= 720 ? 1760 : 2400;
         width = Math.min(width, max);
         return width > (height * 16 / 9 + 15) / 16 * 16 ? width : 0;
     }
@@ -185,13 +195,13 @@ public final class RuntimeActivity extends SDLActivity {
     }
 
     /**
-     * CTRL's anti-aliasing option is hidden (and FXAA off) until FXAA runs before the 2D layer: on the finished frame
-     * it blurs the menus' and HUD's text (the owner's S25, 2026-11-21: "fxaa actually makes the text more difficult
-     * to read").
+     * CTRL's anti-aliasing: FXAA on the finished 3D scene before the game draws its 2D layer (vulkan_scene_fxaa), so
+     * the menus' and HUD's text stays sharp. (On the whole finished frame it blurred that text: the owner's S25,
+     * 2026-11-21, "fxaa actually makes the text more difficult to read"; the option was hidden until this.)
      */
-    static final boolean SHOW_AA = false;
+    static final boolean SHOW_AA = true;
 
-    /** The CTRL anti-aliasing choice as the SDK's swap post effect: "none", "fxaa" or "fxaa_extreme". */
+    /** The CTRL anti-aliasing choice: "none", "fxaa" or "fxaa_extreme". */
     static String aaMode(SharedPreferences render) {
         if (!SHOW_AA) return "none";
         String aa = render.getString("aa", "off");
@@ -211,8 +221,8 @@ public final class RuntimeActivity extends SDLActivity {
             args.add("--video_mode_width=" + wide);
             args.add("--video_mode_height=" + gameHeight);
             // Colour, depth and the post-processing pool of a wider screen do not fit the console's 10 MB EDRAM
-            // side by side: the emulated EDRAM is doubled (ds2_render_size.cpp).
-            args.add("--gpu_edram_tiles=4096");
+            // side by side: the emulated EDRAM is doubled, at 1080 quadrupled (ds2_render_size.cpp).
+            if (gameHeight <= 720) args.add("--gpu_edram_tiles=4096");
             android.util.Log.i("ds2recomp", "display: wide screen " + wide + "x" + gameHeight + " (display aspect "
                 + displayAspect + ")");
         }
@@ -232,8 +242,11 @@ public final class RuntimeActivity extends SDLActivity {
             presentHeight = 0;
         }
         args.add("--present_max_height=" + (fsr ? 0 : presentHeight));
-        // Anti-aliasing (CTRL, also switched live): FXAA on the finished frame before it is scaled to the screen.
-        args.add("--swap_post_effect=" + aaMode(render));
+        // Anti-aliasing (CTRL, also switched live): FXAA on the 3D scene before the 2D layer (the resolve feed of the
+        // scene; not with 1440p's resolution scaling, which has no resolve feeding). The swap post effect stays off.
+        args.add("--swap_post_effect=none");
+        String aa = aaMode(render);
+        args.add("--vulkan_scene_fxaa=" + ("fxaa_extreme".equals(aa) ? 2 : "fxaa".equals(aa) ? 1 : 0));
         args.add("--present_effect=" + (fsr ? "fsr" : "bilinear"));
         android.util.Log.i("ds2recomp", "display: render height " + height + ", " + (fsr ? "FSR upscaling" : "display scaling"));
     }
@@ -256,7 +269,12 @@ public final class RuntimeActivity extends SDLActivity {
             + "|" + render.getBoolean("compat_shortcuts", false) + "|" + render.getBoolean("compat_gpl", false)
             + "|" + render.getBoolean("compat_dynrender", false) + "|" + render.getString("compat_tu_mode", "")
             + "|" + render.getBoolean("compat_tu_noubwc", false) + "|" + render.getBoolean("compat_shader", false)
-            + "|" + render.getBoolean("compat_decode_bc", false) + "|" + render.getBoolean("compat_tu_reserve", false);
+            + "|" + render.getBoolean("compat_decode_bc", false) + "|" + render.getBoolean("compat_tu_reserve", false)
+            + "|" + render.getBoolean("compat_hdr_r11g11b10", false)
+            + "|" + render.getBoolean("compat_shortcuts_transfers", false)
+            + "|" + render.getBoolean("compat_shortcuts_resolves", false)
+            + "|" + render.getBoolean("compat_feed_off", false) + "|" + render.getBoolean("compat_lazy_off", false)
+            + "|" + render.getBoolean("compat_7e3_resolve_off", false);
     }
 
     /**
@@ -271,14 +289,35 @@ public final class RuntimeActivity extends SDLActivity {
             android.util.Log.i("ds2recomp", "GPU compatibility: " + String.join(" ", args.subList(first, args.size())));
     }
 
+    /** The render target transfer shortcuts, switched off (CTRL's transfer group). */
+    static final String[] TRANSFER_SHORTCUTS_OFF = {
+        "--gpu_skip_overwritten_color_transfers=false", "--gpu_constant_transfers_as_clears=false",
+        "--gpu_redirect_msaa_depth_clears=false", "--gpu_ownership_from_first_row=false" };
+    /** The resolve shortcuts, switched off (CTRL's resolve group). */
+    static final String[] RESOLVE_SHORTCUTS_OFF = {
+        "--direct_host_resolve=false", "--vulkan_resolve_feed_textures=false",
+        "--vulkan_direct_resolve_float24=false", "--vulkan_direct_resolve_7e3=false",
+        "--vulkan_direct_resolve_7e3_to_8888=false", "--vulkan_direct_resolve_4x_as_1x=false" };
+
     private static void addCompatArgumentsTo(java.util.List<String> args, SharedPreferences render) {
-        if (render.getBoolean("compat_shortcuts", false)) {
+        // "Renderer shortcuts off" is the three groups below together. In development builds the transfer and resolve
+        // groups, and three switches inside the resolve group, also have their own CTRL switches (the owner's S25,
+        // 2026-11-22: the 1080p G-buffer-normals flashes; paused, DECISIONS.md). Release builds ignore those.
+        boolean bisect = BuildConfig.DEBUG;
+        boolean allShortcuts = render.getBoolean("compat_shortcuts", false);
+        if (allShortcuts || (bisect && render.getBoolean("compat_shortcuts_transfers", false))) {
+            java.util.Collections.addAll(args, TRANSFER_SHORTCUTS_OFF);
+        }
+        if (allShortcuts || (bisect && render.getBoolean("compat_shortcuts_resolves", false))) {
+            java.util.Collections.addAll(args, RESOLVE_SHORTCUTS_OFF);
+        }
+        if (bisect && render.getBoolean("compat_feed_off", false)) args.add("--vulkan_resolve_feed_textures=false");
+        if (bisect && render.getBoolean("compat_lazy_off", false)) args.add("--vulkan_resolve_feed_lazy_dump=false");
+        if (bisect && render.getBoolean("compat_7e3_resolve_off", false)) {
+            args.add("--vulkan_direct_resolve_7e3_to_8888=false");
+        }
+        if (allShortcuts) {
             java.util.Collections.addAll(args,
-                "--direct_host_resolve=false", "--vulkan_resolve_feed_textures=false",
-                "--vulkan_direct_resolve_float24=false", "--vulkan_direct_resolve_7e3=false",
-                "--vulkan_direct_resolve_7e3_to_8888=false", "--vulkan_direct_resolve_4x_as_1x=false",
-                "--gpu_skip_overwritten_color_transfers=false", "--gpu_constant_transfers_as_clears=false",
-                "--gpu_redirect_msaa_depth_clears=false", "--gpu_ownership_from_first_row=false",
                 "--vulkan_shared_memory_hoist_uploads=false", "--spirv_texture_sign_specialization=false",
                 "--spirv_texture_exp_adjust_specialization=false", "--vulkan_memexport_coalesce_barriers=false");
         }
@@ -290,6 +329,11 @@ public final class RuntimeActivity extends SDLActivity {
                 "--vulkan_shared_memory_texel_buffer=false");
         }
         if (render.getBoolean("compat_decode_bc", false)) args.add("--vulkan_decode_bc_textures=true");
+        // Issues #8 / #18 (Adreno 650 / 660, 2026-11-22): menus right with decoded textures, gameplay in flat blue and
+        // noise with a black band every 64 rows, i.e. what is read back from the game's HDR scene target (7e3, a 64-bit
+        // RGBA16F image on the host). This keeps it in a 32-bit B10G11R11 image instead (Thor, 2026-11-22, 540p with
+        // decoded textures, Majula: correct picture, 60 fps like without it).
+        if (render.getBoolean("compat_hdr_r11g11b10", false)) args.add("--vulkan_7e3_as_r11g11b10=true");
         if (render.getBoolean("compat_gpl", false)) {
             java.util.Collections.addAll(args, "--vulkan_pipeline_libraries=false",
                                          "--vulkan_precompile_vertex_libraries=false");
@@ -322,6 +366,29 @@ public final class RuntimeActivity extends SDLActivity {
         Intent intent = new Intent(this, RuntimeActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(intent);
+        Runtime.getRuntime().exit(0);
+    }
+
+    /**
+     * CTRL's Exit button (the owner, 2026-11-22: "cant see another way to exit the app"): asks first, then ends the game
+     * like a restart does, without starting it again. The game has no exit of its own: its Quit Game (System menu)
+     * saves and returns to the title screen.
+     */
+    void confirmExit() {
+        new android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.exit_title))
+            .setMessage(getString(R.string.exit_message))
+            .setPositiveButton(getString(R.string.exit_confirm), (dialog, which) -> exitGame())
+            .setNegativeButton(getString(R.string.touch_cancel), null)
+            .show();
+    }
+
+    private void exitGame() {
+        android.util.Log.i("ds2recomp", "exit from CTRL");
+        if (touchControls != null) touchControls.clearTouches();
+        stopSaveBackups();
+        GpuDriverStore.clearBootPending(this);  // a chosen exit is not a failed start, however soon it came
+        finishAndRemoveTask();
         Runtime.getRuntime().exit(0);
     }
 
@@ -418,6 +485,8 @@ public final class RuntimeActivity extends SDLActivity {
                 RelativeLayout.LayoutParams.MATCH_PARENT,
                 RelativeLayout.LayoutParams.MATCH_PARENT));
             nativeSetTouchInput(0, 0, 0, 0, 0, 0, 0);
+            // The game's HUD on the second screen of dual-screen devices (CTRL "Second screen HUD").
+            companion = new CompanionScreen(this);
         }
     }
 
@@ -443,6 +512,12 @@ public final class RuntimeActivity extends SDLActivity {
         if (touchControls != null) touchControls.revealCtrl();
         // Preserve SDL's fallback behavior on Android versions that call this directly.
         super.onBackPressed();
+    }
+
+    /** CTRL "Second screen HUD": remembered and applied at once (UI thread). */
+    void applyCompanionSetting(boolean on, boolean hideOnMain) {
+        renderPrefs(this).edit().putBoolean(CompanionScreen.PREF, on).putBoolean(CompanionScreen.PREF_HIDE, hideOnMain).apply();
+        if (companion != null) companion.update();
     }
 
     /** Shows or hides the performance overlay (UI thread; CTRL dialog). */
@@ -596,6 +671,7 @@ public final class RuntimeActivity extends SDLActivity {
         PlayerLogs.publish(this);
         // The player may be done for now: back up a changed save (on the backup thread, onPause does not wait).
         if (saveBackups != null) saveBackups.checkSoon();
+        if (companion != null) companion.onPause();
         super.onPause();
     }
 
@@ -649,6 +725,7 @@ public final class RuntimeActivity extends SDLActivity {
         super.onResume();
         hideSystemBars();
         if (touchControls != null) touchControls.onHostResume();
+        if (companion != null) companion.onResume();
         bootHandler.removeCallbacks(bootSettled);
         bootHandler.postDelayed(bootSettled, BOOT_SETTLED_MS);
     }

@@ -14,7 +14,7 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 unset CC CXX RC CMAKE_PREFIX_PATH   # host compiler settings must not leak into the NDK configure
 
-REPO=C:/ds2
+REPO=$(cygpath -m "$DS2_ROOT")
 GEN=${DS2_GENERATED_DIR:-$REPO/app/generated/regs}
 BUILD=${DS2_BUILD_DIR:-$REPO/out/build/android-arm64}
 BUILD_TYPE=${DS2_BUILD_TYPE:-Release}
@@ -116,6 +116,17 @@ if has stage; then
   [ "$(sha256sum "$TURNIP_ZIP" | cut -d' ' -f1)" = "$TURNIP_SHA256" ] || die "$TURNIP_ZIP: checksum mismatch"
   mkdir -p "$REPO/android/app/src/main/assets/gpu_driver"
   cp -f "$TURNIP_ZIP" "$REPO/android/app/src/main/assets/gpu_driver/stable-turnip-V2.zip"
+  # The second screen's art (tools/android/ds2_companion_assets.py, cut from the owner's own discs): development APKs
+  # only. build_release_apk.sh removes it again, and its asset check refuses an APK that carries it.
+  COMPANION_ART=$REPO/out/companion_assets/companion
+  rm -rf "$REPO/android/app/src/main/assets/companion"
+  # DS2_NO_COMPANION_ART=1: leave it out, as a public APK does (the app then builds it from the game files).
+  if [ -f "$COMPANION_ART/hud.json" ] && [ "${DS2_NO_COMPANION_ART:-0}" != 1 ]; then
+    cp -r "$COMPANION_ART" "$REPO/android/app/src/main/assets/companion"
+    echo "  companion art: $(du -sh "$COMPANION_ART" | cut -f1)"
+  else
+    echo "  companion art: none (out/venv/Scripts/python.exe -I tools/android/ds2_companion_assets.py)"
+  fi
   echo "stage OK -> $JNI_DIR"
 fi
 
@@ -178,6 +189,10 @@ if has launch; then
   am_out=$("${ADB[@]}" shell "${am_args[@]}" 2>&1) || { echo "$am_out"; die "am start failed"; }
   ! grep -q -E "^Error" <<<"$am_out" || die "am start: $am_out"
   RUN_SECS=${DS2_RUN_SECS:-120}
+  # Dual-screen devices: the other physical displays (the second screen's HUD, CompanionScreen) are captured with every
+  # screenshot as shot_<stamp>_<t>s_d<n>.png (n = 2, 3, ...).
+  SECOND_DISPLAYS=$("${ADB[@]}" shell dumpsys SurfaceFlinger --display-id </dev/null 2>/dev/null | tr -d '\r' \
+                    | sed -n 's/^Display \([0-9]*\) (HWC display [1-9][0-9]*).*/\1/p' || true)
   echo "running for ${RUN_SECS}s ..."
   elapsed=0
   rm -f "$DEVICE_LOGS/STOP_RUN"
@@ -187,6 +202,11 @@ if has launch; then
     [ -e "$DEVICE_LOGS/STOP_RUN" ] && break
     "${ADB[@]}" exec-out screencap -p > "$DEVICE_LOGS/shot_${stamp}_${t}s.png" 2>/dev/null </dev/null || true
     echo "screenshot ${t}s: $DEVICE_LOGS/shot_${stamp}_${t}s.png"
+    n=2
+    for id in $SECOND_DISPLAYS; do
+      "${ADB[@]}" exec-out screencap -p -d "$id" > "$DEVICE_LOGS/shot_${stamp}_${t}s_d$n.png" 2>/dev/null </dev/null || true
+      n=$((n + 1))
+    done
   done
   # Live sessions end early when out/device/STOP_RUN appears (touch it; it is removed here): the normal end follows
   # (logs, force-stop, sleep; ab_run.sh then keeps the end save and restores the owner's).

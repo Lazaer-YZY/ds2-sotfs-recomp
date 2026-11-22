@@ -70,6 +70,7 @@ REXCVAR_DECLARE(bool, spirv_texture_sign_branch);
 REXCVAR_DECLARE(bool, vulkan_shader_xenos_multiply);
 REXCVAR_DECLARE(bool, vulkan_shader_xenos_multiply_vertex);
 REXCVAR_DECLARE(bool, vulkan_texture_fetch_implicit_lod);
+REXCVAR_DECLARE(uint32_t, spirv_texture_weights_subtexel_snap);
 REXCVAR_DECLARE(bool, vulkan_shared_memory_texel_buffer);
 REXCVAR_DECLARE(bool, spirv_structured_forward_jumps);
 
@@ -4098,6 +4099,9 @@ uint64_t FragmentLibraryKeyHash(uint64_t pixel_shader_hash, uint64_t pixel_shade
       SpirvShaderTranslator::Modification(pixel_shader_variant).pixel.param_gen_point) {
     key.translation_switches |= UINT32_C(1) << 5;
   }
+  if (REXCVAR_GET(spirv_texture_weights_subtexel_snap)) {
+    key.translation_switches |= UINT32_C(1) << 6;
+  }
   key.texture_sign_classes = texture_sign_classes;
   return XXH3_64bits(&key, sizeof(key));
 }
@@ -5500,7 +5504,8 @@ void VulkanPipelineCache::PrecompileThread() {
                                 (uint32_t(REXCVAR_GET(vulkan_shared_memory_texel_buffer)) << 13) |
                                 (uint32_t(REXCVAR_GET(spirv_structured_forward_jumps)) << 14) |
                                 (uint32_t(SpirvShaderTranslator::IsVertexFetchEndianSpecializationEnabled())
-                                 << 15);
+                                 << 15) |
+                                (uint32_t(REXCVAR_GET(spirv_texture_weights_subtexel_snap) != 0) << 16);
   std::memcpy(marker + 24, &precompile_version, 4);
   if (FILE* file = rex::filesystem::OpenFile(precompile_marker_path_, "rb")) {
     uint8_t existing[28];

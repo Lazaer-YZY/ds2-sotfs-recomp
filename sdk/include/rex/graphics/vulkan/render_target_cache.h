@@ -1033,6 +1033,12 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
   // (vulkan_resolve_feed_7e3).
   VkPipeline resolve_feed_pipeline_7e3_ = VK_NULL_HANDLE;
   VkPipeline resolve_feed_pipeline_7e3_8888_ = VK_NULL_HANDLE;
+  // k_8_8_8_8 -> R8G8B8A8_UNORM through FXAA (vulkan_scene_fxaa): the finished 3D scene before the game's 2D
+  // layer. Its own layout: the push constants also carry the fed rectangle (the FXAA taps stay inside it).
+  VkPipelineLayout resolve_feed_pipeline_layout_fxaa_ = VK_NULL_HANDLE;
+  VkPipeline resolve_feed_pipeline_fxaa_ = VK_NULL_HANDLE;
+  // vulkan_scene_fxaa: whether a k_8_8_8_8 resolve feed is the scene before the 2D layer.
+  bool IsSceneFxaaResolve(uint32_t dest_base, uint32_t width, uint32_t height) const;
   VkPipeline resolve_feed_pipeline_depth_float24_stencil_ = VK_NULL_HANDLE;
   VkPipeline direct_host_resolve_float24_fed_pipeline_ = VK_NULL_HANDLE;
   VkPipelineLayout direct_resolve_pipeline_layout_depth_ = VK_NULL_HANDLE;

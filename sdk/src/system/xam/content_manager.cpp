@@ -10,6 +10,7 @@
  */
 
 #include <array>
+#include <cerrno>
 #include <cstring>
 #include <queue>
 #include <string>
@@ -85,6 +86,9 @@ static bool SafeCreateDirectories(const std::filesystem::path& p) {
   }
   return true;
 }
+
+// ERROR_DISK_FULL.
+static constexpr X_RESULT kErrorDiskFull = X_RESULT_FROM_WIN32(0x00000070L);
 
 static const char* kThumbnailFileName = "__thumbnail.png";
 
@@ -774,31 +778,72 @@ static X_RESULT ExtractEntry(rex::filesystem::Entry* entry,
 
   auto out_file = rex::filesystem::OpenFile(dest_path, "wb");
   if (!out_file) {
+    const int err = errno;
+    REXSYS_WARN("[content] cannot create {}: {}", rex::path_to_utf8(dest_path), std::strerror(err));
     in_file->Destroy();
     return X_ERROR_ACCESS_DENIED;
   }
 
+  // Every read and write is checked (issue #6: a DLC unpacked onto an SD card was reported installed while the game
+  // could not use it; a full card or a failing write used to leave short files behind, silently).
   constexpr size_t kBufferSize = 4 * 1024 * 1024;  // 4 MiB
   auto buffer = std::make_unique<uint8_t[]>(kBufferSize);
   size_t remaining = entry->size();
   size_t offset = 0;
+  X_RESULT result = X_ERROR_SUCCESS;
 
   while (remaining > 0) {
     size_t bytes_read = 0;
     size_t to_read = std::min(remaining, kBufferSize);
     in_file->ReadSync(std::span<uint8_t>(buffer.get(), to_read), offset, &bytes_read);
     if (bytes_read == 0) {
+      REXSYS_WARN("[content] reading {} from the package stopped at {} of {} bytes", entry->path(), offset,
+                  entry->size());
+      result = X_ERROR_FUNCTION_FAILED;
       break;
     }
-    fwrite(buffer.get(), 1, bytes_read, out_file);
+    if (fwrite(buffer.get(), 1, bytes_read, out_file) != bytes_read) {
+      const int err = errno;
+      REXSYS_WARN("[content] writing {} failed at {} of {} bytes: {}", rex::path_to_utf8(dest_path), offset,
+                  entry->size(), std::strerror(err));
+      result = kErrorDiskFull;
+      break;
+    }
     install_progress().bytes_done.fetch_add(bytes_read, std::memory_order_relaxed);
     offset += bytes_read;
     remaining -= bytes_read;
   }
 
-  fclose(out_file);
+  if (fclose(out_file) != 0 && result == X_ERROR_SUCCESS) {
+    const int err = errno;
+    REXSYS_WARN("[content] closing {} failed: {}", rex::path_to_utf8(dest_path), std::strerror(err));
+    result = kErrorDiskFull;
+  }
   in_file->Destroy();
-  return X_ERROR_SUCCESS;
+  return result;
+}
+
+// Why an installed package folder does not match its package ("" = complete): no header (what marks an install as
+// finished), or a file missing or of another size than in the package.
+static std::string InstalledContentProblem(rex::filesystem::Entry* root, const std::filesystem::path& install_path,
+                                           const std::filesystem::path& header_path) {
+  if (!SafeExists(header_path)) return "no header " + rex::path_to_utf8(header_path);
+  std::queue<rex::filesystem::Entry*> queue;
+  queue.push(root);
+  while (!queue.empty()) {
+    auto* entry = queue.front();
+    queue.pop();
+    for (auto& child : entry->children()) queue.push(child.get());
+    if (entry->attributes() & rex::filesystem::kFileAttributeDirectory) continue;
+    const auto path = install_path / rex::to_path(rex::string::utf8_fix_path_separators(entry->path()));
+    std::error_code ec;
+    const uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec) return entry->path() + " missing (" + ec.message() + ")";
+    if (size != entry->size()) {
+      return fmt::format("{} has {} of {} bytes", entry->path(), size, entry->size());
+    }
+  }
+  return {};
 }
 
 X_RESULT ContentManager::InstallContent(const std::filesystem::path& package_path) {
@@ -834,25 +879,31 @@ X_RESULT ContentManager::InstallContent(const std::filesystem::path& package_pat
     content_data.set_display_name(rex::path_to_utf16(package_path.filename()));
   }
 
-  if (ContentExists(xuid, content_data)) {
-    return X_ERROR_ALREADY_EXISTS;
-  }
-
-  auto install_path = ResolvePackagePath(xuid, content_data);
-  std::error_code ec;
-  std::filesystem::create_directories(install_path, ec);
-  if (ec) {
-    return X_ERROR_ACCESS_DENIED;
-  }
-
   auto* root = device->ResolvePath("");
   if (!root) {
     return X_ERROR_ACCESS_DENIED;
   }
 
+  const auto install_path = ResolvePackagePath(xuid, content_data);
+  const auto header_path =
+      ResolvePackageHeaderPath(content_data.file_name(), xuid, title_id, content_data.content_type);
+  const std::string name = content_data.file_name();
+  std::error_code ec;
+  if (ContentExists(xuid, content_data)) {
+    // Complete means the header is written and every file has its package size. An install that failed or was cut
+    // short used to count as installed forever (issue #6: the game then reported the DLC's storage inaccessible).
+    const std::string problem = InstalledContentProblem(root, install_path, header_path);
+    if (problem.empty()) {
+      return X_ERROR_ALREADY_EXISTS;
+    }
+    REXSYS_WARN("[content] {} is installed but incomplete ({}): installing it again", name, problem);
+    std::filesystem::remove_all(install_path, ec);
+    std::filesystem::remove(header_path, ec);
+  }
+
+  // Total size for the progress display and the space check.
+  uint64_t total = 0;
   {
-    // Total size for the progress display.
-    uint64_t total = 0;
     std::queue<rex::filesystem::Entry*> sizes;
     sizes.push(root);
     while (!sizes.empty()) {
@@ -863,6 +914,25 @@ X_RESULT ContentManager::InstallContent(const std::filesystem::path& package_pat
     }
     install_progress().bytes_done.store(0, std::memory_order_relaxed);
     install_progress().bytes_total.store(total ? total : 1, std::memory_order_relaxed);
+  }
+
+  std::filesystem::create_directories(install_path, ec);
+  if (ec) {
+    REXSYS_WARN("[content] cannot create {}: {}", rex::path_to_utf8(install_path), ec.message());
+    return X_ERROR_ACCESS_DENIED;
+  }
+  {
+    const auto space = std::filesystem::space(install_path, ec);
+    if (!ec) {
+      REXSYS_INFO("[content] installing {} into {}: {} MB, {} MB free there", name, rex::path_to_utf8(install_path),
+                  total >> 20, uint64_t(space.available) >> 20);
+      if (uint64_t(space.available) < total + (uint64_t(16) << 20)) {
+        REXSYS_WARN("[content] not enough space for {}: {} MB needed, {} MB free", name, total >> 20,
+                    uint64_t(space.available) >> 20);
+        std::filesystem::remove_all(install_path, ec);
+        return kErrorDiskFull;
+      }
+    }
   }
 
   std::queue<rex::filesystem::Entry*> queue;
@@ -877,6 +947,10 @@ X_RESULT ContentManager::InstallContent(const std::filesystem::path& package_pat
 
     auto result = ExtractEntry(entry, install_path);
     if (result != X_ERROR_SUCCESS) {
+      // Nothing half-installed stays behind: the next start tries again.
+      REXSYS_WARN("[content] installing {} failed ({:08X}); removing {}", name, uint32_t(result),
+                  rex::path_to_utf8(install_path));
+      std::filesystem::remove_all(install_path, ec);
       return result;
     }
   }

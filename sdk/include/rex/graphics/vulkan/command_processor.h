@@ -356,6 +356,21 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Returns the text to display in the GPU backend name in the window title.
   std::string GetWindowTitleText() const;
 
+  // The last swaps (vulkan_scene_fxaa): the presented frame's size and the recent front buffer addresses, so that a
+  // full-screen resolve can be told apart from the one into the front buffer.
+  uint32_t last_swap_width() const { return last_swap_width_; }
+  uint32_t last_swap_height() const { return last_swap_height_; }
+  // The scene for vulkan_scene_fxaa: the last full-screen k_8_8_8_8 resolve (not into a front buffer) before the
+  // swap, remembered at the swap; earlier ones in the frame are the G-buffer and other passes' data.
+  void NoteSceneFxaaCandidate(uint32_t address) { scene_fxaa_candidate_ = address; }
+  uint32_t scene_fxaa_address() const { return scene_fxaa_address_; }
+  bool IsRecentFrontBuffer(uint32_t address) const {
+    for (uint32_t frontbuffer : recent_frontbuffers_) {
+      if (frontbuffer && ((frontbuffer ^ address) & 0x1FFFFFFFu) == 0) return true;
+    }
+    return false;
+  }
+
  protected:
   bool SetupContext() override;
   void ShutdownContext() override;
@@ -409,6 +424,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool IssueCopy() override;
 
  private:
+  uint32_t last_swap_width_ = 0, last_swap_height_ = 0;
+  uint32_t recent_frontbuffers_[4] = {};
+  uint32_t recent_frontbuffer_next_ = 0;
+  uint32_t scene_fxaa_candidate_ = 0, scene_fxaa_address_ = 0;
   std::filesystem::path setup_driver_pipeline_cache_path_;
   size_t setup_driver_pipeline_cache_size_ = 0;
 

@@ -32,6 +32,8 @@
 // addresses read from the guest stack: each frame's saved LR at its caller's stack pointer - 8, as the __savegprlr
 // prologues leave it), and the render target pool placements (sub_82F07B70) with each pool's fields.
 
+#include "ds2_hud_sprites.h"
+
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -57,11 +59,16 @@ REXCVAR_DEFINE_BOOL(ds2_ui_centre, true, "DS2",
 REXCVAR_DEFINE_BOOL(ds2_ui_probe, false, "DS2",
                     "Diagnostic: log each distinct 2D sprite transform call (caller, anchor flags, the first matrix "
                     "rows) once");
+REXCVAR_DEFINE_INT32(ds2_gpu_pool_extra_mb, -1, "DS2",
+                     "MB added to the game's 241 MB GPU pool (-1 = by the screen's pixels: 64 MB per extra console screen). Takes effect on restart");
 REXCVAR_DEFINE_BOOL(ds2_surface_probe, false, "DS2",
                     "Diagnostic: log each distinct render target / depth surface the game sets up (size, format, "
                     "multisample, guest call chain) once, and the render target pool placements");
 
+extern "C" void __imp__sub_826D86D8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82F19DC0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_829DB778(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_829FC1D0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82EF0F20(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82EF1698(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82EF47E0(PPCContext& __restrict ctx, uint8_t* base);
@@ -213,6 +220,111 @@ REX_HOOK_RAW(sub_829DB778) {
   }
 }
 
+// sub_829FC1D0(device, ..., render target index r5, ...): the D3D Clear. It clears a colour target through a 4x depth
+// alias, writing RB_DEPTH_INFO (register 0x2002, a type-0 packet: the register number, then the value) as the target's
+// info word & 0xFFF, so a target based at tile 4096 or above is cleared 4096 tiles too low. At 1080-high wide sizes
+// the quarter-size post-processing target sits at 4862 (1920x1080: 3876): it kept stale contents and the scene came
+// out lavender (found by Fable 5.2 from the frame traces, 2026-11-22). The register write is put right after the call:
+// the commands it wrote end at the device's write pointer (+48, `stw r30,48(r31)`).
+REX_HOOK_RAW(sub_829FC1D0) {
+  const uint32_t device = ctx.r3.u32;
+  const int32_t target = int32_t(ctx.r5.u32);
+  uint32_t info = 0, start = 0;
+  if (EdramTiles() > 4096 && device >= 0x10000u && target >= 0 && target < 4) {
+    const uint32_t surface = Load32(base, device + (uint32_t(target) + 3204) * 4);
+    if (surface >= 0x10000u) info = Load32(base, surface + 28);
+    start = Load32(base, device + 48);
+  }
+  __imp__sub_829FC1D0(ctx, base);
+  if (!(info & 0x1000u)) return;
+  const uint32_t end = Load32(base, device + 48);
+  // The dwords written are start+4 .. end; search back from the end (at most 1 KB, also when the write moved to a new
+  // part of the buffer) for a type-0 packet that writes RB_DEPTH_INFO (alone, header 0x2002, or within a run of
+  // registers: base register in bits 0-14, count - 1 in bits 16-29, bit 15 = all values to one register) with this
+  // target's low 12 bits. Counted, and the first misses logged with the commands, since the S25 still showed single
+  // frames of the G-buffer normals at 2336x1080 (2026-11-22, v0.1.17).
+  static std::atomic<uint32_t> patched{0}, missed{0};
+  const uint32_t span = (end > start && end - start <= 1024u) ? end - start : 1024u;
+  bool done = false;
+  for (uint32_t at = end - 4; !done && at + 4 > end - span && at >= 0x10000u; at -= 4) {
+    const uint32_t header = Load32(base, at);
+    if (header >> 30) continue;
+    const uint32_t first = header & 0x7FFFu, count = ((header >> 16) & 0x3FFFu) + 1;
+    const bool one_register = header & 0x8000u;
+    if (count > 32 || first > 0x2002u || 0x2002u >= first + (one_register ? 1u : count)) continue;
+    const uint32_t slot = at + 4 + (one_register ? 0u : (0x2002u - first) * 4);
+    if (slot >= end + 4) continue;
+    const uint32_t value = Load32(base, slot);
+    if ((value & 0x1FFFu) != (info & 0xFFFu)) continue;
+    Store32(base, slot, value | 0x1000u);
+    done = true;
+  }
+  const uint32_t n = done ? patched.fetch_add(1) + 1 : 0;
+  if (done && (n == 1 || !(n % 5000))) {
+    REXLOG_INFO("ds2 render size: clear of the target at EDRAM {} given its bit 12 back ({} so far, {} missed)",
+                info & 0x1FFFu, n, missed.load());
+  }
+  if (!done) {
+    const uint32_t m = missed.fetch_add(1) + 1;
+    if (m <= 6 || !(m % 1000)) {
+      std::string words;
+      const uint32_t from = end > start && end - start <= 256u ? start + 4 : end - 128;
+      for (uint32_t at = from; at <= end && at >= 0x10000u; at += 4) words += fmt::format(" {:08X}", Load32(base, at));
+      REXLOG_WARN("ds2 render size: clear of the target at EDRAM {} (info {:08X}) NOT patched ({} missed, {} patched); "
+                  "commands {:08X}..{:08X}:{}", info & 0x1FFFu, info, m, patched.load(), start, end, words);
+    }
+  }
+}
+
+// sub_82F19DC0(heaps, sizes): the renderer init (sub_82EF1698) builds the engine's heap-size table on its stack (18
+// words) and creates the heaps from it. Entry 12 (bytes 12-15, 0x0F100000 = 241 MB) is the GPU pool: one physical
+// allocation at boot that the game's own allocator splits into render targets, textures and vertex buffers. The
+// console's 720p fills most of it; a larger screen's targets left too little, so textures went missing (the tree by
+// the hut drawn as flat beige surfaces) and then a vertex buffer, whose data the game copies in without checking: a
+// write to address 0 (the owner's S25 at 2336x1080, 2026-11-22). The kernel used only 271 MB of its 512 MB, so the
+// pool grows by 64 MB per extra console screen of pixels (2336x1080: +112 MB), in 16 MB steps.
+REX_HOOK_RAW(sub_82F19DC0) {
+  const uint32_t sizes = ctx.r4.u32;
+  uint32_t width, height;
+  WantedScreen(width, height);
+  const uint64_t pixels = uint64_t(width) * height, console = uint64_t(kConsoleWidth) * kConsoleHeight;
+  if (width && pixels > console && sizes >= 0x10000u && Load32(base, sizes + 12) == 0x0F100000u) {
+    const int32_t forced = REXCVAR_GET(ds2_gpu_pool_extra_mb);
+    const uint64_t extra_mb = forced >= 0 ? uint64_t(forced) : ((pixels - console) * 64 + console - 1) / console;
+    const uint32_t extra = uint32_t(forced >= 0 ? extra_mb : (extra_mb + 15) & ~uint64_t(15)) << 20;
+    Store32(base, sizes + 12, 0x0F100000u + extra);
+    REXLOG_INFO("ds2 render size: GPU pool 241 MB -> {} MB for {}x{}", (0x0F100000u + extra) >> 20, width, height);
+  }
+  __imp__sub_82F19DC0(ctx, base);
+}
+
+// sub_826D86D8(buffer, size, usage, allocator): creates a vertex buffer (a 32-byte D3D header, then the data from the
+// allocator's virtual Alloc, slot 40, align 16; allocator 0 = the default GPU allocator, entry 1 of the table at
+// 0x834EC4F8). On failure it returns 0 with the header's address left 0, and model loading (sub_82F4AA28) copies into
+// it anyway: the S25's write to address 0 near the hut at 2336x1080 (2026-11-22). Logs each failure (first 8) with the
+// allocator's first words, to tell its pool from the kernel's physical memory.
+REX_HOOK_RAW(sub_826D86D8) {
+  const uint32_t size = ctx.r4.u32, given = ctx.r6.u32;
+  __imp__sub_826D86D8(ctx, base);
+  if (ctx.r3.u32 || !size) return;
+  static std::atomic<uint32_t> failures{0};
+  const uint32_t n = failures.fetch_add(1) + 1;
+  if (n > 8) return;
+  uint32_t allocator = given;
+  if (!allocator) {
+    const uint32_t table = Load32(base, 0x834EC4F0u);
+    if (table >= 0x10000u) allocator = Load32(base, table + 4);
+  }
+  std::string words;
+  if (allocator >= 0x10000u) {
+    for (uint32_t i = 0; i < 16; ++i) words += fmt::format(" {:08X}", Load32(base, allocator + i * 4));
+  }
+  const uint32_t vtable = allocator >= 0x10000u ? Load32(base, allocator) : 0;
+  REXLOG_WARN("ds2 memory: vertex buffer of {:#x} bytes not allocated ({} so far) by allocator {:08X} (vtable {:08X}, "
+              "alloc {:08X}, from lr {:08X}):{}", size, n, allocator, vtable,
+              vtable >= 0x10000u ? Load32(base, vtable + 40) : 0u, uint32_t(ctx.lr), words);
+}
+
 // sub_82EFE958(manager, desc {width, height, count, EDRAM base}): the post-processing chain's shared pool (see the top).
 // With more pixels than the console's, ask for 768 rows (the console's 608 rows at 720p and a quarter more: the chain's
 // placements scale with the width).
@@ -285,6 +397,7 @@ REX_HOOK_RAW(sub_82F3E4F0) {
   // starts at the left edge with a scale above 30 (2026-11-21).
   if (uint32_t(ctx.lr) == 0x82F5147Cu) {
     const uint32_t m = ctx.r4.u32;
+    ds2::hud_sprites::OnSpriteTransform(base, m);
     float sx, tx;
     const uint32_t usx = Load32(base, m), utx = Load32(base, m + 12);
     std::memcpy(&sx, &usx, 4);

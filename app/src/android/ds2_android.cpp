@@ -15,6 +15,7 @@
 #include "ds2_effects.h"
 #include "ds2_framerate.h"
 #include "ds2_frame_overlay.h"
+#include "ds2_hud_sprites.h"
 
 #include <algorithm>
 #include <atomic>
@@ -597,6 +598,10 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, 
     ds2::cheats::AddSouls(uint32_t(std::strtoul(std::string(val).c_str(), nullptr, 10)));
   } else if (key.rfind("cheat_", 0) == 0) {
     ds2::cheats::Set(key.substr(6), val == "1" || val == "true");
+  } else if (key == "companion") {
+    ds2::hud_sprites::SetCapture(val == "1" || val == "true");
+  } else if (key == "companion_hide") {
+    ds2::hud_sprites::SetHide(val == "1" || val == "true");
   } else if (key == "prime") {
     ds2::android::SetPrimeGovernor(val == "1" || val == "true");
   } else if (key == "pad_map") {

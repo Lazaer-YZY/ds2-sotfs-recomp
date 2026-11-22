@@ -136,6 +136,11 @@ REXCVAR_DEFINE_UINT32(vulkan_submit_before_wait_min_draws, 1, "GPU/Vulkan",
                       "sleeps. Lightning Returns waits once per frame for a guest memory counter; "
                       "without this the GPU idled until the wait ended. 0 = never.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(vulkan_gpu_stall_log_ms, 250, "GPU/Vulkan",
+                     "Log blocking waits for submitted GPU work and frames (time between swaps) that last "
+                     "at least this many ms: a GPU hang the kernel driver reset and recovered from shows as "
+                     "one (the Adreno 830's GMEM hangs, 2026-11-22), long before a lost device; loads and "
+                     "the app in the background do too. 0 = off.");
 REXCVAR_DEFINE_BOOL(vulkan_fence_poll, false, "GPU/Vulkan",
                     "Poll in-flight submission fences with zero-timeout waits whenever a submission "
                     "begins, to reclaim resources early (Xenia's behaviour). Off: completion is "
@@ -2822,6 +2827,15 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
   lr_crossfade_this_frame_ = false;
+  // vulkan_scene_fxaa: the front buffers and the frame size (VulkanRenderTargetCache::IsSceneFxaaResolve).
+  if (frontbuffer_ptr && !IsRecentFrontBuffer(frontbuffer_ptr)) {
+    recent_frontbuffers_[recent_frontbuffer_next_] = frontbuffer_ptr;
+    recent_frontbuffer_next_ = (recent_frontbuffer_next_ + 1) % uint32_t(rex::countof(recent_frontbuffers_));
+  }
+  last_swap_width_ = frontbuffer_width;
+  last_swap_height_ = frontbuffer_height;
+  scene_fxaa_address_ = scene_fxaa_candidate_;
+  scene_fxaa_candidate_ = 0;
   FinishResolveDump();  // DS2 diagnostic (resolve_dump_dir)
   CpFrameOnSwap();
   if (gpu_timing_enabled_) {
@@ -5028,6 +5042,18 @@ void VulkanCommandProcessor::CpFrameOnSwap() {
   auto& f = cp_frame_;
   const uint32_t threshold_ms = REXCVAR_GET(vulkan_slow_frame_ms);
   uint64_t cpu_ns = 0, run_ns = 0, queue_ns = 0;
+  // Release builds too (one comparison per frame): the S25's GPU hangs froze the picture for 360-480 ms each before
+  // the device was lost, with nothing in the log.
+  if (int32_t long_ms = REXCVAR_GET(vulkan_gpu_stall_log_ms);
+      long_ms > 0 && f.start_ns && now - f.start_ns >= uint64_t(long_ms) * 1000000) {
+    static std::atomic<uint32_t> long_frames{0};
+    const uint32_t n = long_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 30 || n % 50 == 0) {
+      REXGPU_WARN("Long frame: {:.0f} ms between swaps ({} so far; a load, the app in the background, or a GPU "
+                  "hang the driver reset)",
+                  (now - f.start_ns) / 1e6, n);
+    }
+  }
   if (threshold_ms) {
     timespec ts{};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
@@ -7099,9 +7125,15 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
 
 void VulkanCommandProcessor::DisableHostOcclusionQueries() {
   if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
+    // The query began outside a render pass (BeginGuestOcclusionQuery), so it must end outside one, and only once:
+    // it is cleared before EndSubmission, which would otherwise end it a second time. The old order (end inside the
+    // open render pass, then a second vkCmdEndQuery in EndSubmission) crashed Arm's Mali driver in vkCmdEndQuery at
+    // the first gameplay frames (issues #16 / #17: "Host fault" in libGLES_mali.so, address 0x38).
+    const uint32_t host_index = active_occlusion_query_.host_index;
+    active_occlusion_query_ = {};
     if (BeginSubmission(true)) {
-      deferred_command_buffer_.CmdVkEndQuery(occlusion_query_pool_,
-                                             active_occlusion_query_.host_index);
+      EndRenderPass();
+      deferred_command_buffer_.CmdVkEndQuery(occlusion_query_pool_, host_index);
       EndSubmission(false);
     }
   }
@@ -7269,6 +7301,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
     // synchronization scope all commands that occur earlier in submission
     // order."
     VkResult wait_result;
+    const auto stall_wait_start = std::chrono::steady_clock::now();
     uint32_t fence_wait_sleep_us = REXCVAR_GET(vulkan_fence_wait_sleep_us);
     if (fence_wait_sleep_us) {
       // Poll and sleep instead of a blocking driver wait (the driver may spin
@@ -7286,6 +7319,22 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
       wait_result =
           dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
                               submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    }
+    if (int32_t stall_log_ms = REXCVAR_GET(vulkan_gpu_stall_log_ms); stall_log_ms > 0) {
+      const int64_t waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - stall_wait_start)
+                                    .count();
+      if (waited_ms >= stall_log_ms) {
+        static std::atomic<uint32_t> stalls{0};
+        const uint32_t n = stalls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 20 || n % 50 == 0) {
+          REXGPU_WARN(
+              "GPU stall: waited {} ms for submission {} ({} in flight, result {}); {} wait(s) of {}+ ms "
+              "so far (a GPU hang the driver reset, or very long GPU work)",
+              waited_ms, await_submission, await_submission - submission_completed_, int(wait_result), n,
+              stall_log_ms);
+        }
+      }
     }
     if (wait_result == VK_SUCCESS) {
       fences_awaited += await_submission - submission_completed_;
@@ -7658,13 +7707,13 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   if (submission_open_) {
     assert_false(scratch_buffer_used_);
 
+    // A query still active here began outside a render pass: end the render pass first (#16 / #17).
+    EndRenderPass();
     if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
       deferred_command_buffer_.CmdVkEndQuery(occlusion_query_pool_,
                                              active_occlusion_query_.host_index);
       active_occlusion_query_ = {};
     }
-
-    EndRenderPass();
 
     pipeline_cache_->EndSubmission();
 

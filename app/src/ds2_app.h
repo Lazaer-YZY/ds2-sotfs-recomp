@@ -164,6 +164,7 @@ class Ds2App : public rex::ReXApp {
     ds2::android::NoteModuleLaunched();
     ds2::android::StartSaveSnapshots();  // development builds only
     ds2::android::StartGpuCounters();    // debug launches with DS2_GPU_COUNTERS=1 only
+    ds2::android::StartCompanion(runtime());  // the second screen's HUD reader (polled by its own thread)
 #endif
     // Performance overlay (CTRL dialog on Android; DS2_FRAME_OVERLAY=1): created on the UI thread when asked for.
     ds2::frame_overlay::Init(imgui_drawer(), [this](std::function<void()> f) {

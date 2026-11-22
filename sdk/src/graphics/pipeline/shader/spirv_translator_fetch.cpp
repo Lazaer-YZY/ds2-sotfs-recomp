@@ -74,6 +74,13 @@ REXCVAR_DEFINE_STRING(gpu_debug_trivial_vertex_shader, "", "GPU/Vulkan",
                       "fetch instructions (outputs and position stay zero): the same draws and vertex counts with no "
                       "shader work, to measure the fixed per-draw and per-vertex cost")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_UINT32(spirv_texture_weights_subtexel_snap, 0, "GPU/Vulkan",
+                      "getWeights results (the bilinear fractions shaders use with point-sampled taps for manual "
+                      "PCF / filtering) computed from the coordinate snapped to this many steps per texel, rounding "
+                      "to nearest, as texture units with that subtexel precision pick the point-sampled texels "
+                      "(256 for 8-bit). 0 = not snapped. Mismatched weights draw a grid at texel edges (DS2's "
+                      "point-light shadows, PS E94A8C3AA7DB0181). Takes effect for shaders translated afterwards.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(vulkan_texture_fetch_implicit_lod, true, "GPU/Vulkan",
                     "Sample pixel shader texture fetches with a computed LOD (except 3D / stacked "
                     "textures and register gradients) with implicit derivatives and the fetch "
@@ -1204,6 +1211,19 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           result_component =
               builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, result_component,
                                                  builder_->makeFloatConstant(component_offset));
+        }
+        // spirv_texture_weights_subtexel_snap: the fraction of the coordinate as the texture unit sees it.
+        if (const uint32_t snap = REXCVAR_GET(spirv_texture_weights_subtexel_snap)) {
+          spv::Id snap_steps = builder_->makeFloatConstant(float(snap));
+          result_component = builder_->createUnaryBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor,
+              builder_->createNoContractionBinOp(
+                  spv::OpFAdd, type_float_,
+                  builder_->createNoContractionBinOp(spv::OpFMul, type_float_, result_component,
+                                                     snap_steps),
+                  builder_->makeFloatConstant(0.5f)));
+          result_component = builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_, result_component, builder_->makeFloatConstant(1.0f / float(snap)));
         }
         // 0.5 has already been subtracted via offsets previously.
         result_component = builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_,

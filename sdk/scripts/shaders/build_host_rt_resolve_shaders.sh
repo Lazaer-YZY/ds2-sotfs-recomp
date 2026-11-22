@@ -63,4 +63,5 @@ build_glsl resolve_feed_depth_float24_ps resolve_feed_depth_float24.frag fragmen
 build_glsl resolve_feed_depth_float24_stencil_ps resolve_feed_depth_float24_stencil.frag fragment
 build_glsl resolve_feed_7e3_ps resolve_feed_7e3.frag fragment
 build_glsl resolve_feed_7e3_8888_ps resolve_feed_7e3_8888.frag fragment
+build_glsl resolve_feed_fxaa_ps resolve_feed_fxaa.frag fragment
 rm -rf "$TMP"

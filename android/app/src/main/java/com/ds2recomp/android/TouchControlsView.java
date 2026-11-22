@@ -555,6 +555,11 @@ final class TouchControlsView extends View {
         return view;
     }
 
+    /** A checkbox's state; false for one the dialog does not show in this build. */
+    private static boolean checked(CheckBox box) {
+        return box != null && box.isChecked();
+    }
+
     /** A checkbox with an optional grey explanation under it. */
     private CheckBox option(LinearLayout content, String label, String help, boolean checked) {
         CheckBox box = new CheckBox(content.getContext());
@@ -687,7 +692,8 @@ final class TouchControlsView extends View {
             strings.getString(R.string.touch_resolution_540), strings.getString(R.string.touch_resolution_720),
             strings.getString(R.string.touch_resolution_1080), strings.getString(R.string.touch_resolution_1440));
         // Fill screen follows the resolution (the owner, 2026-11-21: "if someone select unsupported resolution it should
-        // untick/grey automatically"): greyed out and unticked at 1080p and 1440p (RuntimeActivity.wideSupported).
+        // untick/grey automatically"): greyed out and unticked where RuntimeActivity.wideSupported says no (since
+        // 2026-11-22 every resolution is supported, so only a 16:9 display greys it out).
         final boolean wideDisplay = activity.displayAspect() > 16f / 9f + 0.01f;
         Runnable syncWide = () -> {
             boolean supported = wideDisplay
@@ -699,9 +705,8 @@ final class TouchControlsView extends View {
         syncWide.run();
         CheckBox fsr = option(content, strings.getString(R.string.touch_fsr),
             strings.getString(R.string.touch_fsr_help), render.getBoolean("fsr", false));
-        // Anti-aliasing (RuntimeActivity.aaMode): FXAA on the finished frame, applied at once. Hidden while
-        // RuntimeActivity.SHOW_AA is false: it runs after the menus and HUD and blurs their text (the owner's S25,
-        // 2026-11-21); it comes back once FXAA runs before the 2D layer.
+        // Anti-aliasing (RuntimeActivity.aaMode): FXAA on the 3D scene before the game's 2D layer (vulkan_scene_fxaa),
+        // applied at once; the HUD's and menus' text stays sharp. Hidden while RuntimeActivity.SHOW_AA is false.
         RadioButton aaChoice = null;
         if (RuntimeActivity.SHOW_AA) {
             TextView aaLabel = new TextView(activity);
@@ -716,6 +721,19 @@ final class TouchControlsView extends View {
         // The game's depth of field (off by default: it blurs the character on this renderer and costs frames).
         CheckBox depthOfField = option(content, strings.getString(R.string.touch_depth_of_field),
             strings.getString(R.string.touch_depth_of_field_help), render.getBoolean("dof", false));
+        // Second screen (dual-screen devices only, CompanionScreen): the game's HUD on the bottom screen, applied at once.
+        CheckBox companionBox = null, companionHideBox = null;
+        if (CompanionScreen.available(activity)) {
+            header(content, strings.getString(R.string.touch_section_second_screen));
+            companionBox = option(content, strings.getString(R.string.touch_companion),
+                strings.getString(R.string.touch_companion_help), CompanionScreen.enabled(render));
+            companionHideBox = option(content, strings.getString(R.string.touch_companion_hide),
+                strings.getString(R.string.touch_companion_hide_help), CompanionScreen.hideOnMain(render));
+            final CheckBox hideBox = companionHideBox;
+            companionBox.setOnCheckedChangeListener((b, checked) -> hideBox.setEnabled(checked));
+            companionHideBox.setEnabled(companionBox.isChecked());
+        }
+        final CheckBox companion = companionBox, companionHide = companionHideBox;
         // Prime core (on by default since 2026-11-20, the owner: "smoother, even with a bit more prime core"): the
         // game's main thread, the GPU command thread and the draw thread may also run on the fastest core. Applied at
         // once.
@@ -778,6 +796,24 @@ final class TouchControlsView extends View {
             Math.round(4f * getResources().getDisplayMetrics().density));
         CheckBox compatShortcuts = option(content, strings.getString(R.string.touch_compat_shortcuts),
             strings.getString(R.string.touch_compat_shortcuts_help), render.getBoolean("compat_shortcuts", false));
+        // The 1080p flash bisect switches (2026-11-22): development builds only (RuntimeActivity ignores them in
+        // release builds too).
+        boolean bisect = BuildConfig.DEBUG;
+        CheckBox compatShortcutsTransfers = !bisect ? null : option(content,
+            strings.getString(R.string.touch_compat_shortcuts_transfers),
+            strings.getString(R.string.touch_compat_shortcuts_part_help),
+            render.getBoolean("compat_shortcuts_transfers", false));
+        CheckBox compatShortcutsResolves = !bisect ? null : option(content,
+            strings.getString(R.string.touch_compat_shortcuts_resolves),
+            strings.getString(R.string.touch_compat_shortcuts_part_help),
+            render.getBoolean("compat_shortcuts_resolves", false));
+        CheckBox compatFeedOff = !bisect ? null : option(content, strings.getString(R.string.touch_compat_feed_off),
+            strings.getString(R.string.touch_compat_resolve_part_help), render.getBoolean("compat_feed_off", false));
+        CheckBox compatLazyOff = !bisect ? null : option(content, strings.getString(R.string.touch_compat_lazy_off),
+            strings.getString(R.string.touch_compat_resolve_part_help), render.getBoolean("compat_lazy_off", false));
+        CheckBox compat7e3Off = !bisect ? null : option(content, strings.getString(R.string.touch_compat_7e3_resolve_off),
+            strings.getString(R.string.touch_compat_resolve_part_help),
+            render.getBoolean("compat_7e3_resolve_off", false));
         CheckBox compatGpl = option(content, strings.getString(R.string.touch_compat_gpl),
             strings.getString(R.string.touch_compat_gpl_help), render.getBoolean("compat_gpl", false));
         CheckBox compatDynrender = option(content, strings.getString(R.string.touch_compat_dynrender),
@@ -798,6 +834,8 @@ final class TouchControlsView extends View {
             strings.getString(R.string.touch_compat_shader_help), render.getBoolean("compat_shader", false));
         CheckBox compatDecodeBc = option(content, strings.getString(R.string.touch_compat_decode_bc),
             strings.getString(R.string.touch_compat_decode_bc_help), render.getBoolean("compat_decode_bc", false));
+        CheckBox compatHdr = option(content, strings.getString(R.string.touch_compat_hdr),
+            strings.getString(R.string.touch_compat_hdr_help), render.getBoolean("compat_hdr_r11g11b10", false));
         TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
         nextStart.setPadding(0, Math.round(8f * getResources().getDisplayMetrics().density), 0,
                              Math.round(8f * getResources().getDisplayMetrics().density));
@@ -816,8 +854,23 @@ final class TouchControlsView extends View {
 
         ScrollView scroll = new ScrollView(activity);
         scroll.addView(content);
+        // The title row with Exit at its right (the owner, 2026-11-22: "an exit button top right in the ctrl menu").
+        LinearLayout titleRow = new LinearLayout(activity);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        int titlePad = Math.round(24f * getResources().getDisplayMetrics().density);
+        titleRow.setPadding(titlePad, Math.round(18f * getResources().getDisplayMetrics().density),
+                            Math.round(12f * getResources().getDisplayMetrics().density), 0);
+        TextView titleText = new TextView(activity);
+        titleText.setTextAppearance(android.R.style.TextAppearance_DeviceDefault_DialogWindowTitle);
+        titleText.setText(strings.getString(R.string.touch_settings_title));
+        titleRow.addView(titleText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button exitButton = new Button(activity, null, android.R.attr.borderlessButtonStyle);
+        exitButton.setText(strings.getString(R.string.exit_game));
+        exitButton.setTextColor(Color.rgb(255, 140, 120));
+        titleRow.addView(exitButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         AlertDialog settingsDialog = new AlertDialog.Builder(activity)
-            .setTitle(strings.getString(R.string.touch_settings_title))
+            .setCustomTitle(titleRow)
             .setView(scroll)
             .setPositiveButton(strings.getString(R.string.touch_apply), (dialog, which) -> {
                 applyLook.run();
@@ -838,6 +891,11 @@ final class TouchControlsView extends View {
                     .putBoolean("cheat_stamina", cheatStamina.isChecked())
                     .putBoolean("cheat_wear", cheatWear.isChecked())
                     .putBoolean("compat_shortcuts", compatShortcuts.isChecked())
+                    .putBoolean("compat_shortcuts_transfers", checked(compatShortcutsTransfers))
+                    .putBoolean("compat_shortcuts_resolves", checked(compatShortcutsResolves))
+                    .putBoolean("compat_feed_off", checked(compatFeedOff))
+                    .putBoolean("compat_lazy_off", checked(compatLazyOff))
+                    .putBoolean("compat_7e3_resolve_off", checked(compat7e3Off))
                     .putBoolean("compat_gpl", compatGpl.isChecked())
                     .putBoolean("compat_dynrender", compatDynrender.isChecked())
                     .putString("compat_tu_mode", tuModes[radioChoice(compatTuMode)])
@@ -845,12 +903,14 @@ final class TouchControlsView extends View {
                     .putBoolean("compat_tu_reserve", compatTuReserve.isChecked())
                     .putBoolean("compat_shader", compatShader.isChecked())
                     .putBoolean("compat_decode_bc", compatDecodeBc.isChecked())
+                    .putBoolean("compat_hdr_r11g11b10", compatHdr.isChecked())
                     .putBoolean("prime", primeCore.isChecked()).commit();  // on disk before a restart below
                 RuntimeActivity.nativeSetOption("cheat_hp", cheatHp.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("cheat_stamina", cheatStamina.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("cheat_wear", cheatWear.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("prime", primeCore.isChecked() ? "1" : "0");
                 activity.setPerfOverlay(perfOverlay.isChecked());
+                if (companion != null) activity.applyCompanionSetting(companion.isChecked(), companionHide.isChecked());
                 RuntimeActivity.nativeSetOption("dof", depthOfField.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("aa", aaRadio == null ? "off"
                     : new String[] { "off", "fxaa", "fxaa_extreme" }[radioChoice(aaRadio)]);
@@ -895,6 +955,10 @@ final class TouchControlsView extends View {
         padButton.setOnClickListener(v -> {
             settingsDialog.dismiss();
             PadRemap.show(activity);
+        });
+        exitButton.setOnClickListener(v -> {
+            settingsDialog.dismiss();
+            activity.confirmExit();
         });
         settingsDialogOpen = true;
         syncCtrlPin();

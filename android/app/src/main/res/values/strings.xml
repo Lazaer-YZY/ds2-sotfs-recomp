@@ -51,12 +51,12 @@
     <string name="touch_resolution_1440">1440p (sharpest; about 24 fps on the Thor)</string>
     <string name="touch_fsr">Sharper upscaling (AMD FSR 1) *</string>
     <string name="touch_fsr_help">About 15 % more GPU work.</string>
-    <string name="touch_aa">Anti-aliasing (smooths jagged edges)</string>
+    <string name="touch_aa">Anti-aliasing (smooths jagged edges of the 3D image; text stays sharp; not at 1440p)</string>
     <string name="touch_aa_off">Off</string>
     <string name="touch_aa_fxaa">FXAA</string>
     <string name="touch_aa_fxaa_strong">FXAA, stronger (softer)</string>
     <string name="touch_wide">Fill screen *</string>
-    <string name="touch_wide_help">Shows more to the sides on screens wider than 16:9, at 540p and 720p; menus and HUD stay 16:9.</string>
+    <string name="touch_wide_help">Shows more to the sides on screens wider than 16:9; menus and HUD stay 16:9. At 1080p and 1440p it needs a fast GPU.</string>
     <string name="touch_wide_na">(this screen is 16:9)</string>
     <string name="touch_depth_of_field">Depth of field</string>
     <string name="touch_depth_of_field_help">Background blur. Off is sharper and faster.</string>
@@ -75,6 +75,10 @@
     <string name="logs_saved">Logs saved as %1$s. Attach that file to your bug report.</string>
     <string name="logs_save_failed">Could not save the logs: %1$s</string>
     <string name="logs_no_picker">This device has no file picker to save the logs with.</string>
+    <string name="exit_game">Exit game</string>
+    <string name="exit_title">Exit the game?</string>
+    <string name="exit_message">Progress since the game last saved is lost. To be safe, choose Quit Game in the game\'s System menu first (it saves and returns to the title screen), then exit here.</string>
+    <string name="exit_confirm">Exit</string>
     <string name="restart_title">Restart the game now?</string>
     <string name="restart_message">Settings marked * apply when the game starts. Restarting now loses progress since the last save.</string>
     <string name="restart_now">Restart</string>
@@ -84,6 +88,13 @@
     <string name="touch_compat_help">For phones whose picture is wrong or black (for example the Adreno 600 series). Try one option at a time, then combinations. Each applies at the next start.</string>
     <string name="touch_compat_shortcuts">Renderer shortcuts off *</string>
     <string name="touch_compat_shortcuts_help">The faster paths for copies between render targets and textures.</string>
+    <string name="touch_compat_shortcuts_transfers">Only render target transfer shortcuts off *</string>
+    <string name="touch_compat_shortcuts_resolves">Only resolve shortcuts off *</string>
+    <string name="touch_compat_shortcuts_part_help">Part of the option above, to find which shortcut causes a problem.</string>
+    <string name="touch_compat_feed_off">Only resolve feeding off *</string>
+    <string name="touch_compat_lazy_off">Only lazy resolve copies off *</string>
+    <string name="touch_compat_7e3_resolve_off">Only direct HDR resolves off *</string>
+    <string name="touch_compat_resolve_part_help">Part of the resolve shortcuts, to find which one causes a problem.</string>
     <string name="touch_compat_gpl">Pipeline libraries off *</string>
     <string name="touch_compat_gpl_help">Builds each GPU pipeline in one piece (slower to start a new effect).</string>
     <string name="touch_compat_dynrender">Dynamic rendering off *</string>
@@ -93,11 +104,56 @@
     <string name="touch_compat_tu_sysmem">Direct to memory (sysmem)</string>
     <string name="touch_compat_tu_gmem">Tiled (gmem)</string>
     <string name="touch_compat_tu_noubwc">Turnip image compression off * (Turnip drivers only)</string>
+    <string name="touch_compat_hdr">Smaller HDR scene image *</string>
+    <string name="touch_compat_hdr_help">Keeps the lit 3D scene in a 32-bit image instead of 64-bit (Adreno 6xx test: wrong colours and black bands in gameplay).</string>
     <string name="touch_compat_shader">Shader shortcuts off *</string>
     <string name="touch_compat_shader_help">Plainer translated shaders: texture fetches and branches as the console does them.</string>
     <string name="touch_compat_decode_bc">Decode compressed textures *</string>
     <string name="touch_compat_decode_bc_help">The game\'s compressed (BC / DXT) textures are unpacked before use instead of read by the GPU directly. Uses more memory.</string>
     <string name="touch_compat_tu_reserve">Turnip: keep its reserved descriptor set * (Turnip drivers only)</string>
+    <!-- Second screen (CTRL, dual-screen devices only; CompanionScreen.java) -->
+    <string name="touch_section_second_screen">Second screen</string>
+    <string name="touch_companion">Second screen HUD</string>
+    <string name="touch_companion_help">HP, stamina, the equipment, active effects, souls and damage figures on the bottom screen, drawn with the game\'s own art.</string>
+    <!-- The second screen's damage figures (CompanionView) -->
+    <string name="companion_last_hit">Last hit</string>
+    <string name="companion_chain">Chain</string>
+    <string name="companion_target">Target</string>
+    <string name="companion_taken">Taken</string>
+    <string name="companion_effect_unknown">Effect</string>
+    <!-- Second screen: the effect icons' names on a tap (id|name|where it comes from), matched to the game's EI_ icons
+         by the Dark Souls II wiki's status icon table (fextralife, Status Effects). 50 and 190 are not in it. -->
+    <string-array name="companion_effects">
+        <item>10|Stamina recovery up|Chloranthy Ring, Blossom Kite Shield, Shield of the Insolent, Slumbering Dragon Shield</item>
+        <item>20|Defence up|Ring of Steel Protection, the quartz rings, Dispelling Ring, Yorgh\'s Ring</item>
+        <item>30|Status resistance up|Ring of Resistance, the bite rings, Ash Knuckle Ring, Bracing Knuckle Ring</item>
+        <item>40|Attack up|Ring of Blades, Flynn\'s Ring, Stone Ring, Ivory Warrior Ring, the clutch rings</item>
+        <item>50|Effect|Not identified yet</item>
+        <item>60|Tearstone Ring active|Red or Blue Tearstone Ring: your HP is low</item>
+        <item>70|Poise up|Ring of Giants</item>
+        <item>80|Soul protection|Ring of Soul Protection or Ring of Life Protection: the ring breaks if you die</item>
+        <item>90|Item discovery up|Covetous Gold Serpent Ring, Prisoner\'s Hood, Jester\'s Cap, Watchdragon Parma</item>
+        <item>100|Souls gained up|Covetous Silver Serpent Ring, Jester\'s Gloves, Warlock Mask</item>
+        <item>110|HP from defeated enemies|Ring of the Evil Eye</item>
+        <item>120|HP regeneration|Ring of Restoration</item>
+        <item>130|Less fall damage|Silvercat Ring, Flying Feline Boots</item>
+        <item>140|Enemies notice you more|Redeye Ring</item>
+        <item>150|Max HP, stamina and equip load up|First, Second or Third Dragon Ring</item>
+        <item>160|Spell effect up|Clear Bluestone Ring, Lingering Dragoncrest Ring, Black Hood</item>
+        <item>170|Bow range up|Hawk Ring, Durgo\'s Hat</item>
+        <item>180|Explodes after enough damage|Old Sun Ring</item>
+        <item>190|Effect|Not identified yet</item>
+        <item>200|Online play disabled|A Human Effigy burned at a bonfire</item>
+        <item>210|Head armour broken|Repair it at a blacksmith</item>
+        <item>220|Chest armour broken|Repair it at a blacksmith</item>
+        <item>230|Hand armour broken|Repair it at a blacksmith</item>
+        <item>240|Leg armour broken|Repair it at a blacksmith</item>
+        <item>250|Ring broken|Repair it at a blacksmith</item>
+        <item>300|Invasion protection|For a while after defeating a boss</item>
+        <item>310|No souls gained|Agape Ring</item>
+    </string-array>
+    <string name="touch_companion_hide">Hide them on the main screen</string>
+    <string name="touch_companion_hide_help">HP, stamina, the item slots, effect icons and souls show on the second screen only. Status build-up, boss and enemy bars and messages stay.</string>
     <!-- Save backups (CTRL, Troubleshooting; SaveBackups.java) -->
     <string name="touch_save_backups">Save backups …</string>
     <string name="backup_title">Save backups</string>
