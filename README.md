@@ -6,6 +6,8 @@
 Bring your own copy of the game. No game files are included.<br>
 On dual-screen handhelds such as the AYN Thor, the HUD can live on the second screen (<a href="#second-screen-ayn-thor-and-other-dual-screen-handhelds">see below</a>).</p>
 
+<p align="center"><b>Beta:</b> playable, and looking for testers on more phones and handhelds (<a href="#help-test">help test</a>).</p>
+
 <p align="center">
 <img src="docs/media/motion/majula.gif" width="640" alt="Walking through Majula">
 </p>
@@ -96,7 +98,8 @@ loading screens dim it.
 
 ## Install
 
-Releases are numbered 0.x while they are test builds; 1.0 comes once they have been played through on more devices.
+Since 0.5.0 the releases are **Beta**: playable, with rough edges on some GPUs. 1.0 comes once the game has been played
+through on more devices.
 
 1. **On the device**, download
    [`ds2-sotfs-android-arm64.apk`](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/releases/latest/download/ds2-sotfs-android-arm64.apk)
@@ -132,6 +135,18 @@ Settings marked * apply at the next start (CTRL offers to restart). If the game 
 CTRL, reproduce it, then use **Save logs for a bug report** in CTRL and attach the zip to an issue.
 
 You can also build the APK yourself (below).
+
+## Help test
+
+The more devices it is played on, the sooner it gets to 1.0. Open an [issue](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues)
+with:
+
+- your phone or handheld and its GPU (Adreno, Mali, ...), and the GPU driver (GPU driver page);
+- your CTRL settings: resolution, Fill screen, frame rate;
+- how it runs: fps, where it stutters or crashes, anything that looks wrong (a screenshot helps);
+- if something goes wrong, the zip from CTRL → **Save logs for a bug report**.
+
+Reports that it simply works are useful too.
 
 ## Building from source
 
