@@ -89,7 +89,10 @@ public final class RuntimeActivity extends SDLActivity {
     static final String DEFAULT_RENDER_HEIGHT = "720";
     // The CTRL dialog's choices, in order. "1080": the game's own 1920x1080 screen; its colour and depth targets do not
     // fit the console's 10 MB EDRAM, so the emulated EDRAM is made larger (gpu_edram_tiles, ds2_render_size.cpp).
-    static final String[] RENDER_HEIGHTS = { "540", "720", "1080", "1440" };
+    // "360" (640x360) and "432" (768x432): the game's own screen made smaller still, for GPUs that cannot hold 30 fps at
+    // 540p (Mali-G615 at ~40 ms of GPU work per frame at 540p, issue #21, 2026-11-23); ds2_render_size.cpp accepts
+    // heights down to 360.
+    static final String[] RENDER_HEIGHTS = { "360", "432", "540", "720", "1080", "1440" };
 
     // Game language (CTRL dialog, from the next start): one of LANGUAGE_IDS, English by default (the owner,
     // 2026-11-20), or "auto": the device's language when the game has it, English otherwise. The game reads the console's language setting (user_language: Xbox 360
@@ -174,8 +177,8 @@ public final class RuntimeActivity extends SDLActivity {
      */
     /** Whether Fill screen is offered at this CTRL resolution choice (all of them; see wideWidth). */
     static boolean wideSupported(String renderHeight) {
-        return "540".equals(renderHeight) || "720".equals(renderHeight) || "1080".equals(renderHeight)
-            || "1440".equals(renderHeight);
+        return "360".equals(renderHeight) || "432".equals(renderHeight) || "540".equals(renderHeight)
+            || "720".equals(renderHeight) || "1080".equals(renderHeight) || "1440".equals(renderHeight);
     }
 
     static int wideWidth(SharedPreferences render, int height, float displayAspect) {
@@ -212,7 +215,8 @@ public final class RuntimeActivity extends SDLActivity {
     static void addDisplayArguments(java.util.List<String> args, SharedPreferences render, float displayAspect) {
         String height = render.getString("render_height", DEFAULT_RENDER_HEIGHT);
         boolean fsr = render.getBoolean("fsr", false);
-        int gameHeight = "540".equals(height) ? 540 : "1080".equals(height) ? 1080 : 720;
+        boolean smallScreen = "360".equals(height) || "432".equals(height) || "540".equals(height);
+        int gameHeight = smallScreen ? Integer.parseInt(height) : "1080".equals(height) ? 1080 : 720;
         int wide = wideSupported(height) ? wideWidth(render, gameHeight, displayAspect) : 0;
         if (wide != 0) {
             // The game's screen, and the presenter's shape (it letterboxes to the video mode).
@@ -229,9 +233,9 @@ public final class RuntimeActivity extends SDLActivity {
         // Without FSR the swapchain is the game's height and the display hardware scales it to the screen (cheapest);
         // with FSR, or a picture larger than the screen, it is the screen's own size and the presenter scales.
         int presentHeight = PRESENT_MAX_HEIGHT;
-        if ("540".equals(height)) {
-            args.add("--ds2_render_height=540");
-            presentHeight = 540;
+        if (smallScreen) {
+            args.add("--ds2_render_height=" + gameHeight);
+            presentHeight = gameHeight;
         } else if ("1080".equals(height)) {
             args.add("--ds2_render_height=1080");
             args.add("--gpu_edram_tiles=8192");
@@ -242,13 +246,18 @@ public final class RuntimeActivity extends SDLActivity {
             presentHeight = 0;
         }
         args.add("--present_max_height=" + (fsr ? 0 : presentHeight));
+        // Texture filtering at an angle (CTRL, from the next start): the renderer forces 4x anisotropic filtering on
+        // mipmapped textures (anisotropic_override 3); off samples each texture once per pixel, cheaper on GPUs short
+        // of texture bandwidth (a test for Mali, issue #21).
+        if (!render.getBoolean("aniso", true)) args.add("--anisotropic_override=0");
         // Anti-aliasing (CTRL, also switched live): FXAA on the 3D scene before the 2D layer (the resolve feed of the
         // scene; not with 1440p's resolution scaling, which has no resolve feeding). The swap post effect stays off.
         args.add("--swap_post_effect=none");
         String aa = aaMode(render);
         args.add("--vulkan_scene_fxaa=" + ("fxaa_extreme".equals(aa) ? 2 : "fxaa".equals(aa) ? 1 : 0));
         args.add("--present_effect=" + (fsr ? "fsr" : "bilinear"));
-        android.util.Log.i("ds2recomp", "display: render height " + height + ", " + (fsr ? "FSR upscaling" : "display scaling"));
+        android.util.Log.i("ds2recomp", "display: render height " + height + ", " + (fsr ? "FSR upscaling" : "display scaling")
+            + ", anisotropic filtering " + (render.getBoolean("aniso", true) ? "4x" : "off"));
     }
 
     /** Whether this start runs the panel (and the emulated vertical blank) at 120 Hz. */
@@ -265,6 +274,7 @@ public final class RuntimeActivity extends SDLActivity {
     static String nextStartState(SharedPreferences render) {
         return render.getString("language", DEFAULT_LANGUAGE) + "|" + render.getString("render_height", DEFAULT_RENDER_HEIGHT)
             + "|" + render.getBoolean("fsr", false) + "|" + render.getBoolean("wide", false)
+            + "|" + render.getBoolean("aniso", true)
             + "|" + render.getBoolean("debug_log", DEFAULT_DEBUG_LOG) + "|" + panel120Wanted(render)
             + "|" + render.getBoolean("compat_shortcuts", false) + "|" + render.getBoolean("compat_gpl", false)
             + "|" + render.getBoolean("compat_dynrender", false) + "|" + render.getString("compat_tu_mode", "")

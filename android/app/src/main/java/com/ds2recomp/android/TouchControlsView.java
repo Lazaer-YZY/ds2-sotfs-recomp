@@ -691,6 +691,7 @@ final class TouchControlsView extends View {
         }
         java.util.List<String> heights = java.util.Arrays.asList(RuntimeActivity.RENDER_HEIGHTS);
         RadioButton resolutionChoice = radio(content, null, Math.max(0, heights.indexOf(renderHeight)),
+            strings.getString(R.string.touch_resolution_360), strings.getString(R.string.touch_resolution_432),
             strings.getString(R.string.touch_resolution_540), strings.getString(R.string.touch_resolution_720),
             strings.getString(R.string.touch_resolution_1080), strings.getString(R.string.touch_resolution_1440));
         // Fill screen follows the resolution (the owner, 2026-11-21: "if someone select unsupported resolution it should
@@ -707,6 +708,9 @@ final class TouchControlsView extends View {
         syncWide.run();
         CheckBox fsr = option(content, strings.getString(R.string.touch_fsr),
             strings.getString(R.string.touch_fsr_help), render.getBoolean("fsr", false));
+        // Anisotropic filtering (RuntimeActivity.addDisplayArguments), on by default.
+        CheckBox aniso = option(content, strings.getString(R.string.touch_aniso),
+            strings.getString(R.string.touch_aniso_help), render.getBoolean("aniso", true));
         // Anti-aliasing (RuntimeActivity.aaMode): FXAA on the 3D scene before the game's 2D layer (vulkan_scene_fxaa),
         // applied at once; the HUD's and menus' text stays sharp. Hidden while RuntimeActivity.SHOW_AA is false.
         RadioButton aaChoice = null;
@@ -893,6 +897,7 @@ final class TouchControlsView extends View {
                     .putBoolean("dof", depthOfField.isChecked())
                     .putString("render_height", RuntimeActivity.RENDER_HEIGHTS[radioChoice(resolutionChoice)])
                     .putBoolean("fsr", fsr.isChecked())
+                    .putBoolean("aniso", aniso.isChecked())
                     .putBoolean("wide", wide.isChecked())
                     .putString("aa", aaRadio == null ? "off"
                         : new String[] { "off", "fxaa", "fxaa_extreme" }[radioChoice(aaRadio)])

@@ -45,12 +45,16 @@
     <string name="touch_panel120_help">A late frame shows after 25 ms instead of 33 ms.</string>
     <!-- Image -->
     <string name="touch_resolution">Resolution *</string>
+    <string name="touch_resolution_360">360p (fastest, very soft; for slow GPUs)</string>
+    <string name="touch_resolution_432">432p (faster still, softer; for slow GPUs)</string>
     <string name="touch_resolution_540">540p (faster, softer)</string>
     <string name="touch_resolution_720">720p (as on the Xbox 360)</string>
     <string name="touch_resolution_1080">1080p (sharper; for faster GPUs)</string>
     <string name="touch_resolution_1440">1440p (sharpest; about 24 fps on the Thor)</string>
     <string name="touch_fsr">Sharper upscaling (AMD FSR 1) *</string>
     <string name="touch_fsr_help">About 15 % more GPU work.</string>
+    <string name="touch_aniso">Sharp textures at an angle (4x anisotropic filtering) *</string>
+    <string name="touch_aniso_help">Off: floors and walls seen at an angle look softer, with less GPU work on texture-heavy GPUs (Mali).</string>
     <string name="touch_aa">Anti-aliasing (smooths jagged edges of the 3D image; text stays sharp; not at 1440p)</string>
     <string name="touch_aa_off">Off</string>
     <string name="touch_aa_fxaa">FXAA</string>
