@@ -109,6 +109,9 @@
     <string name="touch_compat_shader">Shader shortcuts off *</string>
     <string name="touch_compat_shader_help">Plainer translated shaders: texture fetches and branches as the console does them.</string>
     <string name="touch_compat_decode_bc">Decode compressed textures *</string>
+    <string name="touch_frame_capture">Capture one frame for a bug report</string>
+    <string name="touch_frame_capture_help">Saves the images the GPU draws for one gameplay frame into the logs (about 100–200 MB on the phone, replaced by the next capture). Close this menu and stand in the game; then use Save logs for a bug report. The game pauses for a moment while it saves.</string>
+    <string name="frame_capture_started">One frame is captured %1$d seconds from now. Then use CTRL → Save logs.</string>
     <string name="touch_compat_decode_bc_help">The game\'s compressed (BC / DXT) textures are unpacked before use instead of read by the GPU directly. Uses more memory.</string>
     <string name="touch_compat_tu_reserve">Turnip: keep its reserved descriptor set * (Turnip drivers only)</string>
     <!-- Second screen (CTRL, dual-screen devices only; CompanionScreen.java) -->

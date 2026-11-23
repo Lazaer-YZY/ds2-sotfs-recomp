@@ -136,6 +136,25 @@ class VulkanTextureCache final : public TextureCache {
   void UseScaledResolveBufferForWrite(uint64_t written_start_scaled,
                                       uint64_t written_length_scaled);
 
+  // DS2 port frame capture (VulkanCommandProcessor::FrameCaptureDrawTextures): the texture bound to a fetch
+  // constant, for a copy of its level 0 / layer 0 into a buffer. False if nothing is bound or it is 3D.
+  struct CaptureTextureInfo {
+    VkImage image;
+    const void* texture;
+    VkFormat format;
+    // Host extent of level 0 (scaled for resolution-scaled resolve targets).
+    uint32_t width, height;
+    uint32_t guest_base, guest_size;
+    TextureKey key;
+    uint32_t host_swizzle;
+  };
+  bool GetBoundTextureForCapture(uint32_t fetch_constant_index, CaptureTextureInfo& out) const;
+  // The layout and stages of a texture sampled by guest shaders (what RequestTextures leaves it in).
+  void GetGuestShaderSampledUsage(VkPipelineStageFlags& stage_mask, VkAccessFlags& access_mask,
+                                  VkImageLayout& layout) {
+    GetTextureUsageMasks(VulkanTexture::Usage::kGuestShaderSampled, stage_mask, access_mask, layout);
+  }
+
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override;
   bool IsScaledResolveSupportedForFormat(TextureKey key) const override;
@@ -220,6 +239,9 @@ class VulkanTextureCache final : public TextureCache {
     // Created with COLOR_ATTACHMENT usage for resolve feeding.
     bool feed_attachment() const { return feed_attachment_; }
     void set_feed_attachment(bool feed_attachment) { feed_attachment_ = feed_attachment; }
+    // The image's format (frame capture).
+    VkFormat host_format() const { return host_format_; }
+    void set_host_format(VkFormat format) { host_format_ = format; }
     // Identity-swizzled R8G8B8A8_UNORM view of level 0, layer 0 to draw into.
     VkImageView GetFeedAttachmentView();
     VkImageView GetOrCreate3DAs2DImageView(bool is_signed, uint32_t host_swizzle);
@@ -281,6 +303,7 @@ class VulkanTextureCache final : public TextureCache {
     std::unique_ptr<VulkanTexture> texture_3d_as_2d_;
     VkImageView image_view_3d_as_2d_unsigned_ = VK_NULL_HANDLE;
     bool feed_attachment_ = false;
+    VkFormat host_format_ = VK_FORMAT_UNDEFINED;
     VkImageView feed_attachment_view_ = VK_NULL_HANDLE;
     VkImageView image_view_3d_as_2d_signed_ = VK_NULL_HANDLE;
   };

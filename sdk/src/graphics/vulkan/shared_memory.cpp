@@ -329,6 +329,13 @@ bool VulkanSharedMemory::UploadRanges(
   }
   ++command_processor_.gpu_timing_counters().uploads;
   command_processor_.GpuTrace("U");
+  if (command_processor_.frame_capture_active()) {
+    // Frame capture: guest memory copied from the CPU (it overwrites what resolves wrote there).
+    for (const auto& range : upload_page_ranges) {
+      command_processor_.FrameCaptureNote(fmt::format("UPLOAD {:08X}-{:08X}", range.first << page_size_log2(),
+                                                      (range.first + range.second) << page_size_log2()));
+    }
+  }
   // upload_page_ranges are sorted, use them to determine the range for the
   // ordering barrier.
   Use(Usage::kTransferDestination,
@@ -410,6 +417,13 @@ bool VulkanSharedMemory::UploadRangesHoisted(
     return true;
   }
   command_processor_.GpuTrace("Uh");
+  if (command_processor_.frame_capture_active()) {
+    for (const auto& range : upload_page_ranges) {
+      command_processor_.FrameCaptureNote(fmt::format("UPLOAD (hoisted) {:08X}-{:08X}",
+                                                      range.first << page_size_log2(),
+                                                      (range.first + range.second) << page_size_log2()));
+    }
+  }
   // No barrier and no deferred command: the copies are recorded by RecordHoistedUploads at the
   // beginning of this submission's command buffer.
   const uint64_t submission_current = command_processor_.GetCurrentSubmission();

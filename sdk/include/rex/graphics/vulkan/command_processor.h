@@ -14,6 +14,7 @@
 #include <array>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <filesystem>
@@ -699,13 +700,27 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   // DS2 port diagnostic (resolve_dump_dir): every resolve of one frame copied to a host buffer and written to
   // files at the Swap, to see which pass of a frame turns black.
+  // The frame capture (RequestFrameCapture from CTRL, frame_capture_after_s) is the same dump with more: each
+  // resolve's EDRAM source span ('e' entries, the render target as the resolve reads it) and the render-to-texture
+  // textures the frame samples ('t' entries, the host image), written to <executable folder>/logs/frame_capture.
   struct ResolveDumpEntry {
-    uint32_t address, length, offset;
-    uint32_t copy_dest_base, copy_dest_info, copy_dest_pitch, copy_control, surface_info;
-    uint32_t color_info0, depth_info, draws_before;
+    // 'r': resolve destination (guest memory), 'e': EDRAM span, 't': host texture image.
+    char kind = 'r';
+    uint32_t address = 0, length = 0, offset = 0, chunk = 0;
+    uint32_t copy_dest_base = 0, copy_dest_info = 0, copy_dest_pitch = 0, copy_control = 0, surface_info = 0;
+    uint32_t color_info0 = 0, depth_info = 0, draws_before = 0;
+    // 'e' / 't': file name and the index line's fields after it.
+    std::string name, info;
   };
   void DumpResolve(uint32_t written_address, uint32_t written_length);
   void FinishResolveDump();
+  // Space for one copy in the host readback chunks (allocated on demand, freed after the dump is written).
+  bool ReserveDumpSpace(uint32_t length, uint32_t& chunk_out, uint32_t& offset_out);
+  void FreeDumpChunks();
+  // Records a copy of a buffer range (EDRAM spans) into the dump; false if out of space.
+  bool DumpBufferRange(VkBuffer buffer, VkDeviceSize offset, uint32_t length, ResolveDumpEntry entry);
+  // Frame capture of the textures a draw samples that resolves wrote (after RequestTextures).
+  void FrameCaptureDrawTextures(uint32_t used_texture_mask);
   bool resolve_dump_active_ = false;
   uint32_t resolve_dump_count_ = 0;
   uint64_t resolve_dump_last_ms_ = 0;
@@ -713,11 +728,56 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint32_t resolve_dump_draws_ = 0;
   std::vector<ResolveDumpEntry> resolve_dump_entries_;
   std::vector<std::string> resolve_dump_draw_log_;
-  VkBuffer resolve_dump_buffer_ = VK_NULL_HANDLE;
-  VkDeviceMemory resolve_dump_memory_ = VK_NULL_HANDLE;
-  void* resolve_dump_mapping_ = nullptr;
-  uint32_t resolve_dump_size_ = 0;
-  uint32_t resolve_dump_used_ = 0;
+  struct DumpChunk {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void* mapping = nullptr;
+    uint32_t size = 0, used = 0;
+  };
+  std::vector<DumpChunk> resolve_dump_chunks_;
+  uint64_t resolve_dump_reserved_ = 0;
+  uint32_t resolve_dump_skipped_ = 0;
+  // Resolves issued since the frame began (the 'r' / 'e' entries of one resolve share it).
+  uint32_t resolve_dump_resolve_seq_ = 0;
+
+ public:
+  // Frame capture: the dump frame in progress is one (Resolve adds its EDRAM spans).
+  bool frame_capture_active() const { return resolve_dump_active_ && frame_capture_; }
+  uint32_t frame_capture_resolve_seq() const { return resolve_dump_resolve_seq_; }
+  // A line in the captured frame's draws.txt (render target dumps, transfers: who owned which EDRAM tiles).
+  void FrameCaptureNote(std::string line) {
+    if (frame_capture_active() && resolve_dump_draw_log_.size() < 8192) {
+      resolve_dump_draw_log_.push_back(std::move(line));
+    }
+  }
+  bool FrameCaptureBufferRange(VkBuffer buffer, VkDeviceSize offset, uint32_t length, std::string name,
+                               std::string info) {
+    ResolveDumpEntry entry;
+    entry.kind = 'e';
+    entry.name = std::move(name);
+    entry.info = std::move(info);
+    return DumpBufferRange(buffer, offset, length, std::move(entry));
+  }
+
+ private:
+  // The frame before a capture records what its resolves write (frame_capture_armed_), so textures sampled from
+  // them in the captured frame are captured too; then the captured frame (resolve_dump_active_ + frame_capture_).
+  bool frame_capture_ = false;
+  bool frame_capture_armed_ = false;
+  bool frame_capture_after_done_ = false;
+  uint64_t frame_capture_first_ms_ = 0;
+  struct FrameCaptureRange {
+    uint32_t start, length, seq;
+  };
+  // What the resolves of the frame before the capture and of the captured frame wrote.
+  std::vector<FrameCaptureRange> frame_capture_armed_ranges_;
+  std::vector<FrameCaptureRange> frame_capture_frame_ranges_;
+  uint32_t frame_capture_textures_skipped_ = 0;
+  void WriteFrameCaptureHeader(FILE* f);
+  // Texture -> the resolve sequence number it was captured after (once per texture and resolve).
+  std::unordered_map<const void*, int64_t> frame_capture_textures_done_;
+  uint32_t frame_capture_texture_count_ = 0;
+  uint64_t frame_capture_texture_bytes_ = 0;
 
   bool submission_open_ = false;
   // Draws recorded since the current submission began (vulkan_submit_before_wait).

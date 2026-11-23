@@ -84,6 +84,19 @@ REXCVAR_DEFINE_INT32(resolve_dump_start_s, 0, "GPU/Vulkan",
                      "DIAGNOSTIC: no resolve dump before this many seconds after the first frame");
 REXCVAR_DEFINE_INT32(resolve_dump_max, 10, "GPU/Vulkan", "DIAGNOSTIC: maximum number of resolve dumps");
 REXCVAR_DEFINE_INT32(resolve_dump_max_mb, 96, "GPU/Vulkan", "DIAGNOSTIC: host buffer for one resolve dump, MB");
+REXCVAR_DEFINE_BOOL(vulkan_compute_state_outside_render_pass, true, "GPU/Vulkan",
+                    "Ends an open render pass before a compute pipeline is bound, and binds compute pipelines again "
+                    "after every render pass. Turnip on Adreno 6xx loses compute state recorded inside a render "
+                    "pass: texture loads and EDRAM dumps then write nothing (wrong colours and black bands in "
+                    "gameplay, #8 / #18; found with the frame capture on an Adreno 640)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(frame_capture_after_s, 0, "GPU/Vulkan",
+                     "DIAGNOSTIC: one frame capture (logs/frame_capture, like CTRL's Capture one frame) this many "
+                     "seconds after the first frame; 0 = off");
+REXCVAR_DEFINE_INT32(frame_capture_max_mb, 320, "GPU/Vulkan",
+                     "DIAGNOSTIC: host memory for one frame capture (resolves, EDRAM spans, textures), MB");
+REXCVAR_DEFINE_INT32(frame_capture_max_textures, 64, "GPU/Vulkan",
+                     "DIAGNOSTIC: render-to-texture textures one frame capture copies out (0 = none)");
 REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
                     "Read render-to-texture results on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -2440,6 +2453,7 @@ void VulkanCommandProcessor::ShutdownContext() {
   InvalidateAllVertexBufferResidency();
   ShutdownOcclusionQueryResources();
   GpuTimingShutdown();
+  FreeDumpChunks();
 
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -3940,6 +3954,10 @@ void VulkanCommandProcessor::EndRenderPass() {
   current_render_pass_ = VK_NULL_HANDLE;
   current_framebuffer_ = nullptr;
   in_render_pass_ = false;
+  if (REXCVAR_GET(vulkan_compute_state_outside_render_pass)) {
+    // Bound again for the next dispatch after a render pass (see BindExternalComputePipeline).
+    current_external_compute_pipeline_ = VK_NULL_HANDLE;
+  }
   // Work after a render pass that isn't categorized is "other" (mostly
   // barriers and layout transitions).
   GpuTimingMark(GpuTimingCategory::kOther);
@@ -5000,6 +5018,11 @@ void VulkanCommandProcessor::ApplyLibraryPipelineDynamicState(
 }
 
 void VulkanCommandProcessor::BindExternalComputePipeline(VkPipeline pipeline) {
+  // Compute state is set outside render passes (vulkan_compute_state_outside_render_pass): the dispatch needs the
+  // pass ended anyway, and Turnip on Adreno 6xx loses compute state recorded inside one (#8 / #18).
+  if (REXCVAR_GET(vulkan_compute_state_outside_render_pass) && in_render_pass_) {
+    EndRenderPass();
+  }
   if (current_external_compute_pipeline_ == pipeline) {
     return;
   }
@@ -5575,6 +5598,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   {
     CpScopedTimer textures_timer(cp_frame_.textures_ns);
     texture_cache_->RequestTextures(used_texture_mask);
+  }
+  if (frame_capture_active() && used_texture_mask) {
+    FrameCaptureDrawTextures(used_texture_mask);
   }
 
   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
@@ -6465,10 +6491,20 @@ bool VulkanCommandProcessor::IssueCopy() {
       REXGPU_INFO("readback_resolve_sizes: resolve read back ({} so far, frame {})", forced_count, frame_current_);
     }
   }
+  ++resolve_dump_resolve_seq_;
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     uint32_t written_address, written_length;
     result = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                            written_address, written_length);
+    if (result && written_length && (frame_capture_armed_ || frame_capture_active())) {
+      // Frame capture: what this resolve writes (textures sampled from it get captured too).
+      (frame_capture_armed_ ? frame_capture_armed_ranges_ : frame_capture_frame_ranges_)
+          .push_back({written_address, written_length, resolve_dump_resolve_seq_});
+      if (frame_capture_active() && render_target_cache_->last_resolve_lazy()) {
+        // A lazy resolve's memory is written when something reads it: now, for the copy below.
+        render_target_cache_->FlushPendingResolveDumpsForVerify(written_address, written_length);
+      }
+    }
     if (result && resolve_dump_active_ && written_length) {
       // vulkan_resolve_verify_lazy: a lazy resolve is written now (from its fed texture), dumped, then done again
       // eagerly and dumped right after, to compare the two byte for byte.
@@ -6835,37 +6871,104 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath(ReadbackResolveMode r
   return true;
 }
 
-void VulkanCommandProcessor::DumpResolve(uint32_t written_address, uint32_t written_length) {
+bool VulkanCommandProcessor::ReserveDumpSpace(uint32_t length, uint32_t& chunk_out, uint32_t& offset_out) {
+  if (!length) {
+    return false;
+  }
+  if (!resolve_dump_chunks_.empty()) {
+    DumpChunk& last = resolve_dump_chunks_.back();
+    const uint32_t offset = rex::round_up(last.used, uint32_t(256));
+    if (uint64_t(offset) + length <= last.size) {
+      last.used = offset + length;
+      chunk_out = uint32_t(resolve_dump_chunks_.size() - 1);
+      offset_out = offset;
+      return true;
+    }
+  }
+  // 32 MB host buffers allocated as needed (one large allocation may fail on a phone), up to the limit.
+  const uint64_t limit = uint64_t(std::clamp(frame_capture_ ? REXCVAR_GET(frame_capture_max_mb)
+                                                            : REXCVAR_GET(resolve_dump_max_mb),
+                                             4, 2048))
+                         << 20;
+  const uint32_t size = std::max(uint32_t(32) << 20, rex::round_up(length, uint32_t(256)));
+  if (resolve_dump_reserved_ + size > limit) {
+    ++resolve_dump_skipped_;
+    return false;
+  }
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  if (resolve_dump_buffer_ == VK_NULL_HANDLE) {
-    const uint32_t size = uint32_t(std::clamp(REXCVAR_GET(resolve_dump_max_mb), 4, 256)) << 20;
-    if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
-            vulkan_device, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, ui::vulkan::util::MemoryPurpose::kReadback,
-            resolve_dump_buffer_, resolve_dump_memory_)) {
-      REXGPU_ERROR("resolve dump: failed to create a {} MB buffer", size >> 20);
-      resolve_dump_active_ = false;
-      return;
-    }
-    if (dfn.vkMapMemory(vulkan_device->device(), resolve_dump_memory_, 0, VK_WHOLE_SIZE, 0,
-                        &resolve_dump_mapping_) != VK_SUCCESS) {
-      REXGPU_ERROR("resolve dump: failed to map the buffer");
-      resolve_dump_active_ = false;
-      return;
-    }
-    resolve_dump_size_ = size;
+  DumpChunk chunk;
+  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+          vulkan_device, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, ui::vulkan::util::MemoryPurpose::kReadback,
+          chunk.buffer, chunk.memory)) {
+    REXGPU_ERROR("resolve dump: failed to create a {} MB host buffer ({} MB in use)", size >> 20,
+                 resolve_dump_reserved_ >> 20);
+    ++resolve_dump_skipped_;
+    return false;
   }
-  const uint32_t offset = rex::round_up(resolve_dump_used_, uint32_t(256));
-  if (uint64_t(offset) + written_length > resolve_dump_size_) {
-    REXGPU_INFO("resolve dump: buffer full, resolve of {} bytes at 0x{:08X} skipped", written_length,
-                written_address);
+  if (dfn.vkMapMemory(vulkan_device->device(), chunk.memory, 0, VK_WHOLE_SIZE, 0, &chunk.mapping) !=
+      VK_SUCCESS) {
+    REXGPU_ERROR("resolve dump: failed to map a host buffer");
+    dfn.vkDestroyBuffer(vulkan_device->device(), chunk.buffer, nullptr);
+    dfn.vkFreeMemory(vulkan_device->device(), chunk.memory, nullptr);
+    ++resolve_dump_skipped_;
+    return false;
+  }
+  chunk.size = size;
+  chunk.used = length;
+  resolve_dump_chunks_.push_back(chunk);
+  resolve_dump_reserved_ += size;
+  chunk_out = uint32_t(resolve_dump_chunks_.size() - 1);
+  offset_out = 0;
+  return true;
+}
+
+void VulkanCommandProcessor::FreeDumpChunks() {
+  if (resolve_dump_chunks_.empty()) {
     return;
   }
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  for (DumpChunk& chunk : resolve_dump_chunks_) {
+    // Freeing the memory unmaps it.
+    dfn.vkDestroyBuffer(vulkan_device->device(), chunk.buffer, nullptr);
+    dfn.vkFreeMemory(vulkan_device->device(), chunk.memory, nullptr);
+  }
+  resolve_dump_chunks_.clear();
+  resolve_dump_reserved_ = 0;
+}
+
+bool VulkanCommandProcessor::DumpBufferRange(VkBuffer buffer, VkDeviceSize offset, uint32_t length,
+                                             ResolveDumpEntry entry) {
+  if (!resolve_dump_active_ || !length) {
+    return false;
+  }
+  uint32_t chunk, chunk_offset;
+  if (!ReserveDumpSpace(length, chunk, chunk_offset)) {
+    return false;
+  }
+  entry.length = length;
+  entry.offset = chunk_offset;
+  entry.chunk = chunk;
+  entry.draws_before = resolve_dump_draws_;
+  SubmitBarriers(true);
+  VkBufferCopy region = {};
+  region.srcOffset = offset;
+  region.dstOffset = chunk_offset;
+  region.size = length;
+  const VkBuffer dest = resolve_dump_chunks_[chunk].buffer;
+  deferred_command_buffer_.CmdVkCopyBuffer(buffer, dest, 1, &region);
+  PushBufferMemoryBarrier(dest, chunk_offset, length, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+  resolve_dump_entries_.push_back(std::move(entry));
+  return true;
+}
+
+void VulkanCommandProcessor::DumpResolve(uint32_t written_address, uint32_t written_length) {
   const RegisterFile& regs = *register_file_;
   ResolveDumpEntry e;
+  e.kind = 'r';
   e.address = written_address;
-  e.length = written_length;
-  e.offset = offset;
   e.copy_dest_base = regs.values[XE_GPU_REG_RB_COPY_DEST_BASE];
   e.copy_dest_info = regs.values[XE_GPU_REG_RB_COPY_DEST_INFO];
   e.copy_dest_pitch = regs.values[XE_GPU_REG_RB_COPY_DEST_PITCH];
@@ -6873,44 +6976,237 @@ void VulkanCommandProcessor::DumpResolve(uint32_t written_address, uint32_t writ
   e.surface_info = regs.values[XE_GPU_REG_RB_SURFACE_INFO];
   e.color_info0 = regs.values[XE_GPU_REG_RB_COLOR_INFO];
   e.depth_info = regs.values[XE_GPU_REG_RB_DEPTH_INFO];
-  e.draws_before = resolve_dump_draws_;
-  resolve_dump_entries_.push_back(e);
-  {
-    char line[160];
-    std::snprintf(line, sizeof(line), "RESOLVE r%03zu addr=%08X len=%u dest_info=%08X after_draw=%u",
-                  resolve_dump_entries_.size() - 1, written_address, written_length, e.copy_dest_info,
-                  resolve_dump_draws_);
-    resolve_dump_draw_log_.emplace_back(line);
+  // One file per resolve, named by its number in the frame (the verification paths dump a resolve twice).
+  char name[64];
+  std::snprintf(name, sizeof(name), "r%03u_%08X.bin", resolve_dump_resolve_seq_, written_address);
+  for (const ResolveDumpEntry& other : resolve_dump_entries_) {
+    if (other.kind == 'r' && other.name == name) {
+      std::snprintf(name, sizeof(name), "r%03u_%08X_b.bin", resolve_dump_resolve_seq_, written_address);
+      break;
+    }
   }
-  resolve_dump_used_ = offset + written_length;
-
+  e.name = name;
   shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
-  SubmitBarriers(true);
-  VkBufferCopy region = {};
-  region.srcOffset = written_address;
-  region.dstOffset = offset;
-  region.size = written_length;
-  deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(), resolve_dump_buffer_, 1, &region);
-  PushBufferMemoryBarrier(resolve_dump_buffer_, offset, written_length, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                          VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+  if (!DumpBufferRange(shared_memory_->buffer(), written_address, written_length, e)) {
+    REXGPU_INFO("resolve dump: no host memory left, resolve of {} bytes at 0x{:08X} skipped", written_length,
+                written_address);
+    return;
+  }
+  char line[160];
+  std::snprintf(line, sizeof(line), "RESOLVE %s addr=%08X len=%u dest_info=%08X after_draw=%u", name,
+                written_address, written_length, e.copy_dest_info, resolve_dump_draws_);
+  resolve_dump_draw_log_.emplace_back(line);
+}
+
+namespace {
+// Bytes per texel of the uncompressed host texture formats the frame capture copies (0: not copied).
+uint32_t FrameCaptureTexelBytes(VkFormat format) {
+  switch (format) {
+    case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R8_SNORM:
+    case VK_FORMAT_R8_UINT:
+      return 1;
+    case VK_FORMAT_R8G8_UNORM:
+    case VK_FORMAT_R8G8_SNORM:
+    case VK_FORMAT_R5G6B5_UNORM_PACK16:
+    case VK_FORMAT_B5G6R5_UNORM_PACK16:
+    case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+    case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
+    case VK_FORMAT_R5G5B5A1_UNORM_PACK16:
+    case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+    case VK_FORMAT_R16_UNORM:
+    case VK_FORMAT_R16_SNORM:
+    case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_R16_UINT:
+      return 2;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SNORM:
+    case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+    case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
+    case VK_FORMAT_R16G16_UNORM:
+    case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R32_SFLOAT:
+    case VK_FORMAT_R32_UINT:
+      return 4;
+    case VK_FORMAT_R16G16B16A16_UNORM:
+    case VK_FORMAT_R16G16B16A16_SNORM:
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R32G32_SFLOAT:
+    case VK_FORMAT_R32G32_UINT:
+      return 8;
+    case VK_FORMAT_R32G32B32A32_SFLOAT:
+    case VK_FORMAT_R32G32B32A32_UINT:
+      return 16;
+    default:
+      return 0;
+  }
+}
+}  // namespace
+
+void VulkanCommandProcessor::FrameCaptureDrawTextures(uint32_t used_texture_mask) {
+  const uint32_t max_textures = uint32_t(std::clamp(REXCVAR_GET(frame_capture_max_textures), 0, 1024));
+  uint32_t remaining = used_texture_mask;
+  uint32_t index;
+  while (rex::bit_scan_forward(remaining, &index)) {
+    remaining &= ~(uint32_t(1) << index);
+    VulkanTextureCache::CaptureTextureInfo t;
+    if (!texture_cache_->GetBoundTextureForCapture(index, t)) {
+      continue;
+    }
+    // Render-to-texture only: textures that resolves of this frame (their number) or of the frame before (-1)
+    // wrote. Textures from the game's files are the same on every device.
+    int64_t written_by = INT64_MIN;
+    const uint64_t t_end = uint64_t(t.guest_base) + std::max(t.guest_size, uint32_t(1));
+    for (size_t i = frame_capture_frame_ranges_.size(); i-- > 0;) {
+      const FrameCaptureRange& r = frame_capture_frame_ranges_[i];
+      if (r.start < t_end && uint64_t(r.start) + r.length > t.guest_base) {
+        written_by = r.seq;
+        break;
+      }
+    }
+    if (written_by == INT64_MIN) {
+      for (const FrameCaptureRange& r : frame_capture_armed_ranges_) {
+        if (r.start < t_end && uint64_t(r.start) + r.length > t.guest_base) {
+          written_by = -1;
+          break;
+        }
+      }
+    }
+    if (written_by == INT64_MIN) {
+      continue;
+    }
+    // Once per texture and frame, at its first use (later versions are left out for the size).
+    if (frame_capture_textures_done_.count(t.texture)) {
+      continue;
+    }
+    const uint32_t texel_bytes = FrameCaptureTexelBytes(t.format);
+    const uint64_t bytes = uint64_t(t.width) * t.height * texel_bytes;
+    if (frame_capture_texture_count_ >= max_textures || !texel_bytes || !bytes ||
+        bytes > (uint64_t(64) << 20)) {
+      if (frame_capture_textures_skipped_++ < 16) {
+        REXGPU_INFO("Frame capture: texture @{:08X} {}x{} host format {} not copied ({})", t.guest_base,
+                    t.width, t.height, uint32_t(t.format),
+                    frame_capture_texture_count_ >= max_textures ? "frame_capture_max_textures"
+                                                                 : "format / size");
+      }
+      frame_capture_textures_done_[t.texture] = written_by;
+      continue;
+    }
+    uint32_t chunk, chunk_offset;
+    if (!ReserveDumpSpace(uint32_t(bytes), chunk, chunk_offset)) {
+      ++frame_capture_textures_skipped_;
+      continue;
+    }
+    frame_capture_textures_done_[t.texture] = written_by;
+    const uint32_t texture_number = frame_capture_texture_count_++;
+    frame_capture_texture_bytes_ += bytes;
+
+    // RequestTextures left the image sampled by guest shaders: to a transfer source for the copy, and back.
+    VkPipelineStageFlags sampled_stages;
+    VkAccessFlags sampled_access;
+    VkImageLayout sampled_layout;
+    texture_cache_->GetGuestShaderSampledUsage(sampled_stages, sampled_access, sampled_layout);
+    const VkImageSubresourceRange level0 =
+        ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
+    SubmitBarriers(true);
+    PushImageMemoryBarrier(t.image, level0, sampled_stages, VK_PIPELINE_STAGE_TRANSFER_BIT, sampled_access,
+                           VK_ACCESS_TRANSFER_READ_BIT, sampled_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    SubmitBarriers(true);
+    VkBufferImageCopy region = {};
+    region.bufferOffset = chunk_offset;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {t.width, t.height, 1};
+    const VkBuffer dest = resolve_dump_chunks_[chunk].buffer;
+    deferred_command_buffer_.CmdVkCopyImageToBuffer(t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest,
+                                                    region);
+    PushImageMemoryBarrier(t.image, level0, VK_PIPELINE_STAGE_TRANSFER_BIT, sampled_stages,
+                           VK_ACCESS_TRANSFER_READ_BIT, sampled_access, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           sampled_layout);
+    PushBufferMemoryBarrier(dest, chunk_offset, bytes, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+
+    const auto& key = t.key;
+    ResolveDumpEntry e;
+    e.kind = 't';
+    e.length = uint32_t(bytes);
+    e.offset = chunk_offset;
+    e.chunk = chunk;
+    e.address = t.guest_base;
+    e.draws_before = resolve_dump_draws_;
+    char name[64];
+    std::snprintf(name, sizeof(name), "t%03u_%08X.bin", texture_number, t.guest_base);
+    e.name = name;
+    char info[384];
+    std::snprintf(info, sizeof(info),
+                  "fetch=%u written_by=%lld base=%08X guest_size=%u vkformat=%u width=%u height=%u "
+                  "guest_format=%u guest_width=%u guest_height=%u tiled=%u pitch=%u endian=%u dim=%u mips=%u "
+                  "layers=%u signed_separate=%u scaled=%u host_swizzle=%03X",
+                  index, static_cast<long long>(written_by), t.guest_base, t.guest_size, uint32_t(t.format),
+                  t.width, t.height, uint32_t(key.format), key.GetWidth(), key.GetHeight(),
+                  uint32_t(key.tiled), uint32_t(key.pitch), uint32_t(key.endianness), uint32_t(key.dimension),
+                  uint32_t(key.mip_max_level) + 1, uint32_t(key.depth_or_array_size_minus_1) + 1,
+                  uint32_t(key.signed_separate), uint32_t(key.scaled_resolve), t.host_swizzle);
+    e.info = info;
+    char line[160];
+    std::snprintf(line, sizeof(line), "TEXTURE %s fetch=%u written_by=%lld before_draw=%u texture %p", name,
+                  index, static_cast<long long>(written_by), resolve_dump_draws_, t.texture);
+    resolve_dump_draw_log_.emplace_back(line);
+    resolve_dump_entries_.push_back(std::move(e));
+  }
+}
+
+void VulkanCommandProcessor::WriteFrameCaptureHeader(FILE* f) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const auto& properties = vulkan_device->properties();
+  std::fprintf(f, "frame=%llu\n", static_cast<unsigned long long>(frame_current_));
+  std::fprintf(f, "device=%s vendor=%04X device_id=%04X driver_version=%08X api=%u.%u.%u\n",
+               properties.deviceName, properties.vendorID, properties.deviceID, properties.driverVersion,
+               VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion),
+               VK_API_VERSION_PATCH(properties.apiVersion));
+  const uint32_t scale_x = render_target_cache_->draw_resolution_scale_x();
+  const uint32_t scale_y = render_target_cache_->draw_resolution_scale_y();
+  std::fprintf(f, "render_target_path=%s draw_resolution_scale=%ux%u edram_tile_bytes=%u\n",
+               render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets ? "host_rt"
+                                                                                              : "fsi",
+               scale_x, scale_y,
+               xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples * uint32_t(sizeof(uint32_t)) *
+                   scale_x * scale_y);
+  std::fprintf(f, "swap=%ux%u\n", last_swap_width_, last_swap_height_);
+  // Turnip's debug flags (CTRL's GPU compatibility: sysmem / gmem, noubwc).
+  const char* tu_debug = std::getenv("TU_DEBUG");
+  std::fprintf(f, "TU_DEBUG=%s\n", tu_debug ? tu_debug : "");
 }
 
 void VulkanCommandProcessor::FinishResolveDump() {
   // Called at the Swap: closes the dump frame (if any) and decides whether the next frame is one.
-  const std::string dir_cvar = REXCVAR_GET(resolve_dump_dir);
-  if (dir_cvar.empty()) {
-    return;
-  }
-  std::filesystem::path dir(dir_cvar);
-  if (dir.is_relative()) {
-    const auto exe_dir = rex::filesystem::GetExecutableFolder();
-    if (!exe_dir.empty()) dir = exe_dir / dir;
-  }
   const uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now().time_since_epoch())
                                        .count());
+  resolve_dump_resolve_seq_ = 0;
+  const std::string dir_cvar = REXCVAR_GET(resolve_dump_dir);
   if (resolve_dump_active_) {
     resolve_dump_active_ = false;
+    std::filesystem::path out;
+    const auto exe_dir = rex::filesystem::GetExecutableFolder();
+    if (frame_capture_) {
+      out = (exe_dir.empty() ? std::filesystem::path("logs") : exe_dir / "logs") / "frame_capture";
+    } else {
+      std::filesystem::path dir(dir_cvar);
+      if (dir.is_relative() && !exe_dir.empty()) {
+        dir = exe_dir / dir;
+      }
+      char sub[32];
+      std::snprintf(sub, sizeof(sub), "dump_%02u", resolve_dump_count_);
+      out = dir / sub;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     // Waits for this frame's guest work (the Swap's submission is not open yet).
     if (submission_open_) {
@@ -6920,33 +7216,60 @@ void VulkanCommandProcessor::FinishResolveDump() {
       REXGPU_ERROR("resolve dump {}: GPU work did not complete", resolve_dump_count_);
     } else {
       const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
-      VkMappedMemoryRange range = {};
-      range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-      range.memory = resolve_dump_memory_;
-      range.size = VK_WHOLE_SIZE;
-      vulkan_device->functions().vkInvalidateMappedMemoryRanges(vulkan_device->device(), 1, &range);
-      char sub[32];
-      std::snprintf(sub, sizeof(sub), "dump_%02u", resolve_dump_count_);
-      const std::filesystem::path out = dir / sub;
+      for (const DumpChunk& chunk : resolve_dump_chunks_) {
+        VkMappedMemoryRange range = {};
+        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = chunk.memory;
+        range.size = VK_WHOLE_SIZE;
+        vulkan_device->functions().vkInvalidateMappedMemoryRanges(vulkan_device->device(), 1, &range);
+      }
       std::error_code ec;
+      if (frame_capture_) {
+        // The previous capture is replaced (CTRL -> Save logs zips this folder).
+        std::filesystem::remove_all(out, ec);
+      }
       std::filesystem::create_directories(out, ec);
       FILE* index = std::fopen((out / "index.txt").string().c_str(), "w");
-      size_t written = 0;
-      for (size_t i = 0; i < resolve_dump_entries_.size(); ++i) {
-        const ResolveDumpEntry& e = resolve_dump_entries_[i];
-        char name[64];
-        std::snprintf(name, sizeof(name), "r%03zu_%08X.bin", i, e.address);
-        if (FILE* f = std::fopen((out / name).string().c_str(), "wb")) {
-          written += std::fwrite(static_cast<const uint8_t*>(resolve_dump_mapping_) + e.offset, 1, e.length, f);
-          std::fclose(f);
+      uint64_t written = 0;
+      uint32_t counts[3] = {};
+      // Copies identical to an earlier one (a target resolved again unchanged, a texture loaded from it) are not
+      // written again: the index names the earlier file (same_as=), which keeps a bug report's zip smaller.
+      std::unordered_map<uint64_t, const ResolveDumpEntry*> written_by_hash;
+      for (const ResolveDumpEntry& e : resolve_dump_entries_) {
+        const uint8_t* data = static_cast<const uint8_t*>(resolve_dump_chunks_[e.chunk].mapping) + e.offset;
+        const uint64_t hash = XXH3_64bits(data, e.length) ^ (uint64_t(e.length) << 32);
+        const ResolveDumpEntry*& first = written_by_hash[hash];
+        const bool duplicate =
+            first && first->length == e.length &&
+            !std::memcmp(data,
+                         static_cast<const uint8_t*>(resolve_dump_chunks_[first->chunk].mapping) + first->offset,
+                         e.length);
+        if (!duplicate) {
+          first = &e;
+          if (FILE* f = std::fopen((out / e.name).string().c_str(), "wb")) {
+            written += std::fwrite(data, 1, e.length, f);
+            std::fclose(f);
+          }
         }
-        if (index) {
+        ++counts[e.kind == 'r' ? 0 : e.kind == 'e' ? 1 : 2];
+        if (!index) {
+          continue;
+        }
+        if (e.kind == 'r') {
           std::fprintf(index,
                        "%s addr=%08X len=%u dest_base=%08X dest_info=%08X dest_pitch=%08X copy_control=%08X "
-                       "surface_info=%08X color_info0=%08X depth_info=%08X draws=%u\n",
-                       name, e.address, e.length, e.copy_dest_base, e.copy_dest_info, e.copy_dest_pitch,
-                       e.copy_control, e.surface_info, e.color_info0, e.depth_info, e.draws_before);
+                       "surface_info=%08X color_info0=%08X depth_info=%08X draws=%u",
+                       e.name.c_str(), e.address, e.length, e.copy_dest_base, e.copy_dest_info,
+                       e.copy_dest_pitch, e.copy_control, e.surface_info, e.color_info0, e.depth_info,
+                       e.draws_before);
+        } else {
+          std::fprintf(index, "%s len=%u draws=%u %s", e.name.c_str(), e.length, e.draws_before,
+                       e.info.c_str());
         }
+        if (duplicate) {
+          std::fprintf(index, " same_as=%s", first->name.c_str());
+        }
+        std::fprintf(index, "\n");
       }
       if (index) {
         std::fprintf(index, "draws_total=%u\n", resolve_dump_draws_);
@@ -6957,6 +7280,10 @@ void VulkanCommandProcessor::FinishResolveDump() {
           std::fprintf(index, " %u/%u/%u", c.color_10_red, c.color_10_green, c.color_10_blue);
         }
         std::fprintf(index, "\n");
+        if (resolve_dump_skipped_ || frame_capture_textures_skipped_) {
+          std::fprintf(index, "skipped=%u textures_skipped=%u\n", resolve_dump_skipped_,
+                       frame_capture_textures_skipped_);
+        }
         std::fclose(index);
       }
       if (FILE* dl = std::fopen((out / "draws.txt").string().c_str(), "w")) {
@@ -6965,18 +7292,76 @@ void VulkanCommandProcessor::FinishResolveDump() {
         }
         std::fclose(dl);
       }
-      REXGPU_INFO("resolve dump {}: {} resolves, {} draws, {:.1f} MB -> {} in {} ms", resolve_dump_count_,
-                  resolve_dump_entries_.size(), resolve_dump_draws_, written / 1048576.0, out.string(),
+      if (frame_capture_) {
+        if (FILE* f = std::fopen((out / "capture.txt").string().c_str(), "w")) {
+          WriteFrameCaptureHeader(f);
+          std::fclose(f);
+        }
+        // The renderer's settings (what the CTRL options and the GPU compatibility switches set).
+        if (FILE* f = std::fopen((out / "cvars.txt").string().c_str(), "w")) {
+          for (const char* category : {"GPU", "GPU/Vulkan", "GPU/Shader", "UI/Vulkan", "UI/Presenter"}) {
+            for (const std::string& name : rex::cvar::ListFlagsByCategory(category)) {
+              std::fprintf(f, "%s=%s\n", name.c_str(), rex::cvar::GetFlagByName(name).c_str());
+            }
+          }
+          std::fclose(f);
+        }
+      }
+      REXGPU_INFO("{} {}: {} resolves, {} EDRAM spans, {} textures, {} draws, {:.1f} MB -> {} in {} ms, {} copies "
+                  "skipped (host memory)",
+                  frame_capture_ ? "Frame capture" : "resolve dump", resolve_dump_count_, counts[0], counts[1],
+                  counts[2], resolve_dump_draws_, written / 1048576.0, out.string(),
                   std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-                      .count());
-      ++resolve_dump_count_;
+                      .count(),
+                  resolve_dump_skipped_);
+      if (!frame_capture_) {
+        ++resolve_dump_count_;
+      }
     }
     resolve_dump_entries_.clear();
     resolve_dump_draw_log_.clear();
-    resolve_dump_used_ = 0;
-    resolve_dump_last_ms_ = now_ms;
+    FreeDumpChunks();
+    resolve_dump_skipped_ = 0;
+    if (!frame_capture_) {
+      resolve_dump_last_ms_ = now_ms;
+    }
+    frame_capture_ = false;
+    frame_capture_armed_ranges_.clear();
+    frame_capture_frame_ranges_.clear();
+    frame_capture_textures_done_.clear();
+    frame_capture_texture_count_ = 0;
+    frame_capture_texture_bytes_ = 0;
+    frame_capture_textures_skipped_ = 0;
   }
   resolve_dump_draws_ = 0;
+
+  // Frame capture (CTRL, frame_capture_after_s): one frame recording what its resolves write, then the capture.
+  if (frame_capture_armed_) {
+    frame_capture_armed_ = false;
+    frame_capture_ = true;
+    resolve_dump_active_ = true;
+    REXGPU_INFO("Frame capture: capturing frame {}", frame_current_ + 1);
+    return;
+  }
+  if (!frame_capture_first_ms_) {
+    frame_capture_first_ms_ = now_ms;
+  }
+  bool capture = TakeDueFrameCaptureRequest(now_ms);
+  const int32_t after_s = REXCVAR_GET(frame_capture_after_s);
+  if (!capture && after_s > 0 && !frame_capture_after_done_ &&
+      now_ms - frame_capture_first_ms_ >= uint64_t(after_s) * 1000) {
+    frame_capture_after_done_ = true;
+    capture = true;
+  }
+  if (capture) {
+    frame_capture_armed_ = true;
+    frame_capture_armed_ranges_.clear();
+    return;
+  }
+
+  if (dir_cvar.empty()) {
+    return;
+  }
   if (resolve_dump_count_ >= uint32_t(std::max(0, REXCVAR_GET(resolve_dump_max)))) {
     return;
   }

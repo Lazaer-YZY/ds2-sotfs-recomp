@@ -45,6 +45,10 @@ REXCVAR_DEFINE_INT32(ds2_guest_time_scalar_at, 0, "DS2",
                      "then slow the world down). Needs ds2_input_script")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+namespace rex::graphics {
+void RequestFrameCapture(uint32_t delay_ms);  // the GPU plugin (command_processor.cpp)
+}
+
 namespace ds2::input_script {
 
 void ApplyTimeScalar() {
@@ -285,6 +289,16 @@ class ScriptPad final : public in::InputDriver {
       text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
     std::filesystem::remove(live_path_, ec);
+    // "N:capture": a GPU frame capture N s from now (CTRL's Capture one frame without the dialog, for scripted runs).
+    for (size_t at = text.find(":capture"); at != std::string::npos; at = text.find(":capture")) {
+      size_t begin = at;
+      while (begin > 0 && text[begin - 1] != ' ' && text[begin - 1] != ',' && text[begin - 1] != ';') --begin;
+      double delay = 0.0;
+      Number(std::string_view(text).substr(begin, at - begin), delay);
+      rex::graphics::RequestFrameCapture(uint32_t(delay * 1000.0));
+      REXLOG_INFO("[ds2 input] live: frame capture in {:.1f} s", delay);
+      text.replace(begin, at + 8 - begin, " ");
+    }
     std::vector<Step> steps = Parse(text);
     for (Step& s : steps) {
       s.begin += t;

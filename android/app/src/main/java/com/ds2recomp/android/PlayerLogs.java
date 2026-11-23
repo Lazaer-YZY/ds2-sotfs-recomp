@@ -35,6 +35,8 @@ import java.util.zip.ZipOutputStream;
 final class PlayerLogs {
     static final String DIRECTORY = "logs";
     static final String README = "README.txt";
+    /** CTRL -> Capture one frame writes one gameplay frame's GPU images here (native FinishResolveDump). */
+    static final String FRAME_CAPTURE = "frame_capture";
     static final int JAVA_CRASHES_KEPT = 5;
     static final String README_TEXT =
         "Dark Souls II (Android port) logs. For a bug report, use CTRL -> Save logs in the game (a zip\n"
@@ -121,6 +123,14 @@ final class PlayerLogs {
         Collections.sort(game, (a, b) -> Long.compare(gameLogIndex(a), gameLogIndex(b)));
         result.addAll(game.subList(0, Math.min(GAME_LOGS_EXPORTED, game.size())));
         Collections.sort(result, (a, b) -> a.getName().compareTo(b.getName()));
+        // The last frame capture, if any (a folder replaced by every capture).
+        File[] capture = new File(directory, FRAME_CAPTURE).listFiles();
+        if (capture != null) {
+            List<File> captured = new ArrayList<>();
+            for (File file : capture) if (file.isFile()) captured.add(file);
+            Collections.sort(captured, (a, b) -> a.getName().compareTo(b.getName()));
+            result.addAll(captured);
+        }
         return result;
     }
 
@@ -161,7 +171,9 @@ final class PlayerLogs {
         zip.closeEntry();
         byte[] buffer = new byte[1 << 16];
         for (File file : files) {
-            zip.putNextEntry(new ZipEntry("logs/" + file.getName()));
+            File parent = file.getParentFile();
+            boolean captured = parent != null && parent.getName().equals(FRAME_CAPTURE);
+            zip.putNextEntry(new ZipEntry("logs/" + (captured ? FRAME_CAPTURE + "/" : "") + file.getName()));
             try (InputStream input = new FileInputStream(file)) {
                 for (int n; (n = input.read(buffer)) > 0; ) zip.write(buffer, 0, n);
             }

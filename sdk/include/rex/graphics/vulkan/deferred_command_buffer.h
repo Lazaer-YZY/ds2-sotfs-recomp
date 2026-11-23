@@ -238,6 +238,17 @@ class DeferredCommandBuffer {
                 regions, sizeof(VkBufferImageCopy) * region_count);
   }
 
+  // DS2 port frame capture: one region (texture level 0 into a readback buffer).
+  void CmdVkCopyImageToBuffer(VkImage src_image, VkImageLayout src_image_layout, VkBuffer dst_buffer,
+                              const VkBufferImageCopy& region) {
+    auto& args = *reinterpret_cast<ArgsVkCopyImageToBuffer*>(
+        WriteCommand(Command::kVkCopyImageToBuffer, sizeof(ArgsVkCopyImageToBuffer)));
+    args.src_image = src_image;
+    args.src_image_layout = src_image_layout;
+    args.dst_buffer = dst_buffer;
+    args.region = region;
+  }
+
   void CmdVkCopyQueryPoolResults(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count,
                                  VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize stride,
                                  VkQueryResultFlags flags) {
@@ -532,6 +543,7 @@ class DeferredCommandBuffer {
     kVkClearColorImage,
     kVkCopyBuffer,
     kVkCopyBufferToImage,
+    kVkCopyImageToBuffer,
     kVkCopyImage,
     kVkCopyQueryPoolResults,
     kVkDispatch,
@@ -670,6 +682,13 @@ class DeferredCommandBuffer {
     VkImage dst_image;
     VkImageLayout dst_image_layout;
     VkImageCopy region;
+  };
+
+  struct ArgsVkCopyImageToBuffer {
+    VkImage src_image;
+    VkImageLayout src_image_layout;
+    VkBuffer dst_buffer;
+    VkBufferImageCopy region;
   };
 
   struct ArgsVkCopyBufferToImage {

@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include <unordered_set>
 
 #include <rex/cvar.h>
@@ -1208,7 +1209,9 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
   image_create_info.arrayLayers = is_3d ? 1 : depth_or_array_size;
   image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
   image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  // TRANSFER_SRC: the frame capture copies textures out (VulkanCommandProcessor::FrameCaptureDrawTextures).
+  image_create_info.usage =
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   // Single-level 2D R8G8B8A8_UNORM textures may be fed directly from render
   // targets by resolves (vulkan_resolve_feed_textures), drawn into.
   // A2B10G10R10_UNORM_PACK32 (k_2_10_10_10, color attachment support is
@@ -1254,7 +1257,35 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
 
   auto* vulkan_texture = new VulkanTexture(*this, key, image, allocation);
   vulkan_texture->set_feed_attachment(feed_attachment);
+  vulkan_texture->set_host_format(formats[0]);
   return std::unique_ptr<Texture>(vulkan_texture);
+}
+
+bool VulkanTextureCache::GetBoundTextureForCapture(uint32_t fetch_constant_index,
+                                                   CaptureTextureInfo& out) const {
+  const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
+  if (!binding || !binding->texture) {
+    return false;
+  }
+  const auto* texture = static_cast<const VulkanTexture*>(binding->texture);
+  const TextureKey& key = texture->key();
+  if (key.dimension == xenos::DataDimension::k3D || texture->host_format() == VK_FORMAT_UNDEFINED) {
+    return false;
+  }
+  out.image = texture->image();
+  out.texture = texture;
+  out.format = texture->host_format();
+  out.width = key.GetWidth();
+  out.height = key.GetHeight();
+  if (key.scaled_resolve) {
+    out.width *= draw_resolution_scale_x();
+    out.height *= draw_resolution_scale_y();
+  }
+  out.guest_base = uint32_t(key.base_page) << 12;
+  out.guest_size = texture->GetGuestBaseSize();
+  out.key = key;
+  out.host_swizzle = binding->host_swizzle;
+  return true;
 }
 
 bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unscaled,
@@ -1268,6 +1299,12 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
   return EnsureScaledResolveBufferAllocated(start_scaled, length_scaled);
 }
 
+REXCVAR_DEFINE_BOOL(vulkan_texture_load_full_barriers, false, "GPU/Vulkan",
+                    "Diagnostics: full memory barriers (all commands, all memory) around every texture load's "
+                    "dispatches and its copy into the image (Adreno 6xx #8 / #18: is the load's copy racing its "
+                    "shader?)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(gpu_debug_skip_texture_reloads, false, "GPU/Vulkan",
                     "Diagnostics: load each texture only once (textures updated by resolves go "
                     "stale) to measure what texture reloads cost")
@@ -1277,6 +1314,12 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                                                bool load_mips) {
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
+  if (command_processor_.frame_capture_active()) {
+    command_processor_.FrameCaptureNote(fmt::format(
+        "LOAD @{:08X} {}x{} format {} tiled {} base {} mips {} texture {}", uint32_t(texture_key.base_page) << 12,
+        texture_key.GetWidth(), texture_key.GetHeight(), uint32_t(texture_key.format), uint32_t(texture_key.tiled),
+        load_base, load_mips, static_cast<const void*>(&texture)));
+  }
   // Diagnostics (gpu_debug_skip_texture_reloads): load each texture only once, so
   // textures refreshed every frame from resolves keep their first contents.
   static const bool debug_skip_reloads = REXCVAR_GET(gpu_debug_skip_texture_reloads);
@@ -1689,6 +1732,14 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                           &load_constants.host_offset);
       }
       command_processor_.SubmitBarriers(true);
+      if (REXCVAR_GET(vulkan_texture_load_full_barriers)) {
+        VkMemoryBarrier full_barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        full_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        full_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        command_buffer.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &full_barrier, 0,
+                                            nullptr, 0, nullptr);
+      }
       command_processor_.GpuTimingMark(VulkanCommandProcessor::GpuTimingCategory::kTextureLoads);
       command_buffer.CmdVkDispatch(group_count_x, group_count_y, load_constants.size_blocks[2]);
       load_constants.guest_offset += level_array_slice_stride_bytes_scaled;
@@ -1823,6 +1874,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         texture_dst_access_mask, texture_old_layout, texture_new_layout);
   }
   command_processor_.SubmitBarriers(true);
+  if (REXCVAR_GET(vulkan_texture_load_full_barriers)) {
+    VkMemoryBarrier full_barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    full_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    full_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    command_buffer.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
+                                        &full_barrier, 0, nullptr, 0, nullptr);
+  }
   command_processor_.GpuTimingMark(VulkanCommandProcessor::GpuTimingCategory::kTextureLoads);
   VkBufferImageCopy* copy_regions = command_buffer.CmdCopyBufferToImageEmplace(
       scratch_buffer, vulkan_texture.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1864,6 +1922,29 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     copy_region.imageExtent.height =
         std::max((height * texture_resolution_scale_y) >> level, UINT32_C(1));
     copy_region.imageExtent.depth = std::max(depth >> level, UINT32_C(1));
+  }
+  if (command_processor_.frame_capture_active() && level_first == 0) {
+    // Frame capture: the load shader's linear output for level 0, beside the image it was copied into.
+    static uint32_t scratch_captures = 0;
+    char scratch_name[48];
+    std::snprintf(scratch_name, sizeof(scratch_name), "s%04u_%08X.bin", scratch_captures++ % 10000,
+                  uint32_t(texture_key.base_page) << 12);
+    command_processor_.FrameCaptureBufferRange(
+        scratch_buffer, host_layout_base.offset_bytes, uint32_t(host_layout_base.slice_size_bytes),
+        scratch_name,
+        fmt::format("scratch of @{:08X} {}x{} format {} pitch_bytes {} rows {} bytes_per_block {} texture {}",
+                    uint32_t(texture_key.base_page) << 12, texture_key.GetWidth(), texture_key.GetHeight(),
+                    uint32_t(texture_key.format),
+                    load_shader_info.bytes_per_host_block * host_layout_base.x_pitch_blocks,
+                    host_layout_base.y_pitch_blocks, load_shader_info.bytes_per_host_block,
+                    static_cast<const void*>(&texture)));
+  }
+  if (REXCVAR_GET(vulkan_texture_load_full_barriers)) {
+    VkMemoryBarrier full_barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    full_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    full_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    command_buffer.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
+                                        &full_barrier, 0, nullptr, 0, nullptr);
   }
 
   if (REXCVAR_GET(vulkan_texture_eager_transition)) {

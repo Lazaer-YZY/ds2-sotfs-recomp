@@ -7,6 +7,7 @@
 #   e.g. tools/android/pad.sh "0-1.5:lstick_up,2:a" out/device/live/01.png
 # Buttons as in ds2_input_script (a b x y lb rb lt rt up down left right start back lstick_* rstick_* lthumb rthumb);
 # a stick direction at part of its range: "0-27:rstick_right@0.43" (Majula 360 pan, 27.3 s; dead zone ~0.35).
+# "N:capture" requests a GPU frame capture N s later (logs/frame_capture, like CTRL's Capture one frame).
 # Only our app reads the file, so nothing reaches another app; refuses unless com.ds2recomp.android is running.
 set -u
 cd "$(dirname "$0")/../.."

@@ -15,7 +15,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <memory>
 #include <tuple>
 #include <utility>
@@ -1786,6 +1788,12 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
             return false;
           }
         }
+      }
+      // DS2 port frame capture: the render target as this resolve reads it (before the resolve's clear).
+      if (command_processor_.frame_capture_active()) {
+        CaptureResolveEdramSource(resolve_info,
+                                  GetPath() != Path::kHostRenderTargets || !direct_resolved,
+                                  direct_resolved);
       }
 
       // Resolve feeding (vulkan_resolve_feed_textures), decided before the guest
@@ -5682,6 +5690,29 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     resolve_clear_rect.layerCount = 1;
   }
 
+  if (command_processor_.frame_capture_active()) {
+    // Frame capture: every ownership transfer of the captured frame.
+    for (uint32_t i = 0; i < render_target_count; ++i) {
+      if (!render_targets[i]) {
+        continue;
+      }
+      for (const Transfer& transfer : render_target_transfers[i]) {
+        command_processor_.FrameCaptureNote(fmt::format(
+            "TRANSFER to {} tiles {}-{} from {}{}{}", render_targets[i]->key().GetDebugName(),
+            transfer.start_tiles, transfer.end_tiles,
+            transfer.source ? transfer.source->key().GetDebugName() : std::string("-"),
+            transfer.host_depth_source ? " host depth " : "",
+            transfer.host_depth_source ? transfer.host_depth_source->key().GetDebugName() : std::string()));
+      }
+    }
+    if (resolve_clear_rectangle) {
+      command_processor_.FrameCaptureNote(fmt::format(
+          "RESOLVE CLEAR {}x{} at ({}, {}) of {} targets", resolve_clear_rectangle->width_pixels,
+          resolve_clear_rectangle->height_pixels, resolve_clear_rectangle->x_pixels,
+          resolve_clear_rectangle->y_pixels, render_target_count));
+    }
+  }
+
   // Do host depth storing for the depth destination (assuming there can be only
   // one depth destination) where depth destination == host depth source.
   bool host_depth_store_set_up = false;
@@ -7726,6 +7757,18 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
 
   GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch,
                                  dump_rectangles_);
+  if (command_processor_.frame_capture_active()) {
+    // Frame capture: which render target each part of the span comes from.
+    command_processor_.FrameCaptureNote(fmt::format(
+        "DUMP resolve {} span base {} row {} rows {} pitch {}: {} rectangles",
+        command_processor_.frame_capture_resolve_seq(), dump_base, dump_row_length_used, dump_rows,
+        dump_pitch, dump_rectangles_.size()));
+    for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+      command_processor_.FrameCaptureNote(fmt::format(
+          "  from {} rows {}+{} first_start {} last_end {}", rectangle.render_target->key().GetDebugName(),
+          rectangle.row_first, rectangle.rows, rectangle.row_first_start, rectangle.row_last_end));
+    }
+  }
   if (dump_rectangles_.empty()) {
     return true;
   }
@@ -7855,6 +7898,58 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
     MarkEdramBufferModified();
   }
   return all_pipelines_available;
+}
+
+void VulkanRenderTargetCache::CaptureResolveEdramSource(const draw_util::ResolveInfo& resolve_info,
+                                                        bool render_targets_dumped,
+                                                        bool direct_resolved) {
+  uint32_t base, row_length_used, rows, pitch;
+  resolve_info.GetCopyEdramTileSpan(base, row_length_used, rows, pitch);
+  if (!rows || !row_length_used || !pitch) {
+    return;
+  }
+  if (!render_targets_dumped &&
+      !DumpRenderTargets(base, row_length_used, rows, pitch)) {
+    REXGPU_WARN("Frame capture: dumping the render targets of a resolve failed");
+  }
+  UseEdramBuffer(EdramBufferUsage::kTransferRead);
+  const uint32_t tile_bytes = xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples *
+                              uint32_t(sizeof(uint32_t)) * draw_resolution_scale_x() *
+                              draw_resolution_scale_y();
+  // The EDRAM buffer has the console's 2048-tile period.
+  const uint32_t span_tiles =
+      std::min((rows - 1) * pitch + row_length_used, xenos::kEdramTileCount);
+  const uint32_t first_tile = base & (xenos::kEdramTileCount - 1);
+  const bool is_depth = resolve_info.IsCopyingDepth();
+  const draw_util::ResolveEdramInfo& edram =
+      is_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+  const uint32_t seq = command_processor_.frame_capture_resolve_seq();
+  char info[384];
+  std::snprintf(info, sizeof(info),
+                "seq=%u span_base=%u first_tile=%u span_tiles=%u row_tiles=%u rows=%u pitch_tiles=%u "
+                "tile_bytes=%u scale=%ux%u depth=%u format=%u fmt64=%u msaa=%u rt_base=%u off_x=%u off_y=%u "
+                "width=%u height=%u sample_select=%u dest=%08X path=%s direct=%u",
+                seq, base, first_tile, span_tiles, row_length_used, rows, pitch, tile_bytes,
+                draw_resolution_scale_x(), draw_resolution_scale_y(), uint32_t(is_depth),
+                uint32_t(edram.format), uint32_t(edram.format_is_64bpp), uint32_t(edram.msaa_samples),
+                uint32_t(edram.base_tiles), resolve_info.coordinate_info.edram_offset_x_div_8 * 8,
+                resolve_info.coordinate_info.edram_offset_y_div_8 * 8,
+                resolve_info.coordinate_info.width_div_8 * 8, resolve_info.height_div_8 * 8,
+                uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
+                resolve_info.copy_dest_base,
+                GetPath() == Path::kHostRenderTargets ? "host_rt" : "fsi", uint32_t(direct_resolved));
+  // In two parts when the span wraps around the end of the buffer.
+  const uint32_t part0_tiles = std::min(span_tiles, xenos::kEdramTileCount - first_tile);
+  char name[48];
+  std::snprintf(name, sizeof(name), "e%03u_t%04u.bin", seq, first_tile);
+  command_processor_.FrameCaptureBufferRange(edram_buffer_, VkDeviceSize(first_tile) * tile_bytes,
+                                             part0_tiles * tile_bytes, name,
+                                             std::string(info) + " part=0");
+  if (span_tiles > part0_tiles) {
+    std::snprintf(name, sizeof(name), "e%03u_t0000_wrap.bin", seq);
+    command_processor_.FrameCaptureBufferRange(edram_buffer_, 0, (span_tiles - part0_tiles) * tile_bytes,
+                                               name, std::string(info) + " part=1");
+  }
 }
 
 bool VulkanRenderTargetCache::IsSceneFxaaResolve(uint32_t dest_base, uint32_t width,

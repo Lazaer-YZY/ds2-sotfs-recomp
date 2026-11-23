@@ -41,6 +41,12 @@ namespace rex::graphics {
 // DS2 port: draws with these pixel shaders are left out (a game's optional post effects). Any thread; up to 16.
 void SetSkippedPixelShaders(const uint64_t* hashes, uint32_t count);
 bool IsPixelShaderSkipped(uint64_t hash);
+// DS2 port: one-frame GPU capture for bug reports (Vulkan, VulkanCommandProcessor::FinishResolveDump): the first
+// frame that starts delay_ms from now (after one frame recording what its resolves write) is written to
+// <executable folder>/logs/frame_capture, replacing the previous capture. Any thread.
+void RequestFrameCapture(uint32_t delay_ms);
+// Consumes a request that is due at now_ms (steady clock); the command thread.
+bool TakeDueFrameCaptureRequest(uint64_t now_ms);
 
 class GraphicsSystem;
 class Shader;

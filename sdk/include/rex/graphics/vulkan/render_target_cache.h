@@ -946,6 +946,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
   bool DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
                          uint32_t dump_pitch);
+  // DS2 port frame capture: the EDRAM tile span a resolve reads, copied out as the resolve reads it (the host render
+  // targets dumped into the EDRAM buffer first when render_targets_dumped is false).
+  void CaptureResolveEdramSource(const draw_util::ResolveInfo& resolve_info, bool render_targets_dumped,
+                                 bool direct_resolved);
 
   bool gamma_render_target_as_unorm16_ = false;
 

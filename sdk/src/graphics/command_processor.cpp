@@ -172,6 +172,26 @@ bool IsPixelShaderSkipped(uint64_t hash) {
   return false;
 }
 
+namespace {
+// Steady-clock milliseconds at which a requested frame capture is due, 0 if none.
+std::atomic<uint64_t> g_frame_capture_due_ms{0};
+}  // namespace
+
+DS2_PLUGIN_EXPORT void RequestFrameCapture(uint32_t delay_ms) {
+  const uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count());
+  g_frame_capture_due_ms.store(std::max<uint64_t>(now_ms + delay_ms, 1), std::memory_order_release);
+}
+
+bool TakeDueFrameCaptureRequest(uint64_t now_ms) {
+  uint64_t due = g_frame_capture_due_ms.load(std::memory_order_acquire);
+  if (!due || now_ms < due) {
+    return false;
+  }
+  return g_frame_capture_due_ms.compare_exchange_strong(due, 0, std::memory_order_acq_rel);
+}
+
 DS2_PLUGIN_EXPORT void Ds2WaitRingProgress(uint32_t seen, uint32_t max_us) {
   rex::system::frame_breakdown::TimelineMark('r');
   g_ds2_ring_waiters.fetch_add(1);

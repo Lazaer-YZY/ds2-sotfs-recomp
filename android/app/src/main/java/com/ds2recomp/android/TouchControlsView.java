@@ -31,6 +31,8 @@ import android.widget.TextView;
 /** Local touch controls layered over SDL's surface; physical pads stay in SDL. */
 final class TouchControlsView extends View {
     private static final long CONTROLLER_POLL_MS = 1000;
+    /** CTRL -> Capture one frame: seconds after the dialog closes (time to get back into the game). */
+    private static final int FRAME_CAPTURE_DELAY_S = 5;
     private static final int UP = 0x0001, DOWN = 0x0002, LEFT = 0x0004, RIGHT = 0x0008;
     private static final int START = 0x0010, BACK = 0x0020;
     private static final int L3 = 0x0040, R3 = 0x0080;
@@ -839,6 +841,14 @@ final class TouchControlsView extends View {
         TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
         nextStart.setPadding(0, Math.round(8f * getResources().getDisplayMetrics().density), 0,
                              Math.round(8f * getResources().getDisplayMetrics().density));
+        // One gameplay frame's render targets, resolves and render-to-texture textures into logs/frame_capture,
+        // which Save logs zips (Adreno 650 / 660 gameplay colours, issues #8 / #18). Applies at once, after a delay
+        // so the player is back in the game.
+        Button captureButton = new Button(activity);
+        captureButton.setText(strings.getString(R.string.touch_frame_capture));
+        captureButton.setAllCaps(false);
+        content.addView(captureButton);
+        hint(content, strings.getString(R.string.touch_frame_capture_help));
 
         // Performance overlay (fps, 1% low, frame time graph of the game's own frames): applied at once. Last in the
         // dialog with a warning (the owner, 2026-11-21): it is an Android view over the game, which some phones'
@@ -947,6 +957,12 @@ final class TouchControlsView extends View {
         logsButton.setOnClickListener(v -> {
             settingsDialog.dismiss();
             activity.startLogExport();
+        });
+        captureButton.setOnClickListener(v -> {
+            settingsDialog.dismiss();
+            RuntimeActivity.nativeSetOption("frame_capture", String.valueOf(FRAME_CAPTURE_DELAY_S));
+            android.widget.Toast.makeText(activity, strings.getString(R.string.frame_capture_started,
+                FRAME_CAPTURE_DELAY_S), android.widget.Toast.LENGTH_LONG).show();
         });
         backupsButton.setOnClickListener(v -> {
             settingsDialog.dismiss();

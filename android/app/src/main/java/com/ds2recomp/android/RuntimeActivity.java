@@ -439,6 +439,13 @@ public final class RuntimeActivity extends SDLActivity {
         // (SaveBackups.applyPendingRestore; never under a game already running in this process).
         String restored = gameStarted ? null : SaveBackups.applyPendingRestore(this);
         super.onCreate(savedInstanceState);
+        // Development launches on a test phone that locks between unattended runs (`--es DS2_SHOW_WHEN_LOCKED 1`):
+        // the game shows over the lock screen like an alarm app; it does not unlock the phone or show anything else.
+        if (BuildConfig.DEBUG && android.os.Build.VERSION.SDK_INT >= 27 && getIntent() != null
+                && "1".equals(getIntent().getStringExtra("DS2_SHOW_WHEN_LOCKED"))) {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        }
         if (restored != null) Toast.makeText(this, restored, Toast.LENGTH_LONG).show();
         hideSystemBars();
         applySustainedPerformanceMode();

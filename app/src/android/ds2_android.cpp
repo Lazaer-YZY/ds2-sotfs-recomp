@@ -579,6 +579,10 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeFrameTimes(JNIEnv* env, jclass,
   return n > 0 ? n : 0;
 }
 
+namespace rex::graphics {
+void RequestFrameCapture(uint32_t delay_ms);  // the GPU plugin (command_processor.cpp)
+}
+
 // Options from the app's CTRL dialog (applied at once; unknown ones are logged).
 extern "C" __attribute__((visibility("default"))) JNIEXPORT void JNICALL
 Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, jstring name, jstring value) {
@@ -606,6 +610,12 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, 
     ds2::android::SetPrimeGovernor(val == "1" || val == "true");
   } else if (key == "pad_map") {
     ds2::android::SetPadMap(val);
+  } else if (key == "frame_capture") {
+    // CTRL -> Capture one frame (GPU bug reports, #8 / #18): the value is the delay in seconds, so the player can
+    // close the dialog first. Written to logs/frame_capture, which Save logs adds to its zip.
+    const uint32_t delay_s = uint32_t(std::strtoul(std::string(val).c_str(), nullptr, 10));
+    rex::graphics::RequestFrameCapture(std::min<uint32_t>(delay_s, 60) * 1000);
+    REXLOG_INFO("ds2: frame capture requested in {} s", std::min<uint32_t>(delay_s, 60));
   } else {
     REXLOG_INFO("ds2: option {} = {} (not wired)", key, val);
   }
