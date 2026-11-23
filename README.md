@@ -57,8 +57,8 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
   overlay, and **Save logs** for bug reports straight from the phone.
 - Known issues: short frame-time dips while new areas stream in; the heaviest views (the burning gate in the Forest
   of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. At 1080p, rare single frames
-  of the wrong picture on the Adreno 830 (720p has none); wrong colours in gameplay on the Adreno 650 / 660. See the
-  issue list.
+  of the wrong picture on the Adreno 830 (720p has none). The Adreno 650 / 660 gameplay colours are fixed in 0.5.1 on an
+  Adreno 640, not yet confirmed on those GPUs. See the issue list.
 
 ## Second screen (AYN Thor and other dual-screen handhelds)
 
@@ -92,7 +92,7 @@ loading screens dim it.
 - Your own **Dark Souls II: Scholar of the First Sin** for Xbox 360: **disc 1 and disc 2** (disc 2 carries
   Compatibility Pack 4 with the three Crown DLC areas; the game does not start without it).
 - An arm64 Android device with Vulkan, Android 8 or newer (9 or newer for the bundled Turnip driver). Snapdragon
-  (Adreno 7xx / 8xx) is the tested path (Adreno 6xx: see the GPU compatibility options in CTRL); Mali GPUs use the
+  (Adreno 7xx / 8xx) is the tested path, Adreno 6xx is tested on an Adreno 640 (0.5.1 and newer); Mali GPUs use the
   system driver or PanVK and are little tested (#16); other GPUs use the system driver and are untested. About 8 GB free
   for the game, plus room for one disc image (7.8 GB) while importing it.
 
