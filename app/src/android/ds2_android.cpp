@@ -16,6 +16,7 @@
 #include "ds2_framerate.h"
 #include "ds2_frame_overlay.h"
 #include "ds2_hud_sprites.h"
+#include "ds2_watchdog.h"
 
 #include <algorithm>
 #include <atomic>
@@ -462,6 +463,13 @@ void ApplyDefaults() {
       // 2026-11-21: the prologue 1.22x wide at 1568x720), scaled up to the full width with the top and bottom cropped
       // (the movies' own letterbox bars; the owner: "could it better use screen real estate?"). No effect at 16:9.
       {"gpu_keep_aspect_pixel_shaders", "47094F2C2592E81B"},
+      // Memory that served no purpose (the owner, 2026-11-23: "free up memory hogging which serves no purpose"; issue
+      // #8's 6 GB phone): upload pages beyond 8 MB free per pool once the GPU is done with them (the pool kept its
+      // loading peak, ~100 MB), and render targets owning no EDRAM data and unbound for 30 s freed (leftovers of the
+      // title, menus and loading, ~70 MB at Majula). Thor run bench: PSS 2.84 -> 2.69 GB, pacing and power unchanged,
+      // images identical (DECISIONS.md, 2026-11-23 afternoon). The texture reserve stays (no cap on textures).
+      {"upload_buffer_max_free_mb", "8"},
+      {"vulkan_evict_idle_render_targets_s", "30"},
   };
   for (const auto& [name, value] : kDefaults) {
     if (rex::cvar::GetFlagInfo(name) == nullptr) {
@@ -610,6 +618,8 @@ Java_com_ds2recomp_android_RuntimeActivity_nativeSetOption(JNIEnv* env, jclass, 
     ds2::android::SetPrimeGovernor(val == "1" || val == "true");
   } else if (key == "pad_map") {
     ds2::android::SetPadMap(val);
+  } else if (key == "device_thermal") {
+    ds2::watchdog::SetDeviceNote(val);  // RuntimeActivity, every few seconds: battery and thermal status
   } else if (key == "frame_capture") {
     // CTRL -> Capture one frame (GPU bug reports, #8 / #18): the value is the delay in seconds, so the player can
     // close the dialog first. Written to logs/frame_capture, which Save logs adds to its zip.

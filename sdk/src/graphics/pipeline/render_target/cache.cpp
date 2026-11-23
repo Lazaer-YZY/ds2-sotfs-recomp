@@ -487,6 +487,50 @@ void RenderTargetCache::BeginFrame() {
   ResetAccumulatedRenderTargets();
 }
 
+bool RenderTargetCache::IsRenderTargetInLastUpdate(const RenderTarget* render_target) const {
+  for (const RenderTarget* used : last_update_used_render_targets_) {
+    if (used == render_target) return true;
+  }
+  for (const RenderTarget* accumulated : last_update_accumulated_render_targets_) {
+    if (accumulated == render_target) return true;
+  }
+  return last_update_redirected_clear_rt_ == render_target;
+}
+
+bool RenderTargetCache::RemoveIdleRenderTarget(RenderTarget* render_target) {
+  bool removed = false;
+  for (auto it = render_targets_.begin(); it != render_targets_.end();) {
+    if (it->second == render_target) {
+      it = render_targets_.erase(it);
+      removed = true;
+    } else {
+      ++it;
+    }
+  }
+  return removed;
+}
+
+void RenderTargetCache::CollectIdleRenderTargets(uint64_t min_idle_frames,
+                                                 std::vector<RenderTarget*>& idle) const {
+  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owning;
+  for (const auto& ownership_range_pair : ownership_ranges_) {
+    const OwnershipRange& ownership_range = ownership_range_pair.second;
+    if (!ownership_range.render_target.IsEmpty()) owning.emplace(ownership_range.render_target);
+    if (!ownership_range.host_depth_render_target_unorm24.IsEmpty()) {
+      owning.emplace(ownership_range.host_depth_render_target_unorm24);
+    }
+    if (!ownership_range.host_depth_render_target_float24.IsEmpty()) {
+      owning.emplace(ownership_range.host_depth_render_target_float24);
+    }
+  }
+  for (const auto& render_target_pair : render_targets_) {
+    RenderTarget* render_target = render_target_pair.second;
+    if (!render_target || owning.count(render_target->key())) continue;
+    if (frame_index_ - render_target->last_used_frame < min_idle_frames) continue;
+    idle.push_back(render_target);
+  }
+}
+
 bool RenderTargetCache::Update(bool is_rasterization_done,
                                reg::RB_DEPTHCONTROL normalized_depth_control,
                                uint32_t normalized_color_mask, const Shader& vertex_shader) {
@@ -1334,10 +1378,18 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     return true;
   }
 
+  // Transfer sources are read by the GPU now although no draw binds them (idle render targets).
+  for (const std::vector<Transfer>& transfers : last_update_transfers_) {
+    for (const Transfer& transfer : transfers) {
+      if (transfer.source) transfer.source->last_used_frame = frame_index_;
+      if (transfer.host_depth_source) transfer.host_depth_source->last_used_frame = frame_index_;
+    }
+  }
   // If everything succeeded, update the used render targets.
   for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
     last_update_used_render_targets_[i] =
         (depth_and_color_rts_used_bits & (uint32_t(1) << i)) ? rts[i] : nullptr;
+    if (last_update_used_render_targets_[i]) last_update_used_render_targets_[i]->last_used_frame = frame_index_;
   }
   if (are_accumulated_render_targets_valid_) {
     // Check if the only re-enabling a previously bound render target.
@@ -1836,6 +1888,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
     // Insert even if failed to create, not to try to create again.
     render_targets_.emplace(key, render_target);
   }
+  // Any lookup is a use (idle render targets): resolve clears take theirs here without a draw binding them, and
+  // looked idle while used every frame (freed and recreated every 10 s, 2026-11-23).
+  if (render_target) render_target->last_used_frame = frame_index_;
   return render_target;
 }
 

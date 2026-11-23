@@ -43,8 +43,8 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
 - Playable from the start of the game through Majula, with saves, cutscenes, audio and the Scholar DLC data.
 - **Performance (AYN Thor, 60 fps setting, a walk through Majula):** 60 fps average, 1% low 48-56 fps, no frame over
   26 ms; GPU ~13.6 ms per frame at ~640 MHz; about 7.7 W for the whole device, CPU ~79 C and GPU ~68 C.
-- Frame-rate options: 30, 40 and 60 fps, and "Smoother 60" on 120 Hz panels. Render resolution 540p / 720p / 1080p /
-  1440p and AMD FSR 1 upscaling.
+- Frame-rate options: 30, 40 and 60 fps, and "Smoother 60" on 120 Hz panels. Render resolution 360p / 432p / 540p /
+  720p / 1080p / 1440p and AMD FSR 1 upscaling.
 - **Fill screen** for phones wider than 16:9, at every resolution: the game is drawn as wide as the screen, with more
   to see at the sides; the HUD and menus stay 16:9 in the middle and movies keep their shape.
 - **Anti-aliasing** (FXAA) on the 3D scene only, so the HUD and text stay sharp.
@@ -57,8 +57,8 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
   overlay, and **Save logs** for bug reports straight from the phone.
 - Known issues: short frame-time dips while new areas stream in; the heaviest views (the burning gate in the Forest
   of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. At 1080p, rare single frames
-  of the wrong picture on the Adreno 830 (720p has none). The Adreno 650 / 660 gameplay colours are fixed in 0.5.1 on an
-  Adreno 640, not yet confirmed on those GPUs. See the issue list.
+  of the wrong picture on the Adreno 830 (720p has none). One Adreno 660 report of GPU hangs a minute into play (#24).
+  See the issue list.
 
 ## Second screen (AYN Thor and other dual-screen handhelds)
 
@@ -92,14 +92,15 @@ loading screens dim it.
 - Your own **Dark Souls II: Scholar of the First Sin** for Xbox 360: **disc 1 and disc 2** (disc 2 carries
   Compatibility Pack 4 with the three Crown DLC areas; the game does not start without it).
 - An arm64 Android device with Vulkan, Android 8 or newer (9 or newer for the bundled Turnip driver). Snapdragon
-  (Adreno 7xx / 8xx) is the tested path, Adreno 6xx is tested on an Adreno 640 (0.5.1 and newer); Mali GPUs use the
-  system driver or PanVK and are little tested (#16); other GPUs use the system driver and are untested. About 8 GB free
+  (Adreno 7xx / 8xx) is the tested path; Adreno 6xx works from 0.5.1 (tested on an Adreno 640, players confirm the 650
+  and 660). Mali GPUs use Arm's driver (drawn correctly from 0.5.4; slower Mali GPUs need 432p for 30 fps) or PanVK;
+  other GPUs use the system driver and are untested. About 8 GB free
   for the game, plus room for one disc image (7.8 GB) while importing it.
 
 ## Install
 
-Since 0.5.0 the releases are **Beta**: playable, with rough edges on some GPUs. 1.0 comes once the game has been played
-through on more devices.
+The releases are a beta: playable, with rough edges on some GPUs. Each release is named after its main changes. 1.0
+comes once the game has been played through on more devices.
 
 1. **On the device**, download
    [`ds2-sotfs-android-arm64.apk`](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/releases/latest/download/ds2-sotfs-android-arm64.apk)
@@ -128,11 +129,12 @@ through on more devices.
 
 Snapdragon (Adreno) devices use the Turnip driver the app ships (on Adreno 8xx it renders straight to memory, as its
 author recommends). Other GPUs (Mali, Xclipse, PowerVR) use the device's own Vulkan driver, or PanVK for Mali (GPU
-driver page): little tested, and the game may not start. The **CTRL** button (top centre) has the frame rate (30 / 40 /
-60), render resolution, Fill screen, anti-aliasing, game language, depth of field, cheats, controller buttons, save
-backups, the second screen, GPU compatibility options, the performance overlay and the touch layout.
+driver page): little tested, and the game may not start. The **CTRL** button (top centre) opens the settings in sections:
+Controls (touch controls and their layout, the CTRL button, controller buttons), Frame rate and performance (30 / 40 /
+60 fps, the performance overlay), Image (render resolution, Fill screen, anti-aliasing, depth of field), Second screen,
+Game (language, save backups, cheats) and Troubleshooting (GPU driver, logs, GPU compatibility options).
 Settings marked * apply at the next start (CTRL offers to restart). If the game crashes, turn on **Debug logging** in
-CTRL, reproduce it, then use **Save logs for a bug report** in CTRL and attach the zip to an issue.
+CTRL → Troubleshooting, reproduce it, then use **Save logs for a bug report** in CTRL and attach the zip to an issue.
 
 You can also build the APK yourself (below).
 

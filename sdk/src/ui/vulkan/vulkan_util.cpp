@@ -10,6 +10,11 @@
  */
 
 #include <cstdint>
+#include <map>
+#include <mutex>
+#include <vector>
+
+#include <fmt/format.h>
 
 #include <rex/assert.h>
 #include <rex/math.h>
@@ -20,6 +25,38 @@ namespace rex {
 namespace ui {
 namespace vulkan {
 namespace util {
+
+namespace {
+std::mutex g_device_memory_mutex;
+std::map<std::string, std::pair<int64_t, int64_t>> g_device_memory;  // kind -> (count, bytes)
+}  // namespace
+
+void NoteDeviceMemory(const char* kind, int64_t bytes) {
+  std::lock_guard lock(g_device_memory_mutex);
+  auto& entry = g_device_memory[kind ? kind : "other"];
+  entry.first += bytes >= 0 ? 1 : -1;
+  entry.second += bytes;
+}
+
+std::string DeviceMemoryReport() {
+  std::vector<std::pair<std::string, std::pair<int64_t, int64_t>>> kinds;
+  int64_t total = 0;
+  {
+    std::lock_guard lock(g_device_memory_mutex);
+    for (const auto& entry : g_device_memory) {
+      if (entry.second.second <= 0) continue;
+      kinds.emplace_back(entry.first, entry.second);
+      total += entry.second.second;
+    }
+  }
+  std::sort(kinds.begin(), kinds.end(), [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+  std::string report = fmt::format("{:.0f} MB:", total / 1048576.0);
+  for (const auto& [kind, value] : kinds) {
+    report += fmt::format(" {} {:.0f} MB ({}),", kind, value.second / 1048576.0, value.first);
+  }
+  if (!kinds.empty()) report.pop_back();
+  return report;
+}
 
 void FlushMappedMemoryRange(const VulkanDevice* const vulkan_device, const VkDeviceMemory memory,
                             const uint32_t memory_type, const VkDeviceSize offset,
@@ -102,6 +139,7 @@ bool CreateDedicatedAllocationBuffer(const VulkanDevice* const vulkan_device,
     return false;
   }
 
+  NoteDeviceMemory("buffers", int64_t(memory_allocate_info.allocationSize));
   buffer_out = buffer;
   memory_out = memory;
   if (memory_type_out) {
@@ -161,6 +199,11 @@ bool CreateDedicatedAllocationImage(const VulkanDevice* const vulkan_device,
     return false;
   }
 
+  NoteDeviceMemory((create_info.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+                       ? (create_info.samples != VK_SAMPLE_COUNT_1_BIT ? "render targets msaa" : "render targets")
+                       : "other images",
+                   int64_t(memory_allocate_info.allocationSize));
   image_out = image;
   memory_out = memory;
   if (memory_type_out) {

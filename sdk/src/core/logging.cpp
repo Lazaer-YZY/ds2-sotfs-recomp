@@ -31,6 +31,8 @@
 #if REX_PLATFORM_WIN32
 #include <spdlog/sinks/msvc_sink.h>
 #else
+#include <fcntl.h>
+#include <unistd.h>
 #include <spdlog/sinks/stdout_sinks.h>
 #endif
 
@@ -117,6 +119,8 @@ namespace {
 std::vector<LogCategoryEntry> g_registry;
 spdlog::sink_ptr g_console_sink;
 spdlog::sink_ptr g_file_sink;
+// The same sink as g_file_sink, typed, for SyncLoggingToStorage (its current file name).
+std::shared_ptr<spdlog::sinks::rotating_file_sink_mt> g_rotating_sink;
 spdlog::sink_ptr g_early_sink;
 std::vector<spdlog::sink_ptr> g_extra_sinks;
 bool g_early_initialized = false;
@@ -297,6 +301,7 @@ void InitLogging(const LogConfig& config) {
     sink->set_level(spdlog::level::trace);
     sink->set_pattern(config.file_pattern);
     g_file_sink = sink;
+    g_rotating_sink = sink;
   }
 
   g_extra_sinks = config.extra_sinks;
@@ -355,6 +360,7 @@ void ShutdownLogging() {
   g_registry.clear();
   g_console_sink.reset();
   g_file_sink.reset();
+  g_rotating_sink.reset();
   g_early_sink.reset();
   g_extra_sinks.clear();
   g_initialized = false;
@@ -366,6 +372,23 @@ void FlushLogging() {
   for (auto& entry : g_registry)
     if (entry.logger)
       entry.logger->flush();
+}
+
+void SyncLoggingToStorage() {
+  FlushLogging();
+#if !REX_PLATFORM_WIN32
+  std::shared_ptr<spdlog::sinks::rotating_file_sink_mt> sink;
+  {
+    std::lock_guard lock(g_mutex);
+    sink = g_rotating_sink;
+  }
+  if (!sink) return;
+  // fdatasync commits the file's data whichever descriptor it is called on.
+  const int fd = ::open(sink->filename().c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+  if (fd < 0) return;
+  ::fdatasync(fd);
+  ::close(fd);
+#endif
 }
 
 LogCategoryId RegisterLogCategory(const char* name) {

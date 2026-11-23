@@ -81,6 +81,12 @@ void ShutdownLogging();
 void FlushLogging();
 
 /**
+ * FlushLogging, then commit the current log file to storage (fdatasync), so a sudden power-off or kernel reboot
+ * loses at most what was logged since. No-op without a log file, and on Windows.
+ */
+void SyncLoggingToStorage();
+
+/**
  * Register a new log category at runtime.
  *
  * The returned handle can be used with REXLOG_CAT_* macros and all

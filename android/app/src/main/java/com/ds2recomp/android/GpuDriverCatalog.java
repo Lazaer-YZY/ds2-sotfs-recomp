@@ -89,7 +89,9 @@ final class GpuDriverCatalog {
     /** Eden's sources and flags for Adreno, then the PanVK builds for Mali. */
     static final List<Source> SOURCES = Collections.unmodifiableList(Arrays.asList(
         new Source("Mr. Purple Turnip", "MrPurple666/purple-turnip", false, false),
-        new Source("GameHub Adreno 8xx", "crueter/GameHub-8Elite-Drivers", false, false),
+        // Qualcomm builds: listed on the GPU driver page under "Not recommended" (the owner, 2026-11-23: "show all
+        // drivers, just with a disclaimer that they aren't recommended"; #22 installed one and it was hidden).
+        new Source("GameHub Adreno 8xx (Qualcomm, not recommended)", "crueter/GameHub-8Elite-Drivers", false, false),
         new Source("KIMCHI Turnip", "K11MCH1/AdrenoToolsDrivers", true, true),
         new Source("Weab-Chan Freedreno", "Weab-chan/freedreno_turnip-CI", false, false),
         new Source("Whitebelyash Turnip", "whitebelyash/freedreno_turnip-CI", false, true),

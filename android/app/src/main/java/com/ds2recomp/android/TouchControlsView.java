@@ -125,6 +125,7 @@ final class TouchControlsView extends View {
         ctrl.reset(now);
         ctrl.setEnabled(preferences.getBoolean("ctrl_auto_hide", true), now);
         ctrl.setHideAll(preferences.getBoolean("hide_all", false), now);
+        ctrl.setHideAfterStart(preferences.getBoolean("ctrl_hide_after_start", false), now);
         lookDrag = preferences.getBoolean("look_drag", false);
         lookSpeed = bounded(preferences.getFloat("look_speed", 1f), .25f, 3f, 1f);
         setClickable(true);
@@ -201,6 +202,15 @@ final class TouchControlsView extends View {
     void revealCtrl() {
         ctrl.activity(SystemClock.uptimeMillis());
         invalidate();
+    }
+
+    /** CTRL removed by "Hide the CTRL button 30 s after the start": Android Back opens Settings instead. */
+    boolean ctrlGone() { return ctrl.gone(SystemClock.uptimeMillis()); }
+
+    /** Android Back while CTRL is gone: the Settings dialog, unless it or the layout editor is already open. */
+    void openSettingsFromBack() {
+        if (settingsDialogOpen || editing) return;
+        showSettings();
     }
 
     private boolean controlsVisible() {
@@ -490,10 +500,12 @@ final class TouchControlsView extends View {
     }
 
     private void applySettings(boolean show, int sizePercent, int opacityPercent,
-                               boolean ctrlAutoHide, boolean hideAll) {
+                               boolean ctrlAutoHide, boolean hideAll, boolean ctrlHideAfterStart) {
         clearTouches();
         ctrl.setEnabled(ctrlAutoHide, SystemClock.uptimeMillis());
         ctrl.setHideAll(hideAll, SystemClock.uptimeMillis());
+        // Turned on now: the 30 s count from here (the game started long ago).
+        ctrl.setHideAfterStart(ctrlHideAfterStart, SystemClock.uptimeMillis());
         activity.updateSystemBarsBehavior();
         float size = sizePercent / 100f;
         if (!customLayout) layout = TouchControlLayout.defaults(
@@ -504,7 +516,8 @@ final class TouchControlsView extends View {
         preferences.edit().putFloat("size", layout.size)
             .putFloat("opacity", layout.opacity)
             .putBoolean("ctrl_auto_hide", ctrlAutoHide)
-            .putBoolean("hide_all", hideAll).apply();
+            .putBoolean("hide_all", hideAll)
+            .putBoolean("ctrl_hide_after_start", ctrlHideAfterStart).apply();
         setControlsEnabled(show);
     }
 
@@ -534,15 +547,105 @@ final class TouchControlsView extends View {
         return first;
     }
 
-    /** A bold section header of the settings dialog. */
+    /** A bold label over a group of choices inside a section of the settings dialog. */
     private void header(LinearLayout content, String text) {
         TextView view = new TextView(content.getContext());
         view.setText(text);
         view.setTypeface(Typeface.DEFAULT_BOLD);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         float density = getResources().getDisplayMetrics().density;
-        view.setPadding(0, Math.round(16f * density), 0, Math.round(2f * density));
+        view.setPadding(0, Math.round(10f * density), 0, Math.round(2f * density));
         content.addView(view);
+    }
+
+    /**
+     * A collapsible section of the settings dialog: a header row (closed: a right triangle, open: a down one) and the
+     * body its options go into, closed at first. Opening one closes the others and scrolls its header to the top.
+     */
+    private LinearLayout section(LinearLayout content, ScrollView scroll, java.util.List<TextView> headers,
+                                 java.util.List<LinearLayout> bodies, String title) {
+        Context context = content.getContext();
+        float density = getResources().getDisplayMetrics().density;
+        View divider = new View(context);
+        divider.setBackgroundColor(Color.argb(60, 128, 128, 128));
+        content.addView(divider, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                                                               Math.max(1, Math.round(density))));
+        TextView header = new TextView(context);
+        header.setTypeface(Typeface.DEFAULT_BOLD);
+        header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        header.setPadding(0, Math.round(14f * density), 0, Math.round(14f * density));
+        TypedValue ripple = new TypedValue();
+        if (context.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)) {
+            header.setBackgroundResource(ripple.resourceId);
+        }
+        header.setTag(title);
+        header.setText("▸  " + title);
+        LinearLayout body = new LinearLayout(context);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(Math.round(8f * density), 0, 0, Math.round(10f * density));
+        body.setVisibility(GONE);
+        content.addView(header);
+        content.addView(body);
+        headers.add(header);
+        bodies.add(body);
+        header.setOnClickListener(v -> {
+            boolean open = body.getVisibility() != VISIBLE;
+            for (int i = 0; i < bodies.size(); ++i) {
+                bodies.get(i).setVisibility(GONE);
+                headers.get(i).setText("▸  " + headers.get(i).getTag());
+            }
+            if (!open) return;
+            body.setVisibility(VISIBLE);
+            header.setText("▾  " + title);
+            // Once the closed sections above have shrunk: the opened header at the top of the dialog.
+            header.getViewTreeObserver().addOnGlobalLayoutListener(
+                new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+                    @Override public void onGlobalLayout() {
+                        header.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                        scroll.smoothScrollTo(0, header.getTop());
+                    }
+                });
+        });
+        return body;
+    }
+
+    /** A dropdown of {@code texts} added to {@code content}, {@code selected} chosen. */
+    private Spinner spinner(LinearLayout content, int selected, String... texts) {
+        Spinner spinner = new Spinner(content.getContext());
+        ArrayAdapter<String> adapter =
+            new ArrayAdapter<>(content.getContext(), android.R.layout.simple_spinner_item, texts);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setSelection(Math.max(0, Math.min(selected, texts.length - 1)));
+        content.addView(spinner);
+        return spinner;
+    }
+
+    /** A part of a section that opens and closes on its own (closed at first); returns its body. */
+    private LinearLayout subsection(LinearLayout content, String title) {
+        Context context = content.getContext();
+        float density = getResources().getDisplayMetrics().density;
+        TextView header = new TextView(context);
+        header.setTypeface(Typeface.DEFAULT_BOLD);
+        header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        header.setPadding(0, Math.round(12f * density), 0, Math.round(12f * density));
+        TypedValue ripple = new TypedValue();
+        if (context.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)) {
+            header.setBackgroundResource(ripple.resourceId);
+        }
+        header.setText("▸  " + title);
+        LinearLayout body = new LinearLayout(context);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(Math.round(8f * density), 0, 0, 0);
+        body.setVisibility(GONE);
+        content.addView(header);
+        content.addView(body);
+        header.setOnClickListener(v -> {
+            boolean open = body.getVisibility() != VISIBLE;
+            body.setVisibility(open ? VISIBLE : GONE);
+            header.setText((open ? "▾  " : "▸  ") + title);
+        });
+        return body;
     }
 
     /** A short grey line under an option, indented to the option's text. */
@@ -588,21 +691,51 @@ final class TouchControlsView extends View {
         content.setOrientation(LinearLayout.VERTICAL);
         int padding = Math.round(20f * getResources().getDisplayMetrics().density);
         content.setPadding(padding, 0, padding, 0);
+        // Collapsible sections (the owner, 2026-11-23: "sections that start collapsed and can be expanded (but
+        // expanding one collapses the others)"): all closed when the dialog opens, one open at a time.
+        ScrollView scroll = new ScrollView(activity);
+        java.util.List<TextView> sectionHeaders = new java.util.ArrayList<>();
+        java.util.List<LinearLayout> sectionBodies = new java.util.ArrayList<>();
+        TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
+        nextStart.setPadding(0, Math.round(4f * getResources().getDisplayMetrics().density), 0,
+                             Math.round(8f * getResources().getDisplayMetrics().density));
+        // Six sections (the owner, 2026-11-23: "Do all"): Controls, Frame rate and performance, Image, Second screen,
+        // Game, Troubleshooting (with a closed Advanced part for the CPU and GPU compatibility switches).
+        LinearLayout touchSec = section(content, scroll, sectionHeaders, sectionBodies,
+            strings.getString(R.string.touch_section_controls));
+        LinearLayout rateSec = section(content, scroll, sectionHeaders, sectionBodies,
+            strings.getString(R.string.touch_section_performance));
+        LinearLayout imageSec = section(content, scroll, sectionHeaders, sectionBodies,
+            strings.getString(R.string.touch_section_image));
+        LinearLayout screenSec = !CompanionScreen.available(activity) ? null : section(content, scroll,
+            sectionHeaders, sectionBodies, strings.getString(R.string.touch_section_second_screen));
+        LinearLayout gameSec = section(content, scroll, sectionHeaders, sectionBodies,
+            strings.getString(R.string.touch_section_game));
+        LinearLayout toolsSec = section(content, scroll, sectionHeaders, sectionBodies,
+            strings.getString(R.string.touch_section_troubleshooting));
+        SharedPreferences render = RuntimeActivity.renderPrefs(activity);
 
-        header(content, strings.getString(R.string.touch_section_controls));
+        // --- Controls: the on-screen controls, the CTRL button, a physical controller's buttons.
+        header(touchSec, strings.getString(R.string.touch_group_on_screen));
         CheckBox toggle = new CheckBox(activity);
         toggle.setText(strings.getString(R.string.touch_show_controls));
-        toggle.setChecked(visibility.visible());
+        // The old "Hide all touch controls" also hid the gamepad: shown unticked so Apply keeps it hidden.
+        toggle.setChecked(visibility.visible() && !ctrl.hideAll());
         settingsChoiceEdited = false;
         toggle.setOnCheckedChangeListener((button, checked) -> {
             if (!syncingSettingsToggle) settingsChoiceEdited = true;
         });
-        content.addView(toggle);
-        TextView hint = hint(content, strings.getString(R.string.touch_controller_hint));
+        touchSec.addView(toggle);
+        TextView hint = hint(touchSec, strings.getString(R.string.touch_controller_hint));
         hint.setVisibility(visibility.controllerPresent() ? VISIBLE : GONE);
         settingsToggle = toggle;
         controllerHint = hint;
-
+        // The on-screen layout editor, here rather than as a dialog button so it is clear it moves the touch controls
+        // (the owner, 2026-11-23).
+        Button editLayoutButton = new Button(activity);
+        editLayoutButton.setText(strings.getString(R.string.touch_edit_layout));
+        editLayoutButton.setAllCaps(false);
+        touchSec.addView(editLayoutButton);
         TextView sizeLabel = new TextView(activity);
         SeekBar size = new SeekBar(activity);
         size.setMax(80);
@@ -610,9 +743,8 @@ final class TouchControlsView extends View {
         sizeLabel.setText(strings.getString(R.string.touch_control_size, size.getProgress() + 60));
         size.setOnSeekBarChangeListener(seekListener(value ->
             sizeLabel.setText(strings.getString(R.string.touch_control_size, value + 60))));
-        content.addView(sizeLabel);
-        content.addView(size);
-
+        touchSec.addView(sizeLabel);
+        touchSec.addView(size);
         TextView opacityLabel = new TextView(activity);
         SeekBar opacity = new SeekBar(activity);
         opacity.setMax(75);
@@ -620,18 +752,10 @@ final class TouchControlsView extends View {
         opacityLabel.setText(strings.getString(R.string.touch_opacity, opacity.getProgress() + 25));
         opacity.setOnSeekBarChangeListener(seekListener(value ->
             opacityLabel.setText(strings.getString(R.string.touch_opacity, value + 25))));
-        content.addView(opacityLabel);
-        content.addView(opacity);
-
-        CheckBox ctrlAutoHide = new CheckBox(activity);
-        ctrlAutoHide.setText(strings.getString(R.string.touch_ctrl_auto_hide));
-        ctrlAutoHide.setChecked(ctrl.enabled());
-        content.addView(ctrlAutoHide);
-
-        CheckBox hideAll = option(content, strings.getString(R.string.touch_hide_all),
-            strings.getString(R.string.touch_hide_all_help), ctrl.hideAll());
+        touchSec.addView(opacityLabel);
+        touchSec.addView(opacity);
         // Drag to look (off by default; the right stick stays): applied at once.
-        CheckBox lookDragBox = option(content, strings.getString(R.string.touch_look_drag),
+        CheckBox lookDragBox = option(touchSec, strings.getString(R.string.touch_look_drag),
             strings.getString(R.string.touch_look_drag_help), lookDrag);
         TextView lookSpeedLabel = new TextView(activity);
         SeekBar lookSpeedBar = new SeekBar(activity);
@@ -640,120 +764,132 @@ final class TouchControlsView extends View {
         lookSpeedLabel.setText(strings.getString(R.string.touch_look_speed, lookSpeedBar.getProgress() + 25));
         lookSpeedBar.setOnSeekBarChangeListener(seekListener(value ->
             lookSpeedLabel.setText(strings.getString(R.string.touch_look_speed, value + 25))));
-        content.addView(lookSpeedLabel);
-        content.addView(lookSpeedBar);
+        touchSec.addView(lookSpeedLabel);
+        touchSec.addView(lookSpeedBar);
+        // The CTRL button, one choice (TouchCtrlHandle): always shown, auto-hidden to a tab (the default), or removed
+        // 30 s after the start with Android Back opening Settings (RuntimeActivity). The old "Hide all touch
+        // controls" shows as removed.
+        RadioButton ctrlChoice = radio(touchSec, strings.getString(R.string.touch_ctrl_button),
+            ctrl.hideAfterStart() || ctrl.hideAll() ? 2 : ctrl.enabled() ? 1 : 0,
+            strings.getString(R.string.touch_ctrl_always), strings.getString(R.string.touch_ctrl_tab),
+            strings.getString(R.string.touch_ctrl_removed));
+        header(touchSec, strings.getString(R.string.touch_section_pad));
         // Physical controller buttons (issue #9): PadRemap's page, applied at once.
-        header(content, strings.getString(R.string.touch_section_pad));
         Button padButton = new Button(activity);
         padButton.setText(strings.getString(R.string.touch_pad_remap));
         padButton.setAllCaps(false);
-        content.addView(padButton);
+        touchSec.addView(padButton);
         Runnable applyLook = () -> {
             lookDrag = lookDragBox.isChecked();
             lookSpeed = (lookSpeedBar.getProgress() + 25) / 100f;
             preferences.edit().putBoolean("look_drag", lookDrag).putFloat("look_speed", lookSpeed).apply();
         };
-        SharedPreferences render = RuntimeActivity.renderPrefs(activity);
-        // Frame rate: 30 / 40 / 60, and the 120 Hz panel for a smoother 60 (RuntimeActivity.applyFrameRate).
+
+        // --- Frame rate and performance: 30 / 40 / 60 / 60 on the 120 Hz panel in one list
+        // (RuntimeActivity.applyFrameRate), then the performance overlay.
         String fps = render.getString("fps", RuntimeActivity.DEFAULT_FPS);
-        RadioButton fpsChoice = radio(content, strings.getString(R.string.touch_frame_rate),
+        RadioButton fpsChoice = radio(rateSec, strings.getString(R.string.touch_frame_rate),
+            "30".equals(fps) ? 0 : "40".equals(fps) ? 1 : render.getBoolean("panel120", false) ? 3 : 2,
             strings.getString(R.string.touch_fps_30), strings.getString(R.string.touch_fps_40),
-            strings.getString(R.string.touch_fps_60), "30".equals(fps) ? 0 : "40".equals(fps) ? 1 : 2);
-        CheckBox panel120 = option(content, strings.getString(R.string.touch_panel120),
-            strings.getString(R.string.touch_panel120_help), render.getBoolean("panel120", false));
-        // Game language (from the next start, RuntimeActivity.addLanguageArguments): the device's language or one
-        // of the game's, each written in its own words.
-        header(content, strings.getString(R.string.touch_section_language));
-        String[] languageNames = RuntimeActivity.LANGUAGE_NAMES.clone();
-        languageNames[0] = strings.getString(R.string.touch_language_device,
-            RuntimeActivity.languageName(RuntimeActivity.deviceLanguageId()));
-        Spinner language = new Spinner(activity);
-        ArrayAdapter<String> languageAdapter =
-            new ArrayAdapter<>(activity, android.R.layout.simple_spinner_item, languageNames);
-        languageAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        language.setAdapter(languageAdapter);
-        language.setSelection(Math.max(0, java.util.Arrays.asList(RuntimeActivity.LANGUAGE_IDS)
-            .indexOf(render.getString("language", RuntimeActivity.DEFAULT_LANGUAGE))));
-        content.addView(language);
-        // Display (from the next start, RuntimeActivity.addDisplayArguments): render resolution, FSR upscaling.
+            strings.getString(R.string.touch_fps_60), strings.getString(R.string.touch_fps_60_smooth));
+        hint(rateSec, strings.getString(R.string.touch_fps_60_smooth_help));
+        // Performance overlay (fps, 1% low, frame time graph of the game's own frames): applied at once, with a
+        // warning (the owner, 2026-11-21): it is an Android view over the game, which some phones' display hardware
+        // hands to the GPU (issue #2: lost GPU device on an Adreno 825). DECISIONS.md, 2026-11-21 morning.
+        CheckBox perfOverlay = option(rateSec, strings.getString(R.string.touch_perf_overlay), null,
+            render.getBoolean("overlay", false));
+        TextView overlayWarning = hint(rateSec, strings.getString(R.string.touch_perf_overlay_help));
+        overlayWarning.setTextColor(Color.rgb(255, 196, 80));
+        overlayWarning.setAlpha(1f);
+
+        // --- Image (from the next start, RuntimeActivity.addDisplayArguments; anti-aliasing and depth of field at once).
         String renderHeight = render.getString("render_height", RuntimeActivity.DEFAULT_RENDER_HEIGHT);
-        header(content, strings.getString(R.string.touch_section_image));
-        TextView resolutionLabel = new TextView(activity);
-        resolutionLabel.setText(strings.getString(R.string.touch_resolution));
-        content.addView(resolutionLabel);
-        // Fill screen (RuntimeActivity.wideWidth), first in the resolution section and off by default (the owner,
-        // 2026-11-21): only offered on displays wider than 16:9.
-        CheckBox wide = option(content, strings.getString(R.string.touch_wide),
-            strings.getString(R.string.touch_wide_help), render.getBoolean("wide", false));
-        if (activity.displayAspect() <= 16f / 9f + 0.01f) {
-            wide.setEnabled(false);
-            wide.setText(strings.getString(R.string.touch_wide) + " " + strings.getString(R.string.touch_wide_na));
-        }
-        java.util.List<String> heights = java.util.Arrays.asList(RuntimeActivity.RENDER_HEIGHTS);
-        RadioButton resolutionChoice = radio(content, null, Math.max(0, heights.indexOf(renderHeight)),
+        header(imageSec, strings.getString(R.string.touch_resolution));
+        Spinner resolutionChoice = spinner(imageSec,
+            Math.max(0, java.util.Arrays.asList(RuntimeActivity.RENDER_HEIGHTS).indexOf(renderHeight)),
             strings.getString(R.string.touch_resolution_360), strings.getString(R.string.touch_resolution_432),
             strings.getString(R.string.touch_resolution_540), strings.getString(R.string.touch_resolution_720),
             strings.getString(R.string.touch_resolution_1080), strings.getString(R.string.touch_resolution_1440));
-        // Fill screen follows the resolution (the owner, 2026-11-21: "if someone select unsupported resolution it should
-        // untick/grey automatically"): greyed out and unticked where RuntimeActivity.wideSupported says no (since
-        // 2026-11-22 every resolution is supported, so only a 16:9 display greys it out).
+        // Fill screen (RuntimeActivity.wideWidth), off by default (the owner, 2026-11-21), under the resolution it
+        // depends on: greyed out and unticked where RuntimeActivity.wideSupported says no (the owner, 2026-11-21:
+        // "if someone select unsupported resolution it should untick/grey automatically"), and on 16:9 displays.
+        CheckBox wide = option(imageSec, strings.getString(R.string.touch_wide),
+            strings.getString(R.string.touch_wide_help), render.getBoolean("wide", false));
         final boolean wideDisplay = activity.displayAspect() > 16f / 9f + 0.01f;
+        if (!wideDisplay) {
+            wide.setText(strings.getString(R.string.touch_wide) + " " + strings.getString(R.string.touch_wide_na));
+        }
         Runnable syncWide = () -> {
-            boolean supported = wideDisplay
-                && RuntimeActivity.wideSupported(RuntimeActivity.RENDER_HEIGHTS[radioChoice(resolutionChoice)]);
+            boolean supported = wideDisplay && RuntimeActivity.wideSupported(
+                RuntimeActivity.RENDER_HEIGHTS[resolutionChoice.getSelectedItemPosition()]);
             if (!supported) wide.setChecked(false);
             wide.setEnabled(supported);
         };
-        ((RadioGroup) resolutionChoice.getParent()).setOnCheckedChangeListener((group, id) -> syncWide.run());
+        resolutionChoice.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                syncWide.run();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
         syncWide.run();
-        CheckBox fsr = option(content, strings.getString(R.string.touch_fsr),
+        CheckBox fsr = option(imageSec, strings.getString(R.string.touch_fsr),
             strings.getString(R.string.touch_fsr_help), render.getBoolean("fsr", false));
         // Anisotropic filtering (RuntimeActivity.addDisplayArguments), on by default.
-        CheckBox aniso = option(content, strings.getString(R.string.touch_aniso),
+        CheckBox aniso = option(imageSec, strings.getString(R.string.touch_aniso),
             strings.getString(R.string.touch_aniso_help), render.getBoolean("aniso", true));
         // Anti-aliasing (RuntimeActivity.aaMode): FXAA on the 3D scene before the game's 2D layer (vulkan_scene_fxaa),
         // applied at once; the HUD's and menus' text stays sharp. Hidden while RuntimeActivity.SHOW_AA is false.
-        RadioButton aaChoice = null;
+        final String[] aaModes = { "off", "fxaa", "fxaa_extreme" };
+        Spinner aaChoice = null;
         if (RuntimeActivity.SHOW_AA) {
-            TextView aaLabel = new TextView(activity);
-            aaLabel.setText(strings.getString(R.string.touch_aa));
-            content.addView(aaLabel);
+            header(imageSec, strings.getString(R.string.touch_aa));
             String aa = render.getString("aa", "off");
-            aaChoice = radio(content, null, strings.getString(R.string.touch_aa_off),
-                strings.getString(R.string.touch_aa_fxaa), strings.getString(R.string.touch_aa_fxaa_strong),
-                "fxaa".equals(aa) ? 1 : "fxaa_extreme".equals(aa) ? 2 : 0);
+            aaChoice = spinner(imageSec, "fxaa".equals(aa) ? 1 : "fxaa_extreme".equals(aa) ? 2 : 0,
+                strings.getString(R.string.touch_aa_off), strings.getString(R.string.touch_aa_fxaa),
+                strings.getString(R.string.touch_aa_fxaa_strong));
         }
-        final RadioButton aaRadio = aaChoice;
+        final Spinner aaSpinner = aaChoice;
         // The game's depth of field (off by default: it blurs the character on this renderer and costs frames).
-        CheckBox depthOfField = option(content, strings.getString(R.string.touch_depth_of_field),
+        CheckBox depthOfField = option(imageSec, strings.getString(R.string.touch_depth_of_field),
             strings.getString(R.string.touch_depth_of_field_help), render.getBoolean("dof", false));
-        // Second screen (dual-screen devices only, CompanionScreen): the game's HUD on the bottom screen, applied at once.
+
+        // --- Second screen (dual-screen devices only, CompanionScreen): the game's HUD on the bottom screen, at once.
         CheckBox companionBox = null, companionHideBox = null;
-        if (CompanionScreen.available(activity)) {
-            header(content, strings.getString(R.string.touch_section_second_screen));
-            companionBox = option(content, strings.getString(R.string.touch_companion),
+        if (screenSec != null) {
+            companionBox = option(screenSec, strings.getString(R.string.touch_companion),
                 strings.getString(R.string.touch_companion_help), CompanionScreen.enabled(render));
-            companionHideBox = option(content, strings.getString(R.string.touch_companion_hide),
+            companionHideBox = option(screenSec, strings.getString(R.string.touch_companion_hide),
                 strings.getString(R.string.touch_companion_hide_help), CompanionScreen.hideOnMain(render));
             final CheckBox hideBox = companionHideBox;
             companionBox.setOnCheckedChangeListener((b, checked) -> hideBox.setEnabled(checked));
             companionHideBox.setEnabled(companionBox.isChecked());
         }
         final CheckBox companion = companionBox, companionHide = companionHideBox;
-        // Prime core (on by default since 2026-11-20, the owner: "smoother, even with a bit more prime core"): the
-        // game's main thread, the GPU command thread and the draw thread may also run on the fastest core. Applied at
-        // once.
-        header(content, strings.getString(R.string.touch_section_performance));
-        CheckBox primeCore = option(content, strings.getString(R.string.touch_prime_core),
-            strings.getString(R.string.touch_prime_core_help), render.getBoolean("prime", RuntimeActivity.DEFAULT_PRIME));
 
+        // --- Game: language (from the next start, RuntimeActivity.addLanguageArguments: the device's language or one
+        // of the game's, each written in its own words), the game folder, save backups, cheats.
+        header(gameSec, strings.getString(R.string.touch_section_language));
+        String[] languageNames = RuntimeActivity.LANGUAGE_NAMES.clone();
+        languageNames[0] = strings.getString(R.string.touch_language_device,
+            RuntimeActivity.languageName(RuntimeActivity.deviceLanguageId()));
+        Spinner language = spinner(gameSec, Math.max(0, java.util.Arrays.asList(RuntimeActivity.LANGUAGE_IDS)
+            .indexOf(render.getString("language", RuntimeActivity.DEFAULT_LANGUAGE))), languageNames);
+        Button folderButton = new Button(activity);
+        folderButton.setText(strings.getString(R.string.touch_game_folder));
+        folderButton.setAllCaps(false);
+        gameSec.addView(folderButton);
+        // Copies of the save in a folder the player picks, outside the app (SaveBackups; off until a folder is chosen).
+        Button backupsButton = new Button(activity);
+        backupsButton.setText(strings.getString(R.string.touch_save_backups));
+        backupsButton.setAllCaps(false);
+        gameSec.addView(backupsButton);
         // Cheats (the owner, 2026-11-21; ds2_cheats.cpp): applied at once, remembered for the next start.
-        header(content, strings.getString(R.string.touch_section_cheats));
-        CheckBox cheatHp = option(content, strings.getString(R.string.touch_cheat_hp), null,
+        header(gameSec, strings.getString(R.string.touch_section_cheats));
+        CheckBox cheatHp = option(gameSec, strings.getString(R.string.touch_cheat_hp), null,
             render.getBoolean("cheat_hp", false));
-        CheckBox cheatStamina = option(content, strings.getString(R.string.touch_cheat_stamina), null,
+        CheckBox cheatStamina = option(gameSec, strings.getString(R.string.touch_cheat_stamina), null,
             render.getBoolean("cheat_stamina", false));
-        CheckBox cheatWear = option(content, strings.getString(R.string.touch_cheat_wear), null,
+        CheckBox cheatWear = option(gameSec, strings.getString(R.string.touch_cheat_wear), null,
             render.getBoolean("cheat_wear", false));
         Button addSouls = new Button(activity);
         addSouls.setText(strings.getString(R.string.touch_cheat_add_souls));
@@ -763,14 +899,9 @@ final class TouchControlsView extends View {
             android.widget.Toast.makeText(activity, strings.getString(R.string.touch_cheat_souls_added),
                 android.widget.Toast.LENGTH_SHORT).show();
         });
-        content.addView(addSouls);
+        gameSec.addView(addSouls);
 
-        // Troubleshooting. Diagnostics (the owner, 2026-11-11: off for regular play): read at start.
-        header(content, strings.getString(R.string.touch_section_troubleshooting));
-        CheckBox debugLog = option(content, strings.getString(R.string.touch_debug_log),
-            strings.getString(R.string.touch_debug_log_help),
-            render.getBoolean("debug_log", RuntimeActivity.DEFAULT_DEBUG_LOG));
-
+        // --- Troubleshooting: the GPU driver page, debug logging, the log zip, the frame capture, then Advanced.
         // Qualcomm and Mali devices: open the GPU driver page (download / switch Turnip or PanVK).
         Button driverButton = null;
         if (GpuDriverStore.supported()) {
@@ -779,94 +910,85 @@ final class TouchControlsView extends View {
             driverButton.setText(strings.getString(R.string.touch_gpu_driver,
                 driver != null ? driver.metadata.name : strings.getString(R.string.touch_gpu_driver_system)));
             driverButton.setAllCaps(false);
-            content.addView(driverButton);
+            toolsSec.addView(driverButton);
         }
-        Button folderButton = new Button(activity);
-        folderButton.setText(strings.getString(R.string.touch_game_folder));
-        folderButton.setAllCaps(false);
-        content.addView(folderButton);
+        // Diagnostics (the owner, 2026-11-11: off for regular play): read at start.
+        CheckBox debugLog = option(toolsSec, strings.getString(R.string.touch_debug_log),
+            strings.getString(R.string.touch_debug_log_help),
+            render.getBoolean("debug_log", RuntimeActivity.DEFAULT_DEBUG_LOG));
         // A zip of the game's logs through the system file picker, so a player can attach it to a bug report from the
         // phone (Android 11+ hides Android/data from file managers; LR's public #4, the owner's S25).
         Button logsButton = new Button(activity);
         logsButton.setText(strings.getString(R.string.touch_save_logs));
         logsButton.setAllCaps(false);
-        content.addView(logsButton);
-        // Copies of the save in a folder the player picks, outside the app (SaveBackups; off until a folder is chosen).
-        Button backupsButton = new Button(activity);
-        backupsButton.setText(strings.getString(R.string.touch_save_backups));
-        backupsButton.setAllCaps(false);
-        content.addView(backupsButton);
-        // GPU compatibility (testing): renderer paths for GPUs that draw the game wrongly (issues #8, #11).
-        header(content, strings.getString(R.string.touch_section_compat));
-        hint(content, strings.getString(R.string.touch_compat_help)).setPadding(0, 0, 0,
-            Math.round(4f * getResources().getDisplayMetrics().density));
-        CheckBox compatShortcuts = option(content, strings.getString(R.string.touch_compat_shortcuts),
-            strings.getString(R.string.touch_compat_shortcuts_help), render.getBoolean("compat_shortcuts", false));
-        // The 1080p flash bisect switches (2026-11-22): development builds only (RuntimeActivity ignores them in
-        // release builds too).
-        boolean bisect = BuildConfig.DEBUG;
-        CheckBox compatShortcutsTransfers = !bisect ? null : option(content,
-            strings.getString(R.string.touch_compat_shortcuts_transfers),
-            strings.getString(R.string.touch_compat_shortcuts_part_help),
-            render.getBoolean("compat_shortcuts_transfers", false));
-        CheckBox compatShortcutsResolves = !bisect ? null : option(content,
-            strings.getString(R.string.touch_compat_shortcuts_resolves),
-            strings.getString(R.string.touch_compat_shortcuts_part_help),
-            render.getBoolean("compat_shortcuts_resolves", false));
-        CheckBox compatFeedOff = !bisect ? null : option(content, strings.getString(R.string.touch_compat_feed_off),
-            strings.getString(R.string.touch_compat_resolve_part_help), render.getBoolean("compat_feed_off", false));
-        CheckBox compatLazyOff = !bisect ? null : option(content, strings.getString(R.string.touch_compat_lazy_off),
-            strings.getString(R.string.touch_compat_resolve_part_help), render.getBoolean("compat_lazy_off", false));
-        CheckBox compat7e3Off = !bisect ? null : option(content, strings.getString(R.string.touch_compat_7e3_resolve_off),
-            strings.getString(R.string.touch_compat_resolve_part_help),
-            render.getBoolean("compat_7e3_resolve_off", false));
-        CheckBox compatGpl = option(content, strings.getString(R.string.touch_compat_gpl),
-            strings.getString(R.string.touch_compat_gpl_help), render.getBoolean("compat_gpl", false));
-        CheckBox compatDynrender = option(content, strings.getString(R.string.touch_compat_dynrender),
-            strings.getString(R.string.touch_compat_dynrender_help), render.getBoolean("compat_dynrender", false));
-        TextView tuLabel = new TextView(activity);
-        tuLabel.setText(strings.getString(R.string.touch_compat_tu_mode));
-        content.addView(tuLabel);
-        final String[] tuModes = { "", "sysmem", "gmem" };
-        int tuMode = java.util.Arrays.asList(tuModes).indexOf(render.getString("compat_tu_mode", ""));
-        RadioButton compatTuMode = radio(content, null, Math.max(tuMode, 0),
-            strings.getString(R.string.touch_compat_tu_auto), strings.getString(R.string.touch_compat_tu_sysmem),
-            strings.getString(R.string.touch_compat_tu_gmem));
-        CheckBox compatNoUbwc = option(content, strings.getString(R.string.touch_compat_tu_noubwc), null,
-            render.getBoolean("compat_tu_noubwc", false));
-        CheckBox compatTuReserve = option(content, strings.getString(R.string.touch_compat_tu_reserve), null,
-            render.getBoolean("compat_tu_reserve", false));
-        CheckBox compatShader = option(content, strings.getString(R.string.touch_compat_shader),
-            strings.getString(R.string.touch_compat_shader_help), render.getBoolean("compat_shader", false));
-        CheckBox compatDecodeBc = option(content, strings.getString(R.string.touch_compat_decode_bc),
-            strings.getString(R.string.touch_compat_decode_bc_help), render.getBoolean("compat_decode_bc", false));
-        CheckBox compatHdr = option(content, strings.getString(R.string.touch_compat_hdr),
-            strings.getString(R.string.touch_compat_hdr_help), render.getBoolean("compat_hdr_r11g11b10", false));
-        TextView nextStart = hint(content, strings.getString(R.string.touch_next_start_note));
-        nextStart.setPadding(0, Math.round(8f * getResources().getDisplayMetrics().density), 0,
-                             Math.round(8f * getResources().getDisplayMetrics().density));
+        toolsSec.addView(logsButton);
         // One gameplay frame's render targets, resolves and render-to-texture textures into logs/frame_capture,
         // which Save logs zips (Adreno 650 / 660 gameplay colours, issues #8 / #18). Applies at once, after a delay
         // so the player is back in the game.
         Button captureButton = new Button(activity);
         captureButton.setText(strings.getString(R.string.touch_frame_capture));
         captureButton.setAllCaps(false);
-        content.addView(captureButton);
-        hint(content, strings.getString(R.string.touch_frame_capture_help));
+        toolsSec.addView(captureButton);
+        hint(toolsSec, strings.getString(R.string.touch_frame_capture_help));
+        // Advanced, closed until tapped: the CPU core switch and the GPU compatibility (testing) switches.
+        LinearLayout advanced = subsection(toolsSec, strings.getString(R.string.touch_advanced));
+        // Prime core (on by default since 2026-11-20, the owner: "smoother, even with a bit more prime core"): the
+        // game's main thread, the GPU command thread and the draw thread may also run on the fastest core. At once.
+        CheckBox primeCore = option(advanced, strings.getString(R.string.touch_prime_core),
+            strings.getString(R.string.touch_prime_core_help), render.getBoolean("prime", RuntimeActivity.DEFAULT_PRIME));
+        // GPU compatibility (testing): renderer paths for GPUs that draw the game wrongly (issues #8, #11).
+        header(advanced, strings.getString(R.string.touch_section_compat));
+        hint(advanced, strings.getString(R.string.touch_compat_help)).setPadding(0, 0, 0,
+            Math.round(4f * getResources().getDisplayMetrics().density));
+        CheckBox compatShortcuts = option(advanced, strings.getString(R.string.touch_compat_shortcuts),
+            strings.getString(R.string.touch_compat_shortcuts_help), render.getBoolean("compat_shortcuts", false));
+        // The 1080p flash bisect switches (2026-11-22): development builds only (RuntimeActivity ignores them in
+        // release builds too).
+        boolean bisect = BuildConfig.DEBUG;
+        CheckBox compatShortcutsTransfers = !bisect ? null : option(advanced,
+            strings.getString(R.string.touch_compat_shortcuts_transfers),
+            strings.getString(R.string.touch_compat_shortcuts_part_help),
+            render.getBoolean("compat_shortcuts_transfers", false));
+        CheckBox compatShortcutsResolves = !bisect ? null : option(advanced,
+            strings.getString(R.string.touch_compat_shortcuts_resolves),
+            strings.getString(R.string.touch_compat_shortcuts_part_help),
+            render.getBoolean("compat_shortcuts_resolves", false));
+        CheckBox compatFeedOff = !bisect ? null : option(advanced, strings.getString(R.string.touch_compat_feed_off),
+            strings.getString(R.string.touch_compat_resolve_part_help), render.getBoolean("compat_feed_off", false));
+        CheckBox compatLazyOff = !bisect ? null : option(advanced, strings.getString(R.string.touch_compat_lazy_off),
+            strings.getString(R.string.touch_compat_resolve_part_help), render.getBoolean("compat_lazy_off", false));
+        CheckBox compat7e3Off = !bisect ? null : option(advanced, strings.getString(R.string.touch_compat_7e3_resolve_off),
+            strings.getString(R.string.touch_compat_resolve_part_help),
+            render.getBoolean("compat_7e3_resolve_off", false));
+        CheckBox compatGpl = option(advanced, strings.getString(R.string.touch_compat_gpl),
+            strings.getString(R.string.touch_compat_gpl_help), render.getBoolean("compat_gpl", false));
+        CheckBox compatDynrender = option(advanced, strings.getString(R.string.touch_compat_dynrender),
+            strings.getString(R.string.touch_compat_dynrender_help), render.getBoolean("compat_dynrender", false));
+        // Turnip's own switches only where Turnip runs (Adreno: GpuDriverStore.selectedDriver is always a Turnip);
+        // elsewhere the stored values stay as they are.
+        boolean turnip = GpuDriverStore.vendor() == GpuDriverStore.Vendor.ADRENO;
+        final String[] tuModes = { "", "sysmem", "gmem" };
+        RadioButton compatTuMode = null;
+        CheckBox compatNoUbwc = null, compatTuReserve = null;
+        if (turnip) {
+            int tuMode = java.util.Arrays.asList(tuModes).indexOf(render.getString("compat_tu_mode", ""));
+            compatTuMode = radio(advanced, strings.getString(R.string.touch_compat_tu_mode), Math.max(tuMode, 0),
+                strings.getString(R.string.touch_compat_tu_auto), strings.getString(R.string.touch_compat_tu_sysmem),
+                strings.getString(R.string.touch_compat_tu_gmem));
+            compatNoUbwc = option(advanced, strings.getString(R.string.touch_compat_tu_noubwc), null,
+                render.getBoolean("compat_tu_noubwc", false));
+            compatTuReserve = option(advanced, strings.getString(R.string.touch_compat_tu_reserve), null,
+                render.getBoolean("compat_tu_reserve", false));
+        }
+        final RadioButton compatTuModeChoice = compatTuMode;
+        final CheckBox compatNoUbwcBox = compatNoUbwc, compatTuReserveBox = compatTuReserve;
+        CheckBox compatShader = option(advanced, strings.getString(R.string.touch_compat_shader),
+            strings.getString(R.string.touch_compat_shader_help), render.getBoolean("compat_shader", false));
+        CheckBox compatDecodeBc = option(advanced, strings.getString(R.string.touch_compat_decode_bc),
+            strings.getString(R.string.touch_compat_decode_bc_help), render.getBoolean("compat_decode_bc", false));
+        CheckBox compatHdr = option(advanced, strings.getString(R.string.touch_compat_hdr),
+            strings.getString(R.string.touch_compat_hdr_help), render.getBoolean("compat_hdr_r11g11b10", false));
 
-        // Performance overlay (fps, 1% low, frame time graph of the game's own frames): applied at once. Last in the
-        // dialog with a warning (the owner, 2026-11-21): it is an Android view over the game, which some phones'
-        // display hardware hands to the GPU (issue #2: lost GPU device on an Adreno 825; the owner's S25 smoother
-        // without it). DECISIONS.md, 2026-11-21 morning.
-        CheckBox perfOverlay = option(content, strings.getString(R.string.touch_perf_overlay), null,
-            render.getBoolean("overlay", false));
-        TextView overlayWarning = hint(content, strings.getString(R.string.touch_perf_overlay_help));
-        overlayWarning.setTextColor(Color.rgb(255, 196, 80));
-        overlayWarning.setAlpha(1f);
-        overlayWarning.setPadding(overlayWarning.getPaddingLeft(), 0, 0,
-                                  Math.round(8f * getResources().getDisplayMetrics().density));
-
-        ScrollView scroll = new ScrollView(activity);
         scroll.addView(content);
         // The title row with Exit at its right (the owner, 2026-11-22: "an exit button top right in the ctrl menu").
         LinearLayout titleRow = new LinearLayout(activity);
@@ -888,19 +1010,18 @@ final class TouchControlsView extends View {
             .setView(scroll)
             .setPositiveButton(strings.getString(R.string.touch_apply), (dialog, which) -> {
                 applyLook.run();
-                applySettings(toggle.isChecked(), size.getProgress() + 60,
-                              opacity.getProgress() + 25, ctrlAutoHide.isChecked(), hideAll.isChecked());
+                applySettings(toggle.isChecked(), size.getProgress() + 60, opacity.getProgress() + 25,
+                              radioChoice(ctrlChoice) != 0, false, radioChoice(ctrlChoice) == 2);
                 final String nextStartBefore = RuntimeActivity.nextStartState(RuntimeActivity.renderPrefs(activity));
                 RuntimeActivity.renderPrefs(activity).edit()
                     .putBoolean("debug_log", debugLog.isChecked())
                     .putBoolean("overlay", perfOverlay.isChecked())
                     .putBoolean("dof", depthOfField.isChecked())
-                    .putString("render_height", RuntimeActivity.RENDER_HEIGHTS[radioChoice(resolutionChoice)])
+                    .putString("render_height", RuntimeActivity.RENDER_HEIGHTS[resolutionChoice.getSelectedItemPosition()])
                     .putBoolean("fsr", fsr.isChecked())
                     .putBoolean("aniso", aniso.isChecked())
                     .putBoolean("wide", wide.isChecked())
-                    .putString("aa", aaRadio == null ? "off"
-                        : new String[] { "off", "fxaa", "fxaa_extreme" }[radioChoice(aaRadio)])
+                    .putString("aa", aaSpinner == null ? "off" : aaModes[aaSpinner.getSelectedItemPosition()])
                     .putString("language", RuntimeActivity.LANGUAGE_IDS[language.getSelectedItemPosition()])
                     .putBoolean("cheat_hp", cheatHp.isChecked())
                     .putBoolean("cheat_stamina", cheatStamina.isChecked())
@@ -913,9 +1034,12 @@ final class TouchControlsView extends View {
                     .putBoolean("compat_7e3_resolve_off", checked(compat7e3Off))
                     .putBoolean("compat_gpl", compatGpl.isChecked())
                     .putBoolean("compat_dynrender", compatDynrender.isChecked())
-                    .putString("compat_tu_mode", tuModes[radioChoice(compatTuMode)])
-                    .putBoolean("compat_tu_noubwc", compatNoUbwc.isChecked())
-                    .putBoolean("compat_tu_reserve", compatTuReserve.isChecked())
+                    .putString("compat_tu_mode", compatTuModeChoice == null ? render.getString("compat_tu_mode", "")
+                        : tuModes[radioChoice(compatTuModeChoice)])
+                    .putBoolean("compat_tu_noubwc", compatNoUbwcBox == null ? render.getBoolean("compat_tu_noubwc", false)
+                        : compatNoUbwcBox.isChecked())
+                    .putBoolean("compat_tu_reserve", compatTuReserveBox == null ? render.getBoolean("compat_tu_reserve", false)
+                        : compatTuReserveBox.isChecked())
                     .putBoolean("compat_shader", compatShader.isChecked())
                     .putBoolean("compat_decode_bc", compatDecodeBc.isChecked())
                     .putBoolean("compat_hdr_r11g11b10", compatHdr.isChecked())
@@ -927,18 +1051,11 @@ final class TouchControlsView extends View {
                 activity.setPerfOverlay(perfOverlay.isChecked());
                 if (companion != null) activity.applyCompanionSetting(companion.isChecked(), companionHide.isChecked());
                 RuntimeActivity.nativeSetOption("dof", depthOfField.isChecked() ? "1" : "0");
-                RuntimeActivity.nativeSetOption("aa", aaRadio == null ? "off"
-                    : new String[] { "off", "fxaa", "fxaa_extreme" }[radioChoice(aaRadio)]);
-                activity.applyFrameRate(radioChoice(fpsChoice) == 0 ? "30" : radioChoice(fpsChoice) == 1 ? "40" : "60",
-                                        panel120.isChecked());
+                RuntimeActivity.nativeSetOption("aa", aaSpinner == null ? "off" : aaModes[aaSpinner.getSelectedItemPosition()]);
+                int rate = radioChoice(fpsChoice);
+                activity.applyFrameRate(rate == 0 ? "30" : rate == 1 ? "40" : "60", rate == 3);
                 if (!nextStartBefore.equals(RuntimeActivity.nextStartState(RuntimeActivity.renderPrefs(activity))))
                     activity.offerRestart();
-            })
-            .setNeutralButton(strings.getString(R.string.touch_edit_layout), (dialog, which) -> {
-                applyLook.run();
-                applySettings(toggle.isChecked(), size.getProgress() + 60,
-                              opacity.getProgress() + 25, ctrlAutoHide.isChecked(), hideAll.isChecked());
-                enterEditor();
             })
             .setNegativeButton(strings.getString(R.string.touch_cancel), null)
             .create();
@@ -976,6 +1093,14 @@ final class TouchControlsView extends View {
         padButton.setOnClickListener(v -> {
             settingsDialog.dismiss();
             PadRemap.show(activity);
+        });
+        // As the dialog button did: the touch settings applied (so the editor shows them), then the editor.
+        editLayoutButton.setOnClickListener(v -> {
+            applyLook.run();
+            applySettings(toggle.isChecked(), size.getProgress() + 60, opacity.getProgress() + 25,
+                          radioChoice(ctrlChoice) != 0, false, radioChoice(ctrlChoice) == 2);
+            enterEditor();
+            settingsDialog.dismiss();
         });
         exitButton.setOnClickListener(v -> {
             settingsDialog.dismiss();

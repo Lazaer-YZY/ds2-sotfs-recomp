@@ -2,12 +2,19 @@
 <resources>
     <string name="touch_settings_title">Settings</string>
     <!-- Section headers -->
-    <string name="touch_section_controls">Touch controls</string>
+    <string name="touch_section_controls">Controls</string>
+    <string name="touch_group_on_screen">On-screen controls</string>
+    <string name="touch_ctrl_button">CTRL button</string>
+    <string name="touch_ctrl_always">Always shown</string>
+    <string name="touch_ctrl_tab">Slides into a small tab when not in use</string>
+    <string name="touch_ctrl_removed">Removed 30 s after the game starts (then Back opens these settings)</string>
     <string name="touch_section_image">Image</string>
     <string name="touch_section_language">Game language *</string>
-    <string name="touch_section_performance">Performance</string>
+    <string name="touch_section_performance">Frame rate and performance</string>
     <string name="touch_section_troubleshooting">Troubleshooting</string>
     <string name="touch_section_cheats">Cheats</string>
+    <string name="touch_section_game">Game</string>
+    <string name="touch_advanced">Advanced (CPU, GPU compatibility)</string>
     <string name="touch_cheat_hp">Infinite HP</string>
     <string name="touch_cheat_stamina">Infinite stamina</string>
     <string name="touch_cheat_wear">No equipment wear</string>
@@ -18,16 +25,13 @@
     <!-- Touch controls -->
     <string name="touch_show_controls">Show touch controls</string>
     <string name="touch_controller_hint">A controller is connected, so touch controls hide on their own. Tick this to use both.</string>
-    <string name="touch_control_size">Size: %1$d%%</string>
-    <string name="touch_opacity">Opacity: %1$d%%</string>
-    <string name="touch_ctrl_auto_hide">Auto-hide the CTRL button</string>
-    <string name="touch_hide_all">Hide all touch controls</string>
-    <string name="touch_hide_all_help">To bring CTRL back for 4 s, swipe in the system bars or press Back.</string>
+    <string name="touch_control_size">Size of the touch controls and the CTRL button: %1$d%%</string>
+    <string name="touch_opacity">Opacity of the touch controls and the CTRL button: %1$d%%</string>
     <string name="touch_look_drag">Drag on the screen to move the camera</string>
-    <string name="touch_look_drag_help">Touch the right part of the screen away from the buttons and drag. The right stick stays; hide it with Edit layout if you like.</string>
+    <string name="touch_look_drag_help">Touch the right part of the screen away from the buttons and drag. The right stick stays; hide it with Edit touch controls layout if you like.</string>
     <string name="touch_look_speed">Camera drag speed: %1$d%%</string>
     <!-- Controller buttons (CTRL; PadRemap.java, issue #9) -->
-    <string name="touch_section_pad">Controller</string>
+    <string name="touch_section_pad">Physical controller</string>
     <string name="touch_pad_remap">Controller buttons…</string>
     <string name="pad_remap_title">Controller buttons</string>
     <string name="pad_remap_help">Which game button each button of your controller presses. Applied at once; the touch controls keep their buttons.</string>
@@ -41,8 +45,8 @@
     <string name="touch_fps_30">30 fps (coolest, as on the Xbox 360)</string>
     <string name="touch_fps_40">40 fps *</string>
     <string name="touch_fps_60">60 fps</string>
-    <string name="touch_panel120">Smoother 60 fps (120 Hz screen) *</string>
-    <string name="touch_panel120_help">A late frame shows after 25 ms instead of 33 ms.</string>
+    <string name="touch_fps_60_smooth">60 fps, smoother (120 Hz screen) *</string>
+    <string name="touch_fps_60_smooth_help">Smoother 60 uses the 120 Hz screen mode: a late frame shows after 25 ms instead of 33 ms.</string>
     <!-- Image -->
     <string name="touch_resolution">Resolution *</string>
     <string name="touch_resolution_360">360p (fastest, very soft; for slow GPUs)</string>
@@ -55,7 +59,7 @@
     <string name="touch_fsr_help">About 15 % more GPU work.</string>
     <string name="touch_aniso">Sharp textures at an angle (4x anisotropic filtering) *</string>
     <string name="touch_aniso_help">Off: floors and walls seen at an angle look softer, with less GPU work on texture-heavy GPUs (Mali).</string>
-    <string name="touch_aa">Anti-aliasing (smooths jagged edges of the 3D image; text stays sharp; not at 1440p)</string>
+    <string name="touch_aa">Anti-aliasing (text stays sharp; not at 1440p)</string>
     <string name="touch_aa_off">Off</string>
     <string name="touch_aa_fxaa">FXAA</string>
     <string name="touch_aa_fxaa_strong">FXAA, stronger (softer)</string>
@@ -102,7 +106,7 @@
     <string name="touch_compat_gpl">Pipeline libraries off *</string>
     <string name="touch_compat_gpl_help">Builds each GPU pipeline in one piece (slower to start a new effect).</string>
     <string name="touch_compat_dynrender">Dynamic rendering off *</string>
-    <string name="touch_compat_dynrender_help">Classic Vulkan render passes.</string>
+    <string name="touch_compat_dynrender_help">Classic Vulkan render passes. Already used with Arm\'s own Mali driver.</string>
     <string name="touch_compat_tu_mode">Turnip rendering mode * (Turnip drivers only)</string>
     <string name="touch_compat_tu_auto">Automatic</string>
     <string name="touch_compat_tu_sysmem">Direct to memory (sysmem)</string>
@@ -310,6 +314,6 @@ disc 2: no package found (DLC icons missing)
     <string name="backup_restore_start_failed">The save backup could not be restored (details in the log).</string>
     <!-- Buttons -->
     <string name="touch_apply">Apply</string>
-    <string name="touch_edit_layout">Edit layout</string>
+    <string name="touch_edit_layout">Edit touch controls layout…</string>
     <string name="touch_cancel">Cancel</string>
 </resources>

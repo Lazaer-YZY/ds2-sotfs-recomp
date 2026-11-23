@@ -404,6 +404,16 @@ REXCVAR_DEFINE_BOOL(vulkan_render_area_restrict, false, "GPU",
                     "whole EDRAM-tall framebuffer, so tile-based GPUs load and store less")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_INT32(vulkan_evict_idle_render_targets_s, 0, "GPU/Vulkan",
+                     "Free render targets that own no EDRAM data and no draw has bound for this many seconds "
+                     "(counted at 60 frames per second), with their idle framebuffers (0 = keep them all)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(vulkan_log_device_memory_s, 30, "GPU/Vulkan",
+                     "Log the GPU memory by kind (render targets, shared memory, buffers, upload pages, other images) "
+                     "and the texture memory every this many seconds (0 = off)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_INT32(vulkan_arm_driver_defaults, 1, "GPU/Vulkan",
                      "Defaults for Arm's own Mali driver, applied at GPU setup to settings nothing else set: "
                      "render passes instead of dynamic rendering (vulkan_dynamic_rendering false) and render "
@@ -2896,6 +2906,17 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   scene_fxaa_candidate_ = 0;
   FinishResolveDump();  // DS2 diagnostic (resolve_dump_dir)
   CpFrameOnSwap();
+  // GPU memory by kind every vulkan_log_device_memory_s (a 720p game's 1.7 GB on Turnip, issue #8's 6 GB phone).
+  if (const int32_t every_s = REXCVAR_GET(vulkan_log_device_memory_s); every_s > 0) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - device_memory_logged_at_ >= std::chrono::seconds(every_s)) {
+      device_memory_logged_at_ = now;
+      REXGPU_INFO("GPU memory by kind: {}", ui::vulkan::util::DeviceMemoryReport());
+      // 1800 frames: 30 s at 60 fps, 60 s at 30.
+      REXGPU_INFO("Render target memory: {}", render_target_cache_->RenderTargetMemoryReport(1800));
+      texture_cache_->LogMemoryStats();
+    }
+  }
   if (gpu_timing_enabled_) {
     GpuTimingOnSwap();
   }
@@ -8062,6 +8083,21 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     primitive_processor_->BeginFrame();
 
     texture_cache_->BeginFrame();
+
+    // Only the frame count (idle render targets): the cache's own BeginFrame is not called on this path.
+    render_target_cache_->CountFrame();
+    // vulkan_evict_idle_render_targets_s: every 600 frames, render targets owning no EDRAM data and unbound that
+    // long (counted at 60 frames per second, so longer at lower frame rates) are freed with their idle framebuffers.
+    // At Majula ~100 MB of 455 MB were such leftovers of the title, menus and loading (DECISIONS.md, 2026-11-23).
+    if (const int32_t idle_s = REXCVAR_GET(vulkan_evict_idle_render_targets_s);
+        idle_s > 0 && render_target_cache_->frame_index() % 600 == 0) {
+      uint64_t freed_bytes = 0;
+      const size_t evicted =
+          render_target_cache_->EvictIdleRenderTargets(uint64_t(idle_s) * 60, freed_bytes);
+      if (evicted) {
+        REXGPU_INFO("Freed {} idle render targets ({:.0f} MB)", evicted, freed_bytes / 1048576.0);
+      }
+    }
   }
 
   return true;

@@ -42,6 +42,11 @@ final class GpuDriverStore {
     static final String SYSTEM_DRIVER = "";
     static final String SYSTEM_DRIVER_NAME = "System GPU driver";
     /**
+     * Adreno: the phone's own (Qualcomm) driver chosen on purpose, "not recommended". SYSTEM_DRIVER ("") stays "no
+     * choice", which runs the bundled Turnip there.
+     */
+    static final String SYSTEM_DRIVER_CHOSEN = "@system";
+    /**
      * Adreno: the game always runs on Turnip (the owner, 2026-11-09: the Qualcomm drivers render parts
      * of the game wrong). The APK carries whitebelyash's "Stable Turnip v2" (Mesa 26.2,
      * AdrenoToolsDrivers release stu_v2; tools/build_android.sh fetches and checks it), installed
@@ -280,15 +285,22 @@ final class GpuDriverStore {
     }
 
     /**
-     * The selected package when it is still installed and complete, else null. On Adreno the
-     * result is always a Turnip: the selection if it is one, else the bundled Stable Turnip v2.
+     * The selected package when it is still installed and complete, else null (the system driver). On Adreno: the
+     * selection, Turnip or not (the page marks the others "not recommended"), null for SYSTEM_DRIVER_CHOSEN, and the
+     * bundled Stable Turnip v2 without a choice or when the chosen package is gone.
      */
     static Installed selectedDriver(Context context) {
         String id = selected(context);
-        Installed driver = id.isEmpty() ? null : read(new File(root(context), id));
+        if (vendor() == Vendor.ADRENO && SYSTEM_DRIVER_CHOSEN.equals(id)) return null;
+        Installed driver = id.isEmpty() || SYSTEM_DRIVER_CHOSEN.equals(id) ? null : read(new File(root(context), id));
         if (driver != null && !driver.library().isFile()) driver = null;
         if (vendor() != Vendor.ADRENO) return driver;
-        return driver != null && isTurnip(driver) ? driver : bundledTurnip(context);
+        return driver != null ? driver : bundledTurnip(context);
+    }
+
+    /** Adreno: anything but a Turnip package ("not recommended" on the GPU driver page). */
+    static boolean notRecommendedOnAdreno(Installed driver) {
+        return vendor() == Vendor.ADRENO && (driver == null || !isTurnip(driver));
     }
 
     /** A Mesa Turnip package (not PanVK, not a Qualcomm build). */
@@ -352,8 +364,12 @@ final class GpuDriverStore {
             return SYSTEM_DRIVER_NAME;
         }
         if (vendor() == Vendor.ADRENO) {
-            // Adreno never falls back to the system driver: the page reports the failure.
-            preferences.edit().remove(KEY_BOOT_PENDING).commit();
+            // Adreno never falls back to the system driver: the page reports the failure, and a "not recommended"
+            // choice that failed goes back to the bundled Turnip.
+            Installed failed = read(new File(root(context), pending));
+            SharedPreferences.Editor editor = preferences.edit().remove(KEY_BOOT_PENDING);
+            if (failed == null || !isTurnip(failed)) editor.putString(KEY_SELECTED, BUNDLED_TURNIP_ID);
+            editor.commit();
         } else {
             preferences.edit().remove(KEY_BOOT_PENDING).putString(KEY_SELECTED, SYSTEM_DRIVER).commit();
         }

@@ -172,6 +172,7 @@ GraphicsUploadBufferPool::Page* VulkanUploadBufferPool::CreatePageImplementation
     dfn.vkDestroyBuffer(device, buffer, nullptr);
     return nullptr;
   }
+  util::NoteDeviceMemory("upload pages", int64_t(memory_allocate_info.allocationSize));
 
   if (dfn.vkBindBufferMemory(device, buffer, memory, 0) != VK_SUCCESS) {
     REXLOG_ERROR("Failed to bind memory to a Vulkan upload buffer with {} bytes", page_size_);
@@ -200,6 +201,9 @@ void VulkanUploadBufferPool::FlushPageWrites(Page* page, size_t offset, size_t s
 VulkanUploadBufferPool::VulkanPage::~VulkanPage() {
   const VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
+  VkMemoryRequirements memory_requirements;
+  dfn.vkGetBufferMemoryRequirements(device, buffer_, &memory_requirements);
+  util::NoteDeviceMemory("upload pages", -int64_t(memory_requirements.size));
   dfn.vkDestroyBuffer(device, buffer_, nullptr);
   // Unmapping is done implicitly when the memory is freed.
   dfn.vkFreeMemory(device, memory_, nullptr);

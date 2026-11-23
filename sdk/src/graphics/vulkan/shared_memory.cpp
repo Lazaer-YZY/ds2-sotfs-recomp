@@ -163,6 +163,7 @@ bool VulkanSharedMemory::Initialize() {
       Shutdown();
       return false;
     }
+    ui::vulkan::util::NoteDeviceMemory("shared memory", int64_t(buffer_memory_allocate_info.allocationSize));
     buffer_memory_.push_back(buffer_memory);
     if (dfn.vkBindBufferMemory(device, buffer_, buffer_memory, 0) != VK_SUCCESS) {
       REXGPU_ERROR("Shared memory: Failed to bind memory to the Vulkan buffer");

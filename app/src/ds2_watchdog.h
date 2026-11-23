@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <string_view>
+
 namespace rex {
 class Runtime;
 }
@@ -19,4 +21,7 @@ class Runtime;
 namespace ds2::watchdog {
 void Start(rex::Runtime* runtime);
 void Stop();
+// What the app reports about the device (battery temperature, Android's thermal status and headroom), appended to
+// every heartbeat line.
+void SetDeviceNote(std::string_view note);
 }  // namespace ds2::watchdog

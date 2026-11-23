@@ -1492,6 +1492,7 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   // so ShutdownCommon is called by the RenderTargetCache destructor, when it's
   // already too late.
   DestroyAllRenderTargets(true);
+  DeleteRetiredRenderTargets(true);  // the GPU is idle at shutdown
 
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device,
                                          resolve_fsi_clear_64bpp_pipeline_);
@@ -1682,10 +1683,109 @@ void VulkanRenderTargetCache::ClearCache() {
   RenderTargetCache::ClearCache();
 }
 
+std::string VulkanRenderTargetCache::RenderTargetMemoryReport(uint64_t idle_frames) const {
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  auto bytes_of = [&](const RenderTarget* render_target) {
+    VkMemoryRequirements memory_requirements;
+    dfn.vkGetImageMemoryRequirements(
+        device, static_cast<const VulkanRenderTarget*>(render_target)->image(), &memory_requirements);
+    return uint64_t(memory_requirements.size);
+  };
+  uint64_t all_bytes = 0, idle_bytes = 0, unowned_bytes = 0;
+  size_t all_count = 0;
+  for (const auto& render_target_pair : render_targets()) {
+    if (!render_target_pair.second) continue;
+    ++all_count;
+    all_bytes += bytes_of(render_target_pair.second);
+  }
+  std::vector<RenderTarget*> unowned, idle;
+  CollectIdleRenderTargets(0, unowned);
+  CollectIdleRenderTargets(idle_frames, idle);
+  for (const RenderTarget* render_target : unowned) unowned_bytes += bytes_of(render_target);
+  for (const RenderTarget* render_target : idle) idle_bytes += bytes_of(render_target);
+  return fmt::format("{:.0f} MB in {}, owning no EDRAM data {:.0f} MB in {}, of them unbound for {} frames {:.0f} MB in {}",
+                     all_bytes / 1048576.0, all_count, unowned_bytes / 1048576.0, unowned.size(), idle_frames,
+                     idle_bytes / 1048576.0, idle.size());
+}
+
+size_t VulkanRenderTargetCache::EvictIdleRenderTargets(uint64_t min_idle_frames, uint64_t& freed_bytes) {
+  std::vector<RenderTarget*> idle;
+  CollectIdleRenderTargets(min_idle_frames, idle);
+  if (idle.empty()) return 0;
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  // A framebuffer may hold views of the render target if its pitch, sample count and the base of an attachment of
+  // the same kind match (formats are not compared: a match of another format is only freed if idle as well).
+  auto may_use = [](const FramebufferKey& framebuffer_key, RenderTargetKey key) {
+    const RenderPassKey& pass = framebuffer_key.render_pass_key;
+    if (framebuffer_key.pitch_tiles_at_32bpp != key.pitch_tiles_at_32bpp ||
+        pass.msaa_samples != key.msaa_samples) {
+      return false;
+    }
+    if (key.is_depth) {
+      return (pass.depth_and_color_used & 1) && framebuffer_key.depth_base_tiles == key.base_tiles;
+    }
+    const uint32_t color_bases[] = {framebuffer_key.color_0_base_tiles, framebuffer_key.color_1_base_tiles,
+                                    framebuffer_key.color_2_base_tiles, framebuffer_key.color_3_base_tiles};
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if ((pass.depth_and_color_used & (1u << (1 + i))) && color_bases[i] == key.base_tiles) return true;
+    }
+    return false;
+  };
+  size_t evicted = 0;
+  std::vector<FramebufferKey> doomed;
+  for (RenderTarget* render_target : idle) {
+    if (IsRenderTargetInLastUpdate(render_target)) continue;
+    const RenderTargetKey key = render_target->key();
+    doomed.clear();
+    bool framebuffer_in_use = false;
+    for (const auto& framebuffer_pair : framebuffers_) {
+      if (!may_use(framebuffer_pair.first, key)) continue;
+      if (frame_index() - framebuffer_pair.second.last_used_frame < min_idle_frames ||
+          &framebuffer_pair.second == last_update_framebuffer_) {
+        framebuffer_in_use = true;
+        break;
+      }
+      doomed.push_back(framebuffer_pair.first);
+    }
+    if (framebuffer_in_use) continue;
+    // Out of the cache first: only a render target that was really there is retired and later deleted (a lookup by
+    // key missed some on 2026-11-23, and the same three were "freed" every 10 s while the cache still used them).
+    if (!RemoveIdleRenderTarget(render_target)) continue;
+    for (const FramebufferKey& framebuffer_key : doomed) {
+      auto it = framebuffers_.find(framebuffer_key);
+      if (it == framebuffers_.end()) continue;
+      if (it->second.framebuffer != VK_NULL_HANDLE) {
+        dfn.vkDestroyFramebuffer(device, it->second.framebuffer, nullptr);
+      }
+      framebuffers_.erase(it);
+    }
+    VkMemoryRequirements memory_requirements;
+    dfn.vkGetImageMemoryRequirements(device, static_cast<VulkanRenderTarget*>(render_target)->image(),
+                                     &memory_requirements);
+    freed_bytes += memory_requirements.size;
+    retired_render_targets_.emplace_back(command_processor_.GetCurrentSubmission(), render_target);
+    ++evicted;
+  }
+  return evicted;
+}
+
+void VulkanRenderTargetCache::DeleteRetiredRenderTargets(bool all) {
+  const uint64_t completed = command_processor_.GetCompletedSubmission();
+  while (!retired_render_targets_.empty() && (all || retired_render_targets_.front().first <= completed)) {
+    delete retired_render_targets_.front().second;
+    retired_render_targets_.pop_front();
+  }
+}
+
 void VulkanRenderTargetCache::CompletedSubmissionUpdated() {
   if (transfer_vertex_buffer_pool_) {
     transfer_vertex_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
   }
+  DeleteRetiredRenderTargets(false);
 }
 
 void VulkanRenderTargetCache::EndSubmission() {
@@ -2941,6 +3041,12 @@ VulkanRenderTargetCache::VulkanRenderTarget::~VulkanRenderTarget() {
     dfn.vkDestroyImageView(device, view_depth_stencil_, nullptr);
   }
   dfn.vkDestroyImageView(device, view_depth_color_, nullptr);
+  // The memory tracker counted it as the dedicated-allocation helper did (ui::vulkan::util::NoteDeviceMemory).
+  VkMemoryRequirements memory_requirements;
+  dfn.vkGetImageMemoryRequirements(device, image_, &memory_requirements);
+  ui::vulkan::util::NoteDeviceMemory(
+      key().msaa_samples != xenos::MsaaSamples::k1X ? "render targets msaa" : "render targets",
+      -int64_t(memory_requirements.size));
   dfn.vkDestroyImage(device, image_, nullptr);
   dfn.vkFreeMemory(device, memory_, nullptr);
 }
@@ -3340,6 +3446,7 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
   }
   auto it = framebuffers_.find(key);
   if (it != framebuffers_.end()) {
+    it->second.last_used_frame = frame_index();
     return &it->second;
   }
 
@@ -3405,10 +3512,12 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
     return nullptr;
   }
   // Creates at a persistent location - safe to use pointers.
-  return &framebuffers_
-              .emplace(std::piecewise_construct, std::forward_as_tuple(key),
-                       std::forward_as_tuple(framebuffer, host_extent))
-              .first->second;
+  Framebuffer& created = framebuffers_
+                             .emplace(std::piecewise_construct, std::forward_as_tuple(key),
+                                      std::forward_as_tuple(framebuffer, host_extent))
+                             .first->second;
+  created.last_used_frame = frame_index();
+  return &created;
 }
 
 VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key) {

@@ -170,6 +170,28 @@ thread_local std::string t_chain;
 // --- capture for the second screen --------------------------------------------------------------------------------
 std::atomic<bool> g_capture{false};
 
+// DS2_HUD_HIDE_TEST=1 (debug launches): capture and hide as if a second screen showed the HUD, on any phone (checks of
+// the main screen's hiding without a dual-screen device); =2 captures without hiding (the HUD stays in screenshots).
+char HudTestMode() {
+  static const char mode = [] {
+    const char* v = std::getenv("DS2_HUD_HIDE_TEST");
+    return v && (*v == '1' || *v == '2') ? *v : '0';
+  }();
+  return mode;
+}
+bool HideTest() { return HudTestMode() == '1'; }
+bool CaptureOn() { return g_capture.load(std::memory_order_relaxed) || HudTestMode() != '0'; }
+
+// DS2_SPRITE_PROBE=6: each layout root's words once (to find its layout's name) and, once a second per root, what
+// one walk of it drew from FE_HPgage_01 (translation, scale) with the old and the new hiding decision.
+bool Probe6() {
+  static const bool probe = [] {
+    const char* v = std::getenv("DS2_SPRITE_PROBE");
+    return v && *v == '6';
+  }();
+  return probe;
+}
+
 uint32_t NowMs() {
   using namespace std::chrono;
   return uint32_t(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
@@ -303,7 +325,13 @@ void CaptureText(const uint8_t* base, uint32_t element, float x, float y) {
 // layout uses (data hashes of the first 16 KB, as ds2_companion_assets.py computes them); everything drawn under a
 // recognised root is hidden: sprites by a zero-size transform (the draw still runs, so its texture is still seen), text
 // by skipping the draw. Boss / enemy bars, menus and messages are other layouts and stay.
+//
+// What a root is comes from its last walk that drew a signature texture, not from everything it drew in the last
+// 1.5 s: the flags used to accumulate, and an enemy's bar that once looked like the player's HUD (or a new bar at the
+// address of a layout that was hidden) kept the hidden flags for as long as the game drew it (the owner, 2026-11-23:
+// the HP bar of the targeted enemy went missing, often with several enemies).
 std::atomic<bool> g_hide{false};
+bool HideOn() { return g_hide.load(std::memory_order_relaxed) || HideTest(); }
 thread_local int t_depth = 0;
 thread_local uint32_t t_root = 0;
 
@@ -321,9 +349,17 @@ constexpr uint64_t kEffectIcons[] = {  // menu/tex/Icon/effect/EI_*.tpf, disc 1 
     0x91A4EF9EA4516306ull, 0x45AC3C5EB8D8959Full, 0x84FCAD76040A2CEBull, 0x07212DFA65BAABF7ull, 0x10049DE63C53EEC0ull,
     0xE6922CCA0B99A5C1ull, 0xAE40A725D5136A93ull};
 struct RootInfo {
-  uint32_t root = 0, flags = 0, ms = 0;
+  uint32_t root = 0;
+  uint32_t flags = 0;   // the signatures of its last walk that drew any: what the layout is
+  uint32_t walk = 0;    // the signatures of the walk in progress
+  uint32_t ms = 0;      // the last signature seen
+  uint32_t sticky = 0;  // DS2_SPRITE_PROBE=6: the old decision (signatures accumulated while any kept coming)
 };
 RootInfo g_roots[64];  // render thread only
+
+// What a root is during a walk: its last complete walk's signatures and what this walk has drawn so far (a layout's
+// first sprites come before its signature texture).
+uint32_t Flags(const RootInfo& r) { return r.flags | r.walk; }
 
 RootInfo& RootEntry(uint32_t root, uint32_t now) {
   RootInfo* oldest = &g_roots[0];
@@ -331,15 +367,110 @@ RootInfo& RootEntry(uint32_t root, uint32_t now) {
     if (r.root == root) return r;
     if (now - r.ms > now - oldest->ms) oldest = &r;
   }
-  *oldest = RootInfo{root, 0, now};
+  *oldest = RootInfo{};
+  oldest->root = root;
+  oldest->ms = now;
   return *oldest;
 }
 
 uint32_t CurrentFlags(uint32_t now) {
   if (!t_root) return 0;
   for (const RootInfo& r : g_roots)
-    if (r.root == t_root) return now - r.ms < 1500 ? r.flags : 0;
+    if (r.root == t_root) return now - r.ms < 1500 ? Flags(r) : 0;
   return 0;
+}
+
+// DS2_SPRITE_PROBE=6: the sprites of the walk in progress (render thread): G = FE_HPgage_01, K = L_keyMenu,
+// I = Icon_tex, S = Soul_Gauge, B = Boss_hp, E = an effect icon, - = any other texture (with its size).
+struct GaugeSprite {
+  float x, y, sx, sy;
+  uint32_t w, h, element;
+  char kind;
+};
+thread_local GaugeSprite t_gauges[48];
+thread_local int t_gauge_count = 0;
+thread_local bool t_walk_hidden = false;
+thread_local uint32_t t_last_element = 0;  // the sprite element being drawn (sub_82F51340's r3)
+
+// The player's HP gauge (l01_01_hp) draws 15-18 FE_HPgage_01 sprites a walk, some in the top-left corner; an enemy's
+// bar (l01_13_hp_enemy) is three roots of one sprite each, and close up they sit in that corner too (S10, 2026-11-23:
+// y down to -6 while the targeted hollow was hit). So the emblem flag needs both, within one walk.
+constexpr int kHudGaugeSprites = 6;
+thread_local int t_walk_gauges = 0;
+thread_local bool t_walk_corner = false;
+
+// A layout root's walk begins (render thread): the previous walk's signatures, if it drew any, now say what it is.
+void BeginWalk(uint32_t root) {
+  t_gauge_count = 0;
+  t_walk_hidden = false;
+  t_walk_gauges = 0;
+  t_walk_corner = false;
+  for (RootInfo& r : g_roots) {
+    if (r.root != root) continue;
+    if (r.walk) r.flags = r.walk;
+    r.walk = 0;
+    return;
+  }
+}
+
+bool HiddenFlags(uint32_t f);
+
+// A layout root's walk ended (render thread): an enemy's HP bar (l01_13_hp_enemy: FE_HPgage_01 sprites, fewer than the
+// player's gauge draws, without the build-up icons) was drawn. The game shows it for what the player hits, so the
+// damage figures count only those hits.
+void EndWalk(uint32_t root) {
+  if (t_walk_gauges == 0 || t_walk_gauges >= kHudGaugeSprites) return;
+  for (const RootInfo& r : g_roots)
+    if (r.root == root) {
+      if (!(Flags(r) & (kEmblem | kIcons | kBoss))) g_foe_bar_ms.store(NowMs(), std::memory_order_relaxed);
+      return;
+    }
+}
+
+// DS2_SPRITE_PROBE=6, a walk ended: the root's words once, and once a second its gauge sprites with both decisions.
+// The words only: following them faulted (a node word pointed into unmapped guest memory, S10, 2026-11-23).
+void ProbeWalk(const uint8_t* base, uint32_t root) {
+  static std::unordered_set<uint32_t> seen;  // render thread only
+  if (seen.size() < 300 && seen.insert(root).second && root >= 0x40000000u && root < 0xC0000000u) {
+    std::string words;
+    for (uint32_t off = 0; off < 0x80; off += 4) words += fmt::format(" {:08X}", Load32(base, root + off));
+    REXLOG_INFO("ds2 root probe: root {:08X}:{}", root, words);
+  }
+  if (!t_gauge_count) return;
+  const uint32_t now = NowMs();
+  static uint32_t last_root[64], last_ms[64];
+  const int k = int((root >> 6) & 63);
+  if (last_root[k] == root && now - last_ms[k] < 1000) return;
+  last_root[k] = root;
+  last_ms[k] = now;
+  uint32_t flags = 0, sticky = 0;
+  for (const RootInfo& r : g_roots)
+    if (r.root == root) {
+      flags = r.flags | r.walk;
+      sticky = r.sticky;
+    }
+  std::string list;
+  for (int i = 0; i < t_gauge_count; ++i) {
+    const GaugeSprite& g = t_gauges[i];
+    list += fmt::format(" {}{}({:.0f},{:.0f} {:.2f}/{:.2f})", g.kind,
+                        g.kind == '-' || g.kind == 'E' ? fmt::format("{}x{}", g.w, g.h) : std::string(), g.x, g.y, g.sx,
+                        g.sy);
+  }
+  REXLOG_INFO("ds2 walk probe: root {:08X} flags {:02X} hidden {} | old flags {:02X} hidden {} | {} sprites:{}", root,
+              flags, t_walk_hidden ? 1 : 0, sticky, HiddenFlags(sticky) ? 1 : 0, t_gauge_count, list);
+  // The player's gauge: each sprite element's words when they change (what makes the emblem show the human form).
+  if (!(flags & kEmblem)) return;
+  static std::string last[48];
+  for (int i = 0; i < t_gauge_count; ++i) {
+    const uint32_t e = t_gauges[i].element;
+    if (e < 0x40000000u || e >= 0xC0000000u) continue;
+    std::string words;
+    for (uint32_t off = 0; off < 0x80; off += 4) words += fmt::format(" {:08X}", Load32(base, e + off));
+    if (words == last[i]) continue;
+    last[i] = words;
+    REXLOG_INFO("ds2 element probe: sprite {} at {:.0f},{:.0f} element {:08X}:{}", i, t_gauges[i].x, t_gauges[i].y, e,
+                words);
+  }
 }
 
 // The layouts the second screen takes over. Not the status build-up (FE_HPgage_01 + Icon_tex): it stays on the main
@@ -353,44 +484,51 @@ bool HiddenFlags(uint32_t f) {
 bool HudRoot(uint32_t now) {
   if (!t_root) return false;
   for (const RootInfo& r : g_roots)
-    if (r.root == t_root) return now - r.ms < 1500 && HiddenFlags(r.flags);
+    if (r.root == t_root) return now - r.ms < 1500 && HiddenFlags(Flags(r));
   return false;
 }
 
 // Whether what is drawn under the current root is hidden (render thread).
 bool HideCurrent(uint32_t now) {
-  return g_hide.load(std::memory_order_relaxed) && g_capture.load(std::memory_order_relaxed) && HudRoot(now);
+  const bool hide = HideOn() && CaptureOn() && HudRoot(now);
+  if (hide) t_walk_hidden = true;
+  return hide;
 }
 
 // Whether a layout with this signature was hidden in the last 1.5 s (render thread).
 bool RecentlyHidden(uint32_t flag, uint32_t now) {
   for (const RootInfo& r : g_roots)
-    if ((r.flags & flag) && now - r.ms < 1500 && HiddenFlags(r.flags)) return true;
+    if ((Flags(r) & flag) && now - r.ms < 1500 && HiddenFlags(Flags(r))) return true;
   return false;
 }
 
 // Texts of the hidden layouts that are drawn outside their roots' walk (Thor: the item's count and name, the soul
 // count and the souls just gained kept showing): hidden by where they are while their layout is hidden.
 bool HideTextAt(float x, float y, uint32_t now) {
-  if (!g_hide.load(std::memory_order_relaxed)) return false;
+  if (!HideOn()) return false;
   if (x >= 170 && x <= 420 && y >= 620 && y <= 672) return RecentlyHidden(kSlots, now);   // item count / name
   if (x >= 900 && x <= 1180 && y >= 590 && y <= 700) return RecentlyHidden(kSouls, now);  // souls, souls gained
   return false;
 }
 
 // Marks the current root by the texture a sprite draws (while capturing); returns whether the sprite is hidden.
-bool ClassifyAndHide(uint8_t* base, uint32_t tex, uint32_t m, float tx, float ty) {
+bool ClassifyAndHide(uint8_t* base, uint32_t tex, uint32_t m, float tx, float ty, float sx, float sy) {
   if (!t_root) return false;
   const uint32_t now = NowMs();
-  uint32_t flag = 0;
+  uint32_t flag = 0, w = 0, h = 0;
   if (tex >= 0x40000000u && tex < 0xC0000000u) {
-    const uint32_t w = Load32(base, tex + 0x28), h = Load32(base, tex + 0x2C);
+    w = Load32(base, tex + 0x28);
+    h = Load32(base, tex + 0x2C);
     const bool sig = (w == 256 && (h == 128 || h == 256)) || (w == 64 && h == 64) || (w == 128 && h == 64);
     const uint32_t gpu = sig ? Load32(base, tex + 0x18) : 0;
     if (gpu >= 0xA0000000u) {
       const uint64_t hash = TextureHash(base, tex, gpu, 0x4000);
-      if (hash == kHpGauge) flag = kGaugeAny | (tx < 260 && ty < 180 ? kEmblem : 0);
-      else if (hash == kKeyMenu) flag = kSlots;
+      if (hash == kHpGauge) {
+        flag = kGaugeAny;
+        ++t_walk_gauges;
+        if (tx < 260 && ty < 180) t_walk_corner = true;
+        if (t_walk_gauges >= kHudGaugeSprites && t_walk_corner) flag |= kEmblem;
+      } else if (hash == kKeyMenu) flag = kSlots;
       else if (hash == kIconTex) flag = kIcons;
       else if (hash == kSoulGauge) flag = kSouls;
       else if (hash == kBossHp) flag = kBoss;
@@ -399,28 +537,35 @@ bool ClassifyAndHide(uint8_t* base, uint32_t tex, uint32_t m, float tx, float ty
           if (hash == e) flag = kEffect;
     }
   }
+  if (Probe6() && t_gauge_count < 48) {
+    const char kind = (flag & kGaugeAny) ? 'G' : flag == kSlots ? 'K' : flag == kIcons ? 'I' : flag == kSouls ? 'S'
+                      : flag == kBoss ? 'B' : flag == kEffect ? 'E' : '-';
+    t_gauges[t_gauge_count++] = GaugeSprite{tx, ty, sx, sy, w, h, t_last_element, kind};
+  }
   RootInfo& r = RootEntry(t_root, now);
   if (flag) {
-    const uint32_t before = r.flags;
-    r.flags |= flag;
+    const uint32_t before = Flags(r);
+    r.walk |= flag;
+    r.sticky |= flag;
     r.ms = now;
     static const bool probe = [] {
       const char* v = std::getenv("DS2_SPRITE_PROBE");
       return v && *v == '4';
     }();
-    if (probe && r.flags != before)
-      REXLOG_INFO("ds2 hide probe: root {:08X} flags {:02X} (texture {:08X} at {:g} {:g}){}", t_root, r.flags, tex, tx, ty,
-                  HiddenFlags(r.flags) ? " hidden" : "");
+    if (probe && Flags(r) != before)
+      REXLOG_INFO("ds2 hide probe: root {:08X} flags {:02X} (texture {:08X} at {:g} {:g}){}", t_root, Flags(r), tex, tx,
+                  ty, HiddenFlags(Flags(r)) ? " hidden" : "");
   } else if (now - r.ms > 1500) {
-    r.flags = 0;  // the root's signature stopped: its memory may hold another layout now
+    r.flags = r.walk = r.sticky = 0;  // the root's signature stopped: its memory may hold another layout now
   }
-  if ((r.flags & kSlots) && !(r.flags & kBoss) && now - r.ms < 1500) g_hud_ms.store(now, std::memory_order_relaxed);
-  // An enemy's HP bar (l01_13_hp_enemy: FE_HPgage_01 without the player's emblem or the build-up icons) or the boss
-  // bar: the game shows them for what the player hits (the damage figures count only those hits).
-  if ((flag & kBoss) || ((flag & kGaugeAny) && !(r.flags & (kEmblem | kIcons))))
-    g_foe_bar_ms.store(now, std::memory_order_relaxed);
-  if ((r.flags & kEmblem) && now - r.ms < 1500) g_gauge_ms.store(now, std::memory_order_relaxed);
-  if (!g_hide.load(std::memory_order_relaxed) || !(now - r.ms < 1500 && HiddenFlags(r.flags))) return false;
+  const uint32_t f = Flags(r);
+  if ((f & kSlots) && !(f & kBoss) && now - r.ms < 1500) g_hud_ms.store(now, std::memory_order_relaxed);
+  // The boss bar: the game shows it for what the player hits (the damage figures count only those hits). An enemy's
+  // bar is noted when its walk ends (EndWalk): only then is it known not to be the player's gauge.
+  if (flag & kBoss) g_foe_bar_ms.store(now, std::memory_order_relaxed);
+  if ((f & kEmblem) && now - r.ms < 1500) g_gauge_ms.store(now, std::memory_order_relaxed);
+  if (!HideOn() || !(now - r.ms < 1500 && HiddenFlags(f))) return false;
+  t_walk_hidden = true;
   // Zero-size transform: the sprite's quad collapses (the matrix is the draw's own copy on the stack).
   for (uint32_t off : {0u, 4u, 8u, 16u, 20u, 24u}) std::memset(base + m + off, 0, 4);
   return true;
@@ -558,7 +703,7 @@ void OnSpriteTransform(uint8_t* base, uint32_t m) {
     }
     if (fresh) REXLOG_INFO("ds2 chain probe: sprite {}x{} at {} {} | {}", w, h, x, y, t_chain);
   }
-  if (g_capture.load(std::memory_order_relaxed)) {
+  if (CaptureOn()) {
     auto rf = [&](uint32_t a) {
       const uint32_t u = Load32(base, a);
       float v;
@@ -567,7 +712,7 @@ void OnSpriteTransform(uint8_t* base, uint32_t m) {
     };
     const float tx = rf(m + 12), ty = rf(m + 28);
     Capture(base, t_last_texture, tx, ty, rf(m));
-    ClassifyAndHide(base, t_last_texture, m, tx, ty);
+    ClassifyAndHide(base, t_last_texture, m, tx, ty, rf(m), rf(m + 20));
     NoteUi(base, t_last_texture, NowMs());
   }
   if (!Probe2()) return;
@@ -640,7 +785,7 @@ REX_HOOK_RAW(sub_82F52870) {
     }
   }
   bool hide = false;
-  if (g_capture.load(std::memory_order_relaxed)) {
+  if (CaptureOn()) {
     const uint32_t r = ctx.r5.u32;
     if (r >= 0x40000000u && r < 0xC0000000u) {
       auto rf = [&](uint32_t a) {
@@ -715,13 +860,23 @@ REX_HOOK_RAW(sub_82F52870) {
 // A layout node's draw (r3 = node); the outermost call of a draw is its layout's root.
 extern "C" void __imp__sub_82F55418(PPCContext& __restrict ctx, uint8_t* base);
 REX_HOOK_RAW(sub_82F55418) {
-  if (t_depth++ == 0) t_root = ctx.r3.u32;
+  if (t_depth++ == 0) {
+    t_root = ctx.r3.u32;
+    if (CaptureOn()) BeginWalk(t_root);
+  }
   __imp__sub_82F55418(ctx, base);
-  if (--t_depth == 0) t_root = 0;
+  if (--t_depth == 0) {
+    if (CaptureOn()) {
+      EndWalk(t_root);
+      if (Probe6()) ProbeWalk(base, t_root);
+    }
+    t_root = 0;
+  }
 }
 
 // The sprite draw (r3 = the layout's sprite element).
 REX_HOOK_RAW(sub_82F51340) {
+  t_last_element = ctx.r3.u32;
   if (Probe3()) t_chain = Chain(base, ctx.r1.u32, uint32_t(ctx.lr));
   if (ProbeOn()) ProbeOverride(base, ctx.r3.u32);
   __imp__sub_82F51340(ctx, base);

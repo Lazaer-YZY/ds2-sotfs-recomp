@@ -170,6 +170,8 @@ class RenderTargetCache {
   virtual void ClearCache();
 
   virtual void BeginFrame();
+  uint64_t frame_index() const { return frame_index_; }
+  void CountFrame() { ++frame_index_; }
 
   // vulkan_depth_4x_as_1x: the current draw renders a 4x surface's samples as the pixels of the 1x
   // surface twice as wide and tall (the surface info is already rewritten), so its estimated
@@ -307,6 +309,8 @@ class RenderTargetCache {
     RenderTarget(RenderTarget&& render_target) = delete;
     RenderTarget& operator=(RenderTarget&& render_target) = delete;
     RenderTargetKey key() const { return key_; }
+    // The last frame (RenderTargetCache::frame_index()) a draw bound it; for finding idle render targets.
+    uint64_t last_used_frame = 0;
 
    protected:
     RenderTarget(RenderTargetKey key) : key_(key) {}
@@ -511,6 +515,18 @@ class RenderTargetCache {
   Transfer::Rectangle last_update_redirected_clear_rect_ = {};
   uint64_t last_update_redirected_clear_value_ = 0;
   std::vector<Transfer> last_update_redirected_clear_transfers_;
+  const std::unordered_map<RenderTargetKey, RenderTarget*, RenderTargetKey::Hasher>& render_targets() const {
+    return render_targets_;
+  }
+  // Render targets that own no EDRAM data (no ownership range, no host depth) and no draw bound for at least
+  // min_idle_frames: nothing would be lost by destroying them (diagnostics, render target memory).
+  void CollectIdleRenderTargets(uint64_t min_idle_frames, std::vector<RenderTarget*>& idle) const;
+  // Whether a draw's bindings (the last update's used / accumulated render targets, a redirected clear) refer to it.
+  bool IsRenderTargetInLastUpdate(const RenderTarget* render_target) const;
+  // Removes a render target CollectIdleRenderTargets returned from the cache (the host cache has released what refers
+  // to it and deletes it once the GPU is done with it). Found by pointer (an entry's key need not equal the render
+  // target's own key()); false if it is not in the cache, and then it must not be deleted.
+  bool RemoveIdleRenderTarget(RenderTarget* render_target);
   RenderTarget* const* last_update_accumulated_render_targets() const {
     assert_true(GetPath() == Path::kHostRenderTargets);
     return last_update_accumulated_render_targets_;
@@ -716,6 +732,7 @@ class RenderTargetCache {
   // since standard containers use dynamic allocation for elements, though
   // changes to this throughout a frame are pretty rare.
   std::map<uint32_t, OwnershipRange> ownership_ranges_;
+  uint64_t frame_index_ = 0;  // BeginFrame count
 
   // Render targets actually used by the draw call with the last successful
   // update. 0 is depth, color starting from 1, nullptr if not bound.

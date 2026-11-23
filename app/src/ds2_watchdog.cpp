@@ -30,6 +30,8 @@
 #include <filesystem>
 #include <unistd.h>
 #include <map>
+#include <mutex>
+#include <cstring>
 #include <set>
 #include <string>
 #include <thread>
@@ -166,6 +168,35 @@ void LogCpuState(int seconds) {
 #endif
 }
 
+// Memory for the heartbeat (issue #8: a 6 GB phone rebooting with nothing in its log): the system's available
+// memory, this process's resident memory and its GPU allocations (KGSL, Adreno); -1 where the app may not read them.
+long ProcFieldMb(const char* path, const char* key) {
+  FILE* f = std::fopen(path, "r");
+  if (!f) return -1;
+  char row[256];
+  long kb = -1;
+  const size_t n = std::strlen(key);
+  while (std::fgets(row, sizeof(row), f)) {
+    if (std::strncmp(row, key, n) == 0) {
+      kb = std::strtol(row + n, nullptr, 10);
+      break;
+    }
+  }
+  std::fclose(f);
+  return kb < 0 ? -1 : kb / 1024;
+}
+
+long GpuMemoryMb() {
+  static const std::string base = "/sys/class/kgsl/kgsl/proc/" + std::to_string(getpid()) + "/";
+  const long mapped = ReadLong((base + "gpumem_mapped").c_str());
+  const long unmapped = ReadLong((base + "gpumem_unmapped").c_str());
+  if (mapped < 0 && unmapped < 0) return -1;
+  return (std::max(mapped, 0L) + std::max(unmapped, 0L)) >> 20;
+}
+
+std::mutex g_device_note_mutex;
+std::string g_device_note;  // from the app (SetDeviceNote)
+
 void LogHeartbeat(int seconds, size_t threads, size_t files) {
   static const bool diag = [] {
     const char* v = std::getenv("DS2_DIAG");
@@ -185,6 +216,11 @@ void LogHeartbeat(int seconds, size_t threads, size_t files) {
     }
   }
   const struct mallinfo mi = mallinfo();
+  std::string note;
+  {
+    std::lock_guard lock(g_device_note_mutex);
+    note = g_device_note;
+  }
   // The game's presented frames (VdSwap) in the last ~2 s: frame rate and the slowest frame.
   // Frame-time histogram of the same frames (hist=, upper bounds 18/21/26/34/45/inf ms): a run's 1% low and frames
   // over 45 ms come from summing these (tools/android/frame_stats.py).
@@ -207,11 +243,15 @@ void LogHeartbeat(int seconds, size_t threads, size_t files) {
   }
   const std::string line = fmt::format(
       "[ds2 wd] t={}s hb fps={:.1f} max_ms={:.0f} hist={}/{}/{}/{}/{}/{} vblank={} cp_vs={:016X} cp_ps={:016X}{} "
-      "threads={} files={} malloc_mb={}",
+      "threads={} files={} malloc_mb={} avail_mb={} rss_mb={} gpu_mb={}{}",
       seconds, fps, frame_max_ms, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], vblank, vs, ps,
       paused ? " cp_paused" : "", threads, files,
-      size_t(mi.uordblks) >> 20);
+      size_t(mi.uordblks) >> 20, ProcFieldMb("/proc/meminfo", "MemAvailable:"),
+      ProcFieldMb("/proc/self/status", "VmRSS:"), GpuMemoryMb(), note.empty() ? std::string() : " " + note);
   REXLOG_INFO("{}", line);
+  // With debug logging, the log is committed to storage at every heartbeat: issue #8's phone rebooted and its log
+  // lost the last ~12 s (written, never committed; the file ended in zeros).
+  if (diag) rex::SyncLoggingToStorage();
   // Kernel/XAM exports called since the previous heartbeat (all calls, sorted by count).
   if (REXCVAR_GET(ds2_export_stats)) {
     std::vector<std::pair<uint64_t, const char*>> called;
@@ -405,6 +445,11 @@ void Main() {
 }
 
 }  // namespace
+
+void SetDeviceNote(std::string_view note) {
+  std::lock_guard lock(g_device_note_mutex);
+  g_device_note = std::string(note);
+}
 
 void Start(rex::Runtime* runtime) {
   if (!REXCVAR_GET(ds2_watchdog) || g_run.exchange(true)) return;

@@ -110,6 +110,11 @@ public final class GpuDriverActivity extends Activity {
             }
         }
         originalSelection = GpuDriverStore.selected(this);
+        // Adreno without a choice runs the bundled Turnip: the page starts on it, and "Back to game" (not "Apply and
+        // restart") while it stays chosen.
+        if (vendor == GpuDriverStore.Vendor.ADRENO && originalSelection.isEmpty()) {
+            originalSelection = GpuDriverStore.BUNDLED_TURNIP_ID;
+        }
         pendingSelection = originalSelection;
         GpuDriverStore.Installed active = GpuDriverStore.selectedDriver(this);
         originalMode = active != null ? GpuDriverStore.loadMode(this, active) : null;
@@ -123,6 +128,20 @@ public final class GpuDriverActivity extends Activity {
     }
 
     private boolean isMali() { return vendor == GpuDriverStore.Vendor.MALI; }
+
+    /** Adreno: what choosing a non-Turnip driver (a Qualcomm package or the phone's own driver) means. */
+    private static final String NOT_RECOMMENDED_TEXT = "Qualcomm's drivers draw parts of this game wrong (for "
+        + "example the text of the highlighted menu row), and the game's fixes and tests are for Turnip. Use it to "
+        + "compare or if Turnip does not run well on your GPU; the bundled Stable Turnip v2 is the tested choice.";
+
+    /** A non-Turnip package installed on Adreno: kept and listed under "Not recommended" (#22). */
+    private boolean installedNotRecommended(GpuDriverStore.Installed installed) {
+        if (vendor != GpuDriverStore.Vendor.ADRENO || GpuDriverStore.isTurnip(installed)) return false;
+        Toast.makeText(this, "Installed " + installed.metadata.name + " (not recommended: not a Turnip driver)",
+            Toast.LENGTH_LONG).show();
+        refreshInstalled();
+        return true;
+    }
 
     /** Whether the driver the game runs with now loads in another mode than when the page opened. */
     private boolean activeModeChanged() {
@@ -188,7 +207,12 @@ public final class GpuDriverActivity extends Activity {
             String model = gpuName;
             int number = GpuDriverCatalog.adrenoModel(model);
             StringBuilder about = new StringBuilder("GPU: ").append(model != null ? model : "unknown");
-            if (number > 0) about.append(" · Eden recommends: ").append(GpuDriverCatalog.edenRecommendation(number));
+            if (number > 0) {
+                String recommended = GpuDriverCatalog.edenRecommendation(number);
+                about.append(" · Eden recommends: ").append(recommended);
+                // Eden's pick for Adreno 8xx is a Qualcomm build: not recommended for this game.
+                if (recommended.startsWith("GameHub")) about.append(" (a Qualcomm driver: not recommended here)");
+            }
             about.append("\nVerified with this game on Adreno 750: ").append(GpuDriverStore.VERIFIED_DRIVER);
             page.addView(dim(about.toString()));
             page.addView(dim("The Qualcomm driver drops the text on the highlighted menu row. "
@@ -214,7 +238,8 @@ public final class GpuDriverActivity extends Activity {
         } else if (failedDriver != null) {
             notice = "The last start with \"" + failedDriver + "\" did not reach the game."
                 + (failedDriver.equals(GpuDriverStore.SYSTEM_DRIVER_NAME) ? ""
-                                                                   : " The system driver is selected again.")
+                   : vendor == GpuDriverStore.Vendor.ADRENO ? " Stable Turnip v2 is selected again."
+                                                            : " The system driver is selected again.")
                 + (isMali() && !failedDriver.equals(GpuDriverStore.SYSTEM_DRIVER_NAME)
                     ? " To try again, switch the driver's loading mode or pick another release." : "");
         }
@@ -293,40 +318,68 @@ public final class GpuDriverActivity extends Activity {
         installedSection.removeAllViews();
         choices.clear();
         List<GpuDriverStore.Installed> installed = GpuDriverStore.installed(this);
-        // Adreno: Turnip only (the system driver and Qualcomm packages are not offered).
-        final boolean turnipOnly = vendor == GpuDriverStore.Vendor.ADRENO;
-        if (turnipOnly) {
-            List<GpuDriverStore.Installed> turnips = new java.util.ArrayList<>();
-            for (GpuDriverStore.Installed driver : installed) if (GpuDriverStore.isTurnip(driver)) turnips.add(driver);
-            installed = turnips;
+        // Adreno: Turnip packages first; the phone's own driver and other packages (Qualcomm builds) under "Not
+        // recommended" (the owner, 2026-11-23), chosen only after a confirmation (addChoice).
+        final boolean adreno = vendor == GpuDriverStore.Vendor.ADRENO;
+        List<GpuDriverStore.Installed> turnips = new java.util.ArrayList<>();
+        List<GpuDriverStore.Installed> others = new java.util.ArrayList<>();
+        for (GpuDriverStore.Installed driver : installed) {
+            (adreno && !GpuDriverStore.isTurnip(driver) ? others : turnips).add(driver);
         }
-        boolean pendingExists = pendingSelection.isEmpty() && !turnipOnly;
+        boolean pendingExists = adreno ? GpuDriverStore.SYSTEM_DRIVER_CHOSEN.equals(pendingSelection)
+                                       : pendingSelection.isEmpty();
         for (GpuDriverStore.Installed driver : installed) pendingExists |= driver.id().equals(pendingSelection);
         if (!pendingExists) {
-            pendingSelection = turnipOnly ? GpuDriverStore.BUNDLED_TURNIP_ID : GpuDriverStore.SYSTEM_DRIVER;
+            pendingSelection = adreno ? GpuDriverStore.BUNDLED_TURNIP_ID : GpuDriverStore.SYSTEM_DRIVER;
         }
-        if (!turnipOnly) {
+        if (!adreno) {
             addChoice(GpuDriverStore.SYSTEM_DRIVER, GpuDriverStore.SYSTEM_DRIVER_NAME,
                 isMali() ? "Arm's Mali driver shipped with this device"
-                         : "The Vulkan driver shipped with this device", null);
+                         : "The Vulkan driver shipped with this device", null, false);
         }
-        for (GpuDriverStore.Installed driver : installed) {
-            addChoice(driver.id(), driver.metadata.name, driver.metadata.summary(), driver);
+        for (GpuDriverStore.Installed driver : turnips) {
+            addChoice(driver.id(), driver.metadata.name, driver.metadata.summary(), driver, false);
+        }
+        if (adreno) {
+            TextView heading = text("Not recommended", 15f, true);
+            heading.setTextColor(Color.rgb(255, 196, 80));
+            heading.setPadding(0, dp(10), 0, 0);
+            installedSection.addView(heading);
+            installedSection.addView(dim(NOT_RECOMMENDED_TEXT));
+            addChoice(GpuDriverStore.SYSTEM_DRIVER_CHOSEN, GpuDriverStore.SYSTEM_DRIVER_NAME + " (Qualcomm)",
+                "The Vulkan driver shipped with this device", null, true);
+            for (GpuDriverStore.Installed driver : others) {
+                addChoice(driver.id(), driver.metadata.name, driver.metadata.summary(), driver, true);
+            }
         }
         updatePrimary();
     }
 
-    private void addChoice(String id, String title, String summary, GpuDriverStore.Installed driver) {
+    private void addChoice(String id, String title, String summary, GpuDriverStore.Installed driver,
+                           boolean notRecommended) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         RadioButton radio = new RadioButton(this);
         radio.setChecked(id.equals(pendingSelection));
-        radio.setOnClickListener(v -> {
+        Runnable choose = () -> {
             pendingSelection = id;
             for (RadioButton other : choices) other.setChecked(other == radio);
             updatePrimary();
+        };
+        radio.setOnClickListener(v -> {
+            if (!notRecommended || id.equals(pendingSelection)) {
+                choose.run();
+                return;
+            }
+            // Not recommended (Adreno, not Turnip): only after a confirmation; the previous choice stays otherwise.
+            for (RadioButton other : choices) other.setChecked(other.getTag() != null && other.getTag().equals(pendingSelection));
+            new AlertDialog.Builder(this).setTitle("Not recommended")
+                .setMessage(title + ": " + NOT_RECOMMENDED_TEXT)
+                .setPositiveButton("Use it anyway", (dialog, which) -> choose.run())
+                .setNegativeButton("Cancel", null).show();
         });
+        radio.setTag(id);
         choices.add(radio);
         row.addView(radio);
         LinearLayout labels = new LinearLayout(this);
@@ -355,7 +408,10 @@ public final class GpuDriverActivity extends Activity {
             remove.setText("Remove");
             remove.setOnClickListener(v -> {
                 GpuDriverStore.remove(this, driver);
-                if (pendingSelection.equals(driver.id())) pendingSelection = GpuDriverStore.SYSTEM_DRIVER;
+                if (pendingSelection.equals(driver.id())) {
+                    pendingSelection = vendor == GpuDriverStore.Vendor.ADRENO ? GpuDriverStore.BUNDLED_TURNIP_ID
+                                                                               : GpuDriverStore.SYSTEM_DRIVER;
+                }
                 refreshInstalled();
                 renderSources();
             });
@@ -533,7 +589,9 @@ public final class GpuDriverActivity extends Activity {
             mainHandler.post(() -> {
                 dialog.dismiss();
                 if (isFinishing()) return;
-                if (installed != null) {
+                if (installed != null && installedNotRecommended(installed)) {
+                    // kept, listed under "Not recommended", not selected (installedNotRecommended)
+                } else if (installed != null) {
                     pendingSelection = installed.id();
                     Toast.makeText(this, "Installed " + installed.metadata.name, Toast.LENGTH_SHORT).show();
                 } else {
@@ -591,7 +649,9 @@ public final class GpuDriverActivity extends Activity {
             //noinspection ResultOfMethodCallIgnored
             copy.delete();
         }
-        if (installed != null) {
+        if (installed != null && installedNotRecommended(installed)) {
+            // kept, listed under "Not recommended", not selected (installedNotRecommended)
+        } else if (installed != null) {
             pendingSelection = installed.id();
             Toast.makeText(this, "Installed " + installed.metadata.name, Toast.LENGTH_SHORT).show();
         } else {

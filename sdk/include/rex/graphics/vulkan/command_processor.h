@@ -12,6 +12,7 @@
 
 #include <unordered_set>
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -1233,6 +1234,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool gpu_timing_enabled_ = false;
   // vulkan_lr_skip_battle_grey: a crossfade draw happened in this frame.
   bool lr_crossfade_this_frame_ = false;
+  // The last "GPU memory by kind" line (vulkan_log_device_memory_s).
+  std::chrono::steady_clock::time_point device_memory_logged_at_{};
   // 0 - not checked yet, 1 - supported, -1 - unsupported.
   int gpu_timing_support_ = 0;
   double gpu_timing_period_ns_ = 1.0;

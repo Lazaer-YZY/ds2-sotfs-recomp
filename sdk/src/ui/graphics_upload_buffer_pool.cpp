@@ -12,8 +12,15 @@
 #include <algorithm>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/math.h>
 #include <rex/ui/graphics_upload_buffer_pool.h>
+
+REXCVAR_DEFINE_UINT32(upload_buffer_max_free_mb, 0, "GPU",
+                      "Upload pages kept free per pool once the GPU is done with them (0 = all: the pool keeps its peak "
+                      "for the rest of the session, ~100 MB at 720p). Lower saves memory on phones with little RAM; "
+                      "a page freed and needed again later is allocated again.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace rex {
 namespace ui {
@@ -38,6 +45,26 @@ void GraphicsUploadBufferPool::Reclaim(uint64_t completed_submission_index) {
   }
   if (!submitted_first_) {
     submitted_last_ = nullptr;
+  }
+  // upload_buffer_max_free_mb: free pages beyond the cap (the first stays: it is the one being written). Only pages
+  // the GPU is done with are on this list.
+  const uint32_t max_free_mb = REXCVAR_GET(upload_buffer_max_free_mb);
+  if (max_free_mb && writable_first_ && page_size_) {
+    const size_t keep = std::max<size_t>(2, (size_t(max_free_mb) << 20) / page_size_);
+    Page* page = writable_first_;
+    for (size_t i = 1; i < keep && page->next_; ++i) {
+      page = page->next_;
+    }
+    Page* extra = page->next_;
+    if (extra) {
+      page->next_ = nullptr;
+      writable_last_ = page;
+      while (extra) {
+        Page* next = extra->next_;
+        delete extra;
+        extra = next;
+      }
+    }
   }
 }
 

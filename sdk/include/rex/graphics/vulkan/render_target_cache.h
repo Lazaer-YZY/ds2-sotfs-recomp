@@ -11,6 +11,7 @@
  */
 
 #include <array>
+#include <deque>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -80,6 +81,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
   struct Framebuffer {
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkExtent2D host_extent{};
+    // The last frame (RenderTargetCache::frame_index()) a draw or transfer looked it up (idle eviction).
+    uint64_t last_used_frame = 0;
     Framebuffer() = default;
     Framebuffer(VkFramebuffer framebuffer, const VkExtent2D& host_extent)
         : framebuffer(framebuffer), host_extent(host_extent) {}
@@ -95,6 +98,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
   bool Initialize(uint32_t shared_memory_binding_count);
   void Shutdown(bool from_destructor = false);
   void ClearCache() override;
+  // Render target memory for the log: "N MB in K, owning EDRAM data N MB in K, idle (no EDRAM data, unbound for
+  // idle_frames) N MB in K".
+  std::string RenderTargetMemoryReport(uint64_t idle_frames) const;
+  // vulkan_evict_idle_render_targets_s: destroys the render targets owning no EDRAM data and unbound for
+  // min_idle_frames, with their framebuffers (only when those are idle too). Returns how many, adds their bytes.
+  size_t EvictIdleRenderTargets(uint64_t min_idle_frames, uint64_t& freed_bytes);
+  // Evicted render targets, deleted once the submission current at their eviction has completed (a submission still
+  // in flight may read one, as a transfer source when it lost its EDRAM data).
+  std::deque<std::pair<uint64_t, RenderTarget*>> retired_render_targets_;
+  void DeleteRetiredRenderTargets(bool all);
 
   void CompletedSubmissionUpdated();
   void EndSubmission();

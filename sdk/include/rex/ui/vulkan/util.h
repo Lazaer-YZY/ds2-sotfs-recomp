@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 #include <rex/math.h>
 #include <rex/ui/vulkan/device.h>
@@ -118,6 +119,13 @@ inline VkImageSubresourceRange InitializeSubresourceRange(
   range.layerCount = layer_count;
   return range;
 }
+
+// GPU memory by kind, for the log (what a 1.7 GB footprint at 720p is made of): device memory allocations added
+// (positive bytes) or freed (negative). The dedicated-allocation helpers below note theirs themselves, by kind:
+// "render targets" / "render targets msaa" (images with attachment usage), "other images", "buffers".
+void NoteDeviceMemory(const char* kind, int64_t bytes);
+// "kind MB (count), ..." of what is live, largest first.
+std::string DeviceMemoryReport();
 
 // Creates a buffer backed by a dedicated allocation. The allocation size will
 // NOT be aligned to nonCoherentAtomSize - if mapping or flushing not the whole

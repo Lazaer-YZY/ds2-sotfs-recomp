@@ -518,6 +518,11 @@ public final class RuntimeActivity extends SDLActivity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && touchControls != null && touchControls.ctrlGone()) {
+            // CTRL removed after the start (CTRL option): Back opens Settings, and the key goes nowhere else.
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) touchControls.openSettingsFromBack();
+            return true;
+        }
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP
                 && !event.isCanceled() && touchControls != null) touchControls.revealCtrl();
         // Keep SDL's existing Back mapping/consumption, including gesture-generated keys.
@@ -526,6 +531,10 @@ public final class RuntimeActivity extends SDLActivity {
 
     @Override
     public void onBackPressed() {
+        if (touchControls != null && touchControls.ctrlGone()) {
+            touchControls.openSettingsFromBack();  // the back gesture, which comes without a key event
+            return;
+        }
         if (touchControls != null) touchControls.revealCtrl();
         // Preserve SDL's fallback behavior on Android versions that call this directly.
         super.onBackPressed();
@@ -683,6 +692,7 @@ public final class RuntimeActivity extends SDLActivity {
 
     @Override
     protected void onPause() {
+        bootHandler.removeCallbacks(deviceNote);
         if (touchControls != null) touchControls.onHostPause();
         // Leaving the game is when a player connects USB to fetch the log.
         PlayerLogs.publish(this);
@@ -745,7 +755,42 @@ public final class RuntimeActivity extends SDLActivity {
         if (companion != null) companion.onResume();
         bootHandler.removeCallbacks(bootSettled);
         bootHandler.postDelayed(bootSettled, BOOT_SETTLED_MS);
+        bootHandler.removeCallbacks(deviceNote);
+        bootHandler.post(deviceNote);
     }
+
+    /**
+     * Battery temperature and Android's thermal status (0 none .. 6 shutdown) and headroom (1.0 = at the throttling
+     * point, 10 s ahead) for the game log's heartbeat, every few seconds while the game is in front (issue #8: a phone
+     * that rebooted with nothing in its log; the native side reads the CPU / GPU sensors and memory itself).
+     */
+    private static final long DEVICE_NOTE_MS = 4000;
+    private final Runnable deviceNote = new Runnable() {
+        @Override public void run() {
+            StringBuilder note = new StringBuilder();
+            Intent battery = registerReceiver(null, new android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (battery != null) {
+                int tenths = battery.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
+                if (tenths != Integer.MIN_VALUE) note.append("bat_c=").append(tenths / 10f);
+            }
+            android.os.PowerManager power = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (power != null && Build.VERSION.SDK_INT >= 29) {
+                note.append(note.length() > 0 ? " " : "").append("thermal=").append(power.getCurrentThermalStatus());
+                if (Build.VERSION.SDK_INT >= 30) {
+                    float headroom = power.getThermalHeadroom(10);
+                    if (!Float.isNaN(headroom)) {
+                        note.append(String.format(java.util.Locale.ROOT, " headroom=%.2f", headroom));
+                    }
+                }
+            }
+            try {
+                if (note.length() > 0) nativeSetOption("device_thermal", note.toString());
+            } catch (UnsatisfiedLinkError notLoaded) {
+                return;  // the native library did not load: nothing to report to
+            }
+            bootHandler.postDelayed(this, DEVICE_NOTE_MS);
+        }
+    };
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
@@ -835,7 +880,7 @@ public final class RuntimeActivity extends SDLActivity {
                 android.util.Log.i("ds2recomp", "tu_dont_reserve_descriptor_set=false");
             }
             String turnipFlags = turnipDebugFlags(renderPrefs(this));
-            if (GpuDriverStore.needsTurnipSysmem(GpuDriverStore.gpuModel(), driver.metadata)
+            if (GpuDriverStore.isTurnip(driver) && GpuDriverStore.needsTurnipSysmem(GpuDriverStore.gpuModel(), driver.metadata)
                     && !turnipFlags.contains("mem")) {
                 turnipFlags = turnipFlags.isEmpty() ? "sysmem" : "sysmem," + turnipFlags;
             }
