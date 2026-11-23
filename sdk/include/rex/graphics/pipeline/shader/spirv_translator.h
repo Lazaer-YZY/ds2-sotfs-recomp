@@ -44,7 +44,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // passed around (2 bits per slot, kTextureSignClassSlots slots) it is kTextureSignClassesExpAdjustZero.
   static constexpr uint32_t kTextureSignClassExpAdjustZeroBit = 4;
   static constexpr uint32_t kTextureSignClassesExpAdjustZero = UINT32_C(1) << 31;
-  static constexpr uint32_t kTextureSignClassSlots = 8;
+  // DS2 port: 9 slots fit the stored pipeline description (8 in texture_sign_classes, the ninth in
+  // texture_sign_class_slot8); the ninth is used only with vulkan_texture_sign_class_ninth_slot
+  // (kTextureSignClassSlotsDefault otherwise), for pixel shaders with 9 textures (DS2's
+  // 1B4A4BFBB916037F). The translator gives every used fetch constant its specialization constant.
+  static constexpr uint32_t kTextureSignClassSlots = 9;
+  static constexpr uint32_t kTextureSignClassSlotsDefault = 8;
   static constexpr uint32_t kTextureSignClassBits = 2;
   enum TextureSignClass : uint32_t {
     kTextureSignClassRuntime = 0,
@@ -515,6 +520,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // cover the 512 MB in one binding and texel buffers can (2^27 dwords), and the cvar allows it.
   static bool UseSharedMemoryTexelBuffer(uint32_t max_storage_buffer_range,
                                          uint32_t max_texel_buffer_elements);
+  // DS2 port (vulkan_shared_memory_texel_buffer_vec4): the shared memory texel buffer is an
+  // R32G32B32A32_UINT view (2^25 16-byte blocks) instead of R32_UINT; vertex fetches read whole
+  // blocks and pick their words by the address's alignment (fewer texture-pipe fetches).
+  static bool IsSharedMemoryTexelBufferVec4();
   uint32_t GetSharedMemoryStorageBufferCountLog2() const {
     return GetSharedMemoryStorageBufferCountLog2(features_.max_storage_buffer_range);
   }
@@ -759,6 +768,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id EndianSwap128Uint4(spv::Id value, spv::Id endian);
 
   spv::Id LoadUint32FromSharedMemory(spv::Id address_dwords_int);
+  // The 16-byte block (uint4) at a block index (dword address / 4) of the R32G32B32A32_UINT shared
+  // memory texel buffer (only with IsSharedMemoryTexelBufferVec4 and the texel buffer in use).
+  spv::Id LoadUint4BlockFromSharedMemory(spv::Id block_index_int);
   // If `replace_mask` is provided, the bits specified in the mask will be
   // replaced with those from the value via OpAtomicAnd/Or.
   // Bits of `value` not in `replace_mask` will be ignored.

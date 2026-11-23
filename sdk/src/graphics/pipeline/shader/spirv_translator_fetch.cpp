@@ -205,6 +205,29 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
                              spv::NoPrecision);
   }
 
+  // vulkan_shared_memory_texel_buffer_vec4: the words come from the 16-byte blocks around the
+  // address. With the address A = 4 * Q + R (R = A & 3), the word at offset W is at position R + W
+  // of the window starting at block Q: for each of the 4 possible R, a fixed block (Q + floor((W +
+  // R) / 4)) and component, so only selects on R are needed at run time, and the blocks themselves
+  // are the same loads for every fetch of the vertex (merged by the host compiler).
+  const bool vec4_blocks = texel_buffer_shared_memory_ != spv::NoResult &&
+                           IsSharedMemoryTexelBufferVec4() && debug_opaque_word == spv::NoResult;
+  spv::Id block_base = spv::NoResult;
+  spv::Id alignment_is[4] = {};
+  int32_t vec4_block_offsets[8];
+  spv::Id vec4_block_loads[8];
+  uint32_t vec4_block_count = 0;
+  if (vec4_blocks) {
+    block_base = builder_->createBinOp(spv::OpShiftRightArithmetic, type_int_, address,
+                                       builder_->makeIntConstant(2));
+    spv::Id alignment =
+        builder_->createBinOp(spv::OpBitwiseAnd, type_int_, address, builder_->makeIntConstant(3));
+    for (int32_t r = 1; r < 4; ++r) {
+      alignment_is[r] =
+          builder_->createBinOp(spv::OpIEqual, type_bool_, alignment, builder_->makeIntConstant(r));
+    }
+  }
+
   // Load the needed words.
   unsigned int word_composite_indices[4] = {};
   spv::Id word_composite_constituents[4];
@@ -238,10 +261,44 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
                                     builder_->makeIntConstant((1 << 27) - 1))));
       continue;
     }
-    word_composite_constituents[word_count++] =
-        debug_zero_fetch_shader && current_shader().ucode_data_hash() == debug_zero_fetch_shader
-            ? builder_->makeUintConstant(0)
-            : LoadUint32FromSharedMemory(word_address);
+    if (debug_zero_fetch_shader && current_shader().ucode_data_hash() == debug_zero_fetch_shader) {
+      word_composite_constituents[word_count++] = builder_->makeUintConstant(0);
+      continue;
+    }
+    if (vec4_blocks) {
+      spv::Id candidates[4];
+      for (int32_t r = 0; r < 4; ++r) {
+        int32_t position = word_offset + r;
+        int32_t block_offset = position >= 0 ? position / 4 : -((3 - position) / 4);
+        uint32_t component = uint32_t(position - block_offset * 4);
+        spv::Id block = spv::NoResult;
+        for (uint32_t i = 0; i < vec4_block_count; ++i) {
+          if (vec4_block_offsets[i] == block_offset) {
+            block = vec4_block_loads[i];
+            break;
+          }
+        }
+        if (block == spv::NoResult) {
+          block = LoadUint4BlockFromSharedMemory(
+              block_offset ? builder_->createBinOp(spv::OpIAdd, type_int_, block_base,
+                                                   builder_->makeIntConstant(block_offset))
+                           : block_base);
+          if (vec4_block_count < 8) {
+            vec4_block_offsets[vec4_block_count] = block_offset;
+            vec4_block_loads[vec4_block_count] = block;
+            ++vec4_block_count;
+          }
+        }
+        candidates[r] = builder_->createCompositeExtract(block, type_uint_, component);
+      }
+      spv::Id word = candidates[0];
+      for (int32_t r = 1; r < 4; ++r) {
+        word = builder_->createTriOp(spv::OpSelect, type_uint_, alignment_is[r], candidates[r], word);
+      }
+      word_composite_constituents[word_count++] = word;
+      continue;
+    }
+    word_composite_constituents[word_count++] = LoadUint32FromSharedMemory(word_address);
   }
   spv::Id words;
   if (word_count > 1) {

@@ -258,6 +258,11 @@ REXCVAR_DEFINE_STRING(gpu_debug_skip_pixel_shader, "", "GPU/Vulkan",
                       "Diagnostics: skip every draw whose pixel shader has one of these ucode hashes (hex, "
                       "comma-separated). Can change while running")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(vulkan_texture_sign_class_ninth_slot, false, "GPU/Vulkan",
+                    "Texture sign specialization covers the ninth texture of a pixel shader too (the "
+                    "stored pipeline description's last 2 bits), so shaders with 9 textures drop the "
+                    "runtime sign / gamma path of their last one (exact; can change while running)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(vulkan_vertex_buffer_skip_same_range, false, "GPU/Vulkan",
                     "A vertex fetch whose address and size match what that fetch constant used "
                     "last (in any earlier frame) is not requested from the shared memory again. "
@@ -398,6 +403,13 @@ REXCVAR_DEFINE_BOOL(vulkan_render_area_restrict, false, "GPU",
                     "union of the scissors and rectangles their commands write, instead of the "
                     "whole EDRAM-tall framebuffer, so tile-based GPUs load and store less")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(vulkan_arm_driver_defaults, 1, "GPU/Vulkan",
+                     "Defaults for Arm's own Mali driver, applied at GPU setup to settings nothing else set: "
+                     "render passes instead of dynamic rendering (vulkan_dynamic_rendering false) and render "
+                     "areas restricted to what the passes write (vulkan_render_area_restrict true). 0 = off, "
+                     "1 = on Arm's proprietary driver, 2 = on any driver (to test the path on other GPUs)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Set by the Vulkan device code (sdk/src/ui/vulkan/vulkan_device.cpp) for the Android app's GPU driver page.
 extern "C" char rex_vulkan_failure_reason[256];
@@ -1215,6 +1227,34 @@ bool VulkanCommandProcessor::SetupContext() {
   REXGPU_INFO("VulkanCommandProcessor: mid-frame submissions {}",
               REXCVAR_GET(vulkan_submit_on_primary_buffer_end) ? "on" : "off");
 
+  // Arm's proprietary Mali driver (public issues #16 / #20 / #21, Mali-G615, 2026-11-22):
+  // - with dynamic rendering, gameplay had flickering vertices and broken surfaces, and players saw
+  //   them go away with render passes (CTRL's "Dynamic Rendering off");
+  // - gameplay was GPU-bound at 40-50 ms of GPU work per frame (20-25 fps against a 30 fps cap, felt as
+  //   stutter) with ~100 passes per frame, each loading and storing the whole EDRAM-tall framebuffer
+  //   (577x4937) while its writes cover ~28 % of it: on a tiler that is mostly wasted tile memory traffic.
+  // Both run before the render target and pipeline caches read them; a value from ds2.toml, a REX_*
+  // variable or the command line (CTRL's own options) wins.
+  {
+    int32_t arm_defaults = REXCVAR_GET(vulkan_arm_driver_defaults);
+    bool arm_driver = device_properties.driverID == VK_DRIVER_ID_ARM_PROPRIETARY;
+    if (arm_defaults >= 2 || (arm_defaults == 1 && arm_driver)) {
+      static const std::pair<const char*, const char*> kArmDefaults[] = {
+          {"vulkan_dynamic_rendering", "false"},
+          {"vulkan_render_area_restrict", "true"},
+      };
+      std::string applied;
+      for (const auto& [name, value] : kArmDefaults) {
+        if (rex::cvar::GetFlagSource(name) != rex::cvar::Source::kDefault) continue;
+        rex::cvar::SetFlagByName(name, value);
+        applied += std::string(applied.empty() ? "" : ", ") + name + "=" + value;
+      }
+      REXGPU_INFO("VulkanCommandProcessor: Arm driver defaults ({}): {}",
+                  arm_driver ? "Arm's proprietary driver" : "forced on another driver",
+                  applied.empty() ? std::string("none, all set elsewhere") : applied);
+    }
+  }
+
   // The unconditional inclusion of the vertex shader stage also covers the case
   // of manual index / factor buffer fetch (the system constants and the shared
   // memory are needed for that) in the tessellation vertex shader when
@@ -1473,7 +1513,9 @@ bool VulkanCommandProcessor::SetupContext() {
       device_properties.maxStorageBufferRange, device_properties.maxTexelBufferElements);
   REXGPU_INFO("Shared memory shader reads: {}",
               shared_memory_texel_buffer
-                  ? "one R32_UINT texel buffer (512 MB)"
+                  ? (SpirvShaderTranslator::IsSharedMemoryTexelBufferVec4()
+                         ? std::string("one R32G32B32A32_UINT texel buffer (512 MB, 16-byte vertex fetches)")
+                         : std::string("one R32_UINT texel buffer (512 MB)"))
                   : fmt::format("{} storage buffer(s)", shared_memory_binding_count));
   VkDescriptorSetLayoutBinding shared_memory_and_edram_descriptor_set_layout_bindings[3];
   shared_memory_and_edram_descriptor_set_layout_bindings[0].binding = 0;
@@ -1618,7 +1660,9 @@ bool VulkanCommandProcessor::SetupContext() {
   if (shared_memory_texel_buffer) {
     VkBufferViewCreateInfo view_create_info = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO};
     view_create_info.buffer = shared_memory_->buffer();
-    view_create_info.format = VK_FORMAT_R32_UINT;
+    view_create_info.format = SpirvShaderTranslator::IsSharedMemoryTexelBufferVec4()
+                                  ? VK_FORMAT_R32G32B32A32_UINT
+                                  : VK_FORMAT_R32_UINT;
     view_create_info.offset = 0;
     view_create_info.range = SharedMemory::kBufferSize;
     if (dfn.vkCreateBufferView(device, &view_create_info, nullptr,
@@ -5632,9 +5676,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (pixel_shader && !shaders_pending_translation &&
       SpirvShaderTranslator::IsTextureSignSpecializationEnabled()) {
     texture_sign_classes = VulkanPipelineCache::GetTextureSignClasses(
-        pixel_shader->GetUsedTextureMaskAfterTranslation(), [this](uint32_t fetch_constant_index) {
+        pixel_shader->GetUsedTextureMaskAfterTranslation(),
+        [this](uint32_t fetch_constant_index) {
           return texture_cache_->GetActiveTextureSwizzledSigns(fetch_constant_index);
-        });
+        },
+        REXCVAR_GET(vulkan_texture_sign_class_ninth_slot)
+            ? SpirvShaderTranslator::kTextureSignClassSlots
+            : SpirvShaderTranslator::kTextureSignClassSlotsDefault);
     // DS2 port: when every texture of the pixel shader has exponent adjustment 0, the specialized
     // variant drops the multiply by 2^exp_adjust (kTextureSignClassesExpAdjustZero).
     if (texture_sign_classes && REXCVAR_GET(spirv_texture_exp_adjust_specialization)) {

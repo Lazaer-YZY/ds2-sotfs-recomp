@@ -109,7 +109,7 @@ class VulkanPipelineCache {
   template <typename GetSwizzledSigns>
   static uint32_t GetTextureSignClasses(
       uint32_t pixel_shader_used_texture_mask, GetSwizzledSigns get_swizzled_signs,
-      uint32_t slots = SpirvShaderTranslator::kTextureSignClassSlots) {
+      uint32_t slots = SpirvShaderTranslator::kTextureSignClassSlotsDefault) {
     uint32_t classes = 0;
     uint32_t remaining = pixel_shader_used_texture_mask;
     for (uint32_t slot = 0; slot < slots && remaining; ++slot) {
@@ -239,9 +239,13 @@ class VulkanPipelineCache {
     // (SpirvShaderTranslator::kTextureSignClassExpAdjustZeroBit). One of the 3 bits left in the
     // 8 bytes (35 + 27 = 62): stored descriptions keep their size and read it as 0.
     uint32_t texture_exp_adjust_zero : 1;  // 27
-    // NO more than 2 more bits here: the struct is packed, its bit-fields are contiguous, so a
-    // 65th bit makes every stored description a byte longer and the whole pipeline storage
-    // "corrupted" (2026-11-11). Changing the layout needs a kVersion bump.
+    // Sign class of the ninth texture (SpirvShaderTranslator::kTextureSignClassSlots = 9, used with
+    // vulkan_texture_sign_class_ninth_slot): the last 2 bits of the 8 bytes; stored descriptions
+    // read it as 0 (runtime signs), as before it existed.
+    uint32_t texture_sign_class_slot8 : 2;  // 29
+    // NO more bits here: the struct is packed, its bit-fields are contiguous, so a 65th bit makes
+    // every stored description a byte longer and the whole pipeline storage "corrupted"
+    // (2026-11-11). Changing the layout needs a kVersion bump.
 
     // Filled only for the attachments present in the render pass object.
     PipelineRenderTarget render_targets[xenos::kMaxColorRenderTargets];
@@ -251,7 +255,8 @@ class VulkanPipelineCache {
     // The sign classes as passed around (SpirvShaderTranslator::kTextureSignClassesExpAdjustZero
     // in bit 31).
     uint32_t TextureSignClassesWord() const {
-      return texture_sign_classes | (texture_exp_adjust_zero ? (UINT32_C(1) << 31) : 0);
+      return texture_sign_classes | (uint32_t(texture_sign_class_slot8) << 16) |
+             (texture_exp_adjust_zero ? (UINT32_C(1) << 31) : 0);
     }
     PipelineDescription() {
       Reset();

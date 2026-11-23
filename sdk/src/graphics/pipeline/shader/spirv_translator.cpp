@@ -33,11 +33,23 @@ REXCVAR_DEFINE_BOOL(vulkan_shared_memory_texel_buffer, true, "GPU/Vulkan",
                     "128/256 MB (Adreno/Turnip), instead of selecting one of several storage "
                     "buffers per load")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(vulkan_shared_memory_texel_buffer_vec4, false, "GPU/Vulkan",
+                    "With vulkan_shared_memory_texel_buffer: the view is R32G32B32A32_UINT, and a "
+                    "vertex fetch reads the 16-byte blocks holding its words and picks them by the "
+                    "address's alignment (the compiler merges the same blocks across the shader's "
+                    "fetches: 3 texture-pipe fetches instead of 9 for a 9-dword vertex). The same "
+                    "words, so the same results")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(vulkan_shader_pixel_contraction, false, "GPU/Vulkan",
                     "Let the driver contract multiplies and adds of translated pixel shaders into "
                     "fused multiply-adds (strips their NoContraction decorations). Xenos math stays "
                     "unfused otherwise; vertex shaders always keep it for position invariance "
                     "between passes. Pixel results may differ in the last bits.");
+REXCVAR_DEFINE_BOOL(spirv_debug_vertex_contraction, false, "GPU/Vulkan",
+                    "Diagnostics: strip NoContraction from vertex shaders too (fused multiply-adds; "
+                    "positions of the same geometry may then differ between shader variants, so "
+                    "depth-equal passes can flicker): the ceiling of vertex ALU savings")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(spirv_structured_forward_jumps, true, "GPU/Vulkan",
                     "Shaders whose jumps all go forward (no calls, only empty loops): structured "
                     "if-blocks guarded by a pending jump target instead of the program counter "
@@ -56,7 +68,11 @@ bool SpirvShaderTranslator::UseSharedMemoryTexelBuffer(uint32_t max_storage_buff
                                                        uint32_t max_texel_buffer_elements) {
   return REXCVAR_GET(vulkan_shared_memory_texel_buffer) &&
          GetSharedMemoryStorageBufferCountLog2(max_storage_buffer_range) != 0 &&
-         max_texel_buffer_elements >= (uint32_t(1) << 27);
+         max_texel_buffer_elements >= (uint32_t(1) << (IsSharedMemoryTexelBufferVec4() ? 25 : 27));
+}
+
+bool SpirvShaderTranslator::IsSharedMemoryTexelBufferVec4() {
+  return REXCVAR_GET(vulkan_shared_memory_texel_buffer_vec4);
 }
 
 SpirvShaderTranslator::Features::Features(bool all)
@@ -1319,7 +1335,8 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
   // TODO(Triang3l): Avoid copy?
   std::vector<unsigned int> module_uints;
   builder_->dump(module_uints);
-  if (is_pixel_shader() && REXCVAR_GET(vulkan_shader_pixel_contraction)) {
+  if ((is_pixel_shader() && REXCVAR_GET(vulkan_shader_pixel_contraction)) ||
+      (is_vertex_shader() && REXCVAR_GET(spirv_debug_vertex_contraction))) {
     // Drop "OpDecorate %x NoContraction" (opcode 71, decoration 42) so the driver may fuse
     // multiplies and adds (vulkan_shader_pixel_contraction).
     size_t out = 5;
@@ -4279,6 +4296,16 @@ spv::Id SpirvShaderTranslator::EndianSwap128Uint4(spv::Id value, spv::Id endian)
   return EndianSwap32Uint(value, endian);
 }
 
+spv::Id SpirvShaderTranslator::LoadUint4BlockFromSharedMemory(spv::Id block_index_int) {
+  assert_true(texel_buffer_shared_memory_ != spv::NoResult && IsSharedMemoryTexelBufferVec4());
+  // 2^25 blocks of 16 bytes cover the 512 MB.
+  spv::Id block_index = builder_->createBinOp(spv::OpBitwiseAnd, type_int_, block_index_int,
+                                              builder_->makeIntConstant((1 << 25) - 1));
+  spv::Id texels = builder_->createLoad(texel_buffer_shared_memory_, spv::NoPrecision);
+  return builder_->createOp(spv::OpImageFetch, type_uint4_,
+                            std::vector<spv::Id>{texels, block_index});
+}
+
 spv::Id SpirvShaderTranslator::LoadUint32FromSharedMemory(spv::Id address_dwords_int) {
   spv::StorageClass storage_class = features_.spirv_version >= spv::Spv_1_3
                                         ? spv::StorageClassStorageBuffer
@@ -4287,6 +4314,15 @@ spv::Id SpirvShaderTranslator::LoadUint32FromSharedMemory(spv::Id address_dwords
   uint32_t binding_count_log2 = GetSharedMemoryStorageBufferCountLog2();
 
   if (texel_buffer_shared_memory_ != spv::NoResult) {
+    if (IsSharedMemoryTexelBufferVec4()) {
+      // R32G32B32A32_UINT view: the block holding the dword, then the dword within it.
+      spv::Id block = LoadUint4BlockFromSharedMemory(builder_->createBinOp(
+          spv::OpShiftRightArithmetic, type_int_, address_dwords_int, builder_->makeIntConstant(2)));
+      return builder_->createVectorExtractDynamic(
+          block, type_uint_,
+          builder_->createBinOp(spv::OpBitwiseAnd, type_int_, address_dwords_int,
+                                builder_->makeIntConstant(3)));
+    }
     // One texel buffer view of the whole 512 MB (2^27 dwords): no per-load binding switch.
     spv::Id address = builder_->createBinOp(spv::OpBitwiseAnd, type_int_, address_dwords_int,
                                             builder_->makeIntConstant((1 << 27) - 1));

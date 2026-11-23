@@ -72,6 +72,7 @@ REXCVAR_DECLARE(bool, vulkan_shader_xenos_multiply_vertex);
 REXCVAR_DECLARE(bool, vulkan_texture_fetch_implicit_lod);
 REXCVAR_DECLARE(uint32_t, spirv_texture_weights_subtexel_snap);
 REXCVAR_DECLARE(bool, vulkan_shared_memory_texel_buffer);
+REXCVAR_DECLARE(bool, spirv_debug_vertex_contraction);
 REXCVAR_DECLARE(bool, spirv_structured_forward_jumps);
 
 // Test: the game's user clip planes become gl_ClipDistance outputs (a vertex shader variant); on Adreno a clip
@@ -1934,6 +1935,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
   PipelineDescription preferred_description = description;
   if (try_sign_specialization) {
     preferred_description.texture_sign_classes = texture_sign_classes & 0xFFFF;
+    preferred_description.texture_sign_class_slot8 = (texture_sign_classes >> 16) & 3;
     preferred_description.texture_exp_adjust_zero =
         (texture_sign_classes & SpirvShaderTranslator::kTextureSignClassesExpAdjustZero) ? 1 : 0;
   }
@@ -4332,7 +4334,9 @@ uint64_t VulkanPipelineCache::PreRasterizationLibraryKeyHash(uint64_t vertex_sha
       (uint32_t(REXCVAR_GET(vulkan_shader_xenos_multiply)) << 1) |
       (uint32_t(REXCVAR_GET(vulkan_shader_xenos_multiply_vertex)) << 2) |
       (uint32_t(REXCVAR_GET(vulkan_shared_memory_texel_buffer)) << 3) |
-      (uint32_t(REXCVAR_GET(spirv_structured_forward_jumps)) << 4);
+      (uint32_t(REXCVAR_GET(spirv_structured_forward_jumps)) << 4) |
+      (uint32_t(SpirvShaderTranslator::IsSharedMemoryTexelBufferVec4()) << 5) |
+      (uint32_t(REXCVAR_GET(spirv_debug_vertex_contraction)) << 6);
   return XXH3_64bits(&key, sizeof(key));
 }
 
@@ -5505,7 +5509,9 @@ void VulkanPipelineCache::PrecompileThread() {
                                 (uint32_t(REXCVAR_GET(spirv_structured_forward_jumps)) << 14) |
                                 (uint32_t(SpirvShaderTranslator::IsVertexFetchEndianSpecializationEnabled())
                                  << 15) |
-                                (uint32_t(REXCVAR_GET(spirv_texture_weights_subtexel_snap) != 0) << 16);
+                                (uint32_t(REXCVAR_GET(spirv_texture_weights_subtexel_snap) != 0) << 16) |
+                                (uint32_t(SpirvShaderTranslator::IsSharedMemoryTexelBufferVec4()) << 17) |
+                                (uint32_t(REXCVAR_GET(spirv_debug_vertex_contraction)) << 18);
   std::memcpy(marker + 24, &precompile_version, 4);
   if (FILE* file = rex::filesystem::OpenFile(precompile_marker_path_, "rb")) {
     uint8_t existing[28];
