@@ -443,20 +443,36 @@ public final class RuntimeActivity extends SDLActivity {
         nativeSetOption("fps", fps);
     }
 
-    // Sustained performance mode (on by default; debug extra DS2_SUSTAINED=0 turns it off): asks the
-    // power HAL for clocks the device can hold indefinitely instead of bursting to peak clocks and
-    // then throttling, which on the Thor showed up as temperature spikes and the fan ramping up and
-    // down. Only some devices support it; the result goes to logcat (tag ds2recomp).
+    // Sustained performance mode (CTRL -> Troubleshooting -> Advanced, off by default since 0.5.8): asks the power
+    // HAL for clocks the device can hold indefinitely. AOSP's reference HAL does that by capping the CPU and GPU
+    // clocks, and how low is up to the vendor (a PPSSPP report: GPU held at 315 MHz). It was on by default (from the
+    // LR port) and never measured on a device that supports it (the Thor does not); issue #34's Adreno 720 stayed at
+    // 510 MHz while other games reached ~980. Debug launches: --es DS2_SUSTAINED 1|0 decides.
+    static final String SUSTAINED = "sustained";
+    /** "on", "off" or "not supported": device.txt and the report form carry it (issue #34). */
+    static volatile String sustainedState = "not set";
+
+    static boolean sustainedSupported(Context context) {
+        android.os.PowerManager pm = (android.os.PowerManager) context.getSystemService(POWER_SERVICE);
+        return pm != null && pm.isSustainedPerformanceModeSupported();
+    }
+
     private void applySustainedPerformanceMode() {
-        boolean want = true;
+        boolean want = renderPrefs(this).getBoolean(SUSTAINED, false);
         if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             String extra = getIntent().getStringExtra("DS2_SUSTAINED");
             if ("0".equals(extra)) want = false;
+            if ("1".equals(extra)) want = true;
         }
-        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
-        boolean supported = pm != null && pm.isSustainedPerformanceModeSupported();
-        if (want && supported) getWindow().setSustainedPerformanceMode(true);
-        android.util.Log.i("ds2recomp", "sustained performance mode: " + (supported ? (want ? "on" : "off (DS2_SUSTAINED=0)") : "not supported on this device"));
+        setSustainedPerformance(want);
+    }
+
+    /** CTRL dialog: applies at once (the window flag can change while the game runs). */
+    void setSustainedPerformance(boolean want) {
+        boolean supported = sustainedSupported(this);
+        if (supported) getWindow().setSustainedPerformanceMode(want);
+        sustainedState = supported ? (want ? "on" : "off") : "not supported";
+        android.util.Log.i("ds2recomp", "sustained performance mode: " + sustainedState);
     }
 
     @Override
@@ -699,6 +715,7 @@ public final class RuntimeActivity extends SDLActivity {
         String device = PlayerLogs.deviceDescription() + "\napp=" + getPackageName() + " " + version
             + "\ngpu=" + GpuDriverStore.gpuModel()
             + "\ndriver=" + (driver != null ? driver.metadata.name : GpuDriverStore.SYSTEM_DRIVER_NAME)
+            + "\nsustained_performance_mode=" + sustainedState
             + "\nsettings=" + new java.util.TreeMap<>(prefs.getAll());
         return device;
     }

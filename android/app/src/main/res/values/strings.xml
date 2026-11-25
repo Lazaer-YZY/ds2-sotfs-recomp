@@ -75,6 +75,9 @@
     <!-- Performance -->
     <string name="touch_prime_core">Use the fastest CPU core</string>
     <string name="touch_prime_core_help">Smoother in busy scenes, a little more power.</string>
+    <string name="touch_sustained">Sustained performance mode</string>
+    <string name="touch_sustained_help">Asks Android for clocks the phone can hold for hours. On some phones that caps the GPU well below its top speed, so it is off by default; try it only if your phone overheats.</string>
+    <string name="touch_sustained_unsupported">Sustained performance mode: this phone does not offer it.</string>
     <string name="touch_perf_overlay">Performance overlay</string>
     <string name="touch_perf_overlay_help">Frame rate and frame times. May cause performance issues.</string>
     <!-- Troubleshooting -->

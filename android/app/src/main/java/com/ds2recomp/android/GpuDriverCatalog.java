@@ -50,13 +50,15 @@ final class GpuDriverCatalog {
          * newest RELEASES_PER_SOURCE (the source publishes almost daily); null if none.
          */
         final String recommendedTag;
+        /** The Adreno models the recommended release is for; null: every device the source lists. */
+        final int[] recommendedForAdreno;
 
         Source(String name, String path, boolean useTagName, boolean sortByPublishTime) {
-            this(name, path, useTagName, sortByPublishTime, GpuDriverStore.Vendor.ADRENO, ".zip", null);
+            this(name, path, useTagName, sortByPublishTime, GpuDriverStore.Vendor.ADRENO, ".zip", null, null);
         }
 
         Source(String name, String path, boolean useTagName, boolean sortByPublishTime,
-               GpuDriverStore.Vendor vendor, String assetSuffix, String recommendedTag) {
+               GpuDriverStore.Vendor vendor, String assetSuffix, String recommendedTag, int[] recommendedForAdreno) {
             this.name = name;
             this.path = path;
             this.useTagName = useTagName;
@@ -64,6 +66,15 @@ final class GpuDriverCatalog {
             this.vendor = vendor;
             this.assetSuffix = assetSuffix;
             this.recommendedTag = recommendedTag;
+            this.recommendedForAdreno = recommendedForAdreno;
+        }
+
+        /** The release recommended on this device, or null. */
+        String recommendedTag() {
+            if (recommendedTag == null || recommendedForAdreno == null) return recommendedTag;
+            int model = deviceAdreno();
+            for (int number : recommendedForAdreno) if (number == model) return recommendedTag;
+            return null;
         }
 
         String releasesUrl() {
@@ -71,7 +82,7 @@ final class GpuDriverCatalog {
         }
 
         String recommendedUrl() {
-            return "https://api.github.com/repos/" + path + "/releases/tags/" + recommendedTag;
+            return "https://api.github.com/repos/" + path + "/releases/tags/" + recommendedTag();
         }
 
         String cacheName() { return path.replace('/', '_') + ".json"; }
@@ -86,6 +97,22 @@ final class GpuDriverCatalog {
      */
     static final String PANVK_RECOMMENDED_TAG = "panvk-kbase-v0.1.0-rc3";
 
+    /**
+     * StevenMXZ's Turnip v27.0.0-R3 (release v40, 2026-11-23), recommended on the Adreno 650 / 660: players ran 720p
+     * with it where the bundled Stable Turnip v2 crashed (issue #30, Adreno 650, ~50 fps; issue #24, Adreno 660,
+     * 720p / 30 for 11 minutes at 29.8 fps with no crash, both 2026-11-25).
+     */
+    static final String STEVENMXZ_R3_TAG = "v40";
+    static final int[] STEVENMXZ_R3_ADRENO = { 650, 660 };
+
+    private static int deviceAdreno = -1;
+
+    /** This device's Adreno number (sysfs name, else the chip); 0 when unknown. */
+    static synchronized int deviceAdreno() {
+        if (deviceAdreno < 0) deviceAdreno = DeviceProfile.adrenoNumber(GpuDriverStore.gpuModel(), DeviceProfile.socModel());
+        return deviceAdreno;
+    }
+
     /** Eden's sources and flags for Adreno, then the PanVK builds for Mali. */
     static final List<Source> SOURCES = Collections.unmodifiableList(Arrays.asList(
         new Source("Mr. Purple Turnip", "MrPurple666/purple-turnip", false, false),
@@ -97,10 +124,13 @@ final class GpuDriverCatalog {
         new Source("Whitebelyash Turnip", "whitebelyash/freedreno_turnip-CI", false, true),
         // The GTA IV recomp port's driver on its Adreno 650 test device (Turnip v26.3.0-R6, release v37): offered to
         // the Adreno 6xx reporters (#8, #11). Releases also carry Gen8 (Adreno 8xx) and One UI zips.
-        new Source("StevenMXZ Turnip", "StevenMXZ/Adreno-Tools-Drivers", false, true),
+        // Turnip v27.0.0-R3 is the recommended release on the Adreno 650 / 660 (STEVENMXZ_R3_TAG). The repository
+        // also publishes Qualcomm builds; they are listed, and kept as "Not recommended" once installed.
+        new Source("StevenMXZ Turnip", "StevenMXZ/Adreno-Tools-Drivers", false, true,
+            GpuDriverStore.Vendor.ADRENO, ".zip", STEVENMXZ_R3_TAG, STEVENMXZ_R3_ADRENO),
         // Each release also has a glibc "-EMULATOR.zip" that cannot load on Android.
         new Source("PanVK-kbase (Mesa)", "zenithblue-oss/panvk-kbase-android", true, true,
-            GpuDriverStore.Vendor.MALI, ".adpkg.zip", PANVK_RECOMMENDED_TAG)));
+            GpuDriverStore.Vendor.MALI, ".adpkg.zip", PANVK_RECOMMENDED_TAG, null)));
 
     static List<Source> sourcesFor(GpuDriverStore.Vendor vendor) {
         List<Source> result = new ArrayList<>();
@@ -206,8 +236,9 @@ final class GpuDriverCatalog {
     }
 
     static boolean hasRecommended(List<Release> releases, Source source) {
-        if (source.recommendedTag == null) return true;
-        for (Release release : releases) if (release.tag.equals(source.recommendedTag)) return true;
+        String tag = source.recommendedTag();
+        if (tag == null) return true;
+        for (Release release : releases) if (release.tag.equals(tag)) return true;
         return false;
     }
 
@@ -219,7 +250,7 @@ final class GpuDriverCatalog {
         for (Release release : releases) {
             release.latest = !latestFound && !release.prerelease;
             latestFound |= release.latest;
-            release.recommended = release.tag.equals(source.recommendedTag);
+            release.recommended = release.tag.equals(source.recommendedTag());
         }
         return releases;
     }

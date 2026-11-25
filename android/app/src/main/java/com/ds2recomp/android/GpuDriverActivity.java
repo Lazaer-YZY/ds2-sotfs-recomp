@@ -118,9 +118,10 @@ public final class GpuDriverActivity extends Activity {
         pendingSelection = originalSelection;
         GpuDriverStore.Installed active = GpuDriverStore.selectedDriver(this);
         originalMode = active != null ? GpuDriverStore.loadMode(this, active) : null;
-        // Mali has one source: show its releases with the recommended one at once.
+        // A source with a release recommended on this device (PanVK on Mali, StevenMXZ R3 on Adreno 650 / 660)
+        // starts unfolded.
         for (GpuDriverCatalog.Source source : GpuDriverCatalog.sourcesFor(vendor)) {
-            if (source.recommendedTag != null) expandedSources.add(source.path);
+            if (source.recommendedTag() != null) expandedSources.add(source.path);
         }
         setContentView(buildPage());
         refreshInstalled();
@@ -212,6 +213,13 @@ public final class GpuDriverActivity extends Activity {
                 about.append(" · Eden recommends: ").append(recommended);
                 // Eden's pick for Adreno 8xx is a Qualcomm build: not recommended for this game.
                 if (recommended.startsWith("GameHub")) about.append(" (a Qualcomm driver: not recommended here)");
+            }
+            for (int r3 : GpuDriverCatalog.STEVENMXZ_R3_ADRENO) {
+                if (number == r3) {
+                    about.append("\nRecommended for the Adreno ").append(number)
+                        .append(" in this game: StevenMXZ Turnip v27.0.0-R3 (players ran 720p with it without the "
+                            + "crashes of the bundled driver)");
+                }
             }
             about.append("\nVerified with this game on Adreno 750: ").append(GpuDriverStore.VERIFIED_DRIVER);
             page.addView(dim(about.toString()));

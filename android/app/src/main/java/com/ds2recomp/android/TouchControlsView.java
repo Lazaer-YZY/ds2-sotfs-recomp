@@ -959,6 +959,12 @@ final class TouchControlsView extends View {
         // game's main thread, the GPU command thread and the draw thread may also run on the fastest core. At once.
         CheckBox primeCore = option(advanced, strings.getString(R.string.touch_prime_core),
             strings.getString(R.string.touch_prime_core_help), render.getBoolean("prime", RuntimeActivity.DEFAULT_PRIME));
+        // Sustained performance mode (off by default; RuntimeActivity.setSustainedPerformance, issue #34). At once.
+        boolean sustainedSupported = RuntimeActivity.sustainedSupported(activity);
+        CheckBox sustained = option(advanced, strings.getString(R.string.touch_sustained),
+            strings.getString(sustainedSupported ? R.string.touch_sustained_help : R.string.touch_sustained_unsupported),
+            sustainedSupported && render.getBoolean(RuntimeActivity.SUSTAINED, false));
+        sustained.setEnabled(sustainedSupported);
         // GPU compatibility (testing): renderer paths for GPUs that draw the game wrongly (issues #8, #11).
         header(advanced, strings.getString(R.string.touch_section_compat));
         hint(advanced, strings.getString(R.string.touch_compat_help)).setPadding(0, 0, 0,
@@ -1084,11 +1090,13 @@ final class TouchControlsView extends View {
                         ? render.getBoolean(RuntimeActivity.MALI_RELAXED_INTERPOLATORS, false) : maliRelaxed.isChecked())
                     .putBoolean(RuntimeActivity.MALI_NO_ROBUST, maliNoRobust == null
                         ? render.getBoolean(RuntimeActivity.MALI_NO_ROBUST, false) : maliNoRobust.isChecked())
+                    .putBoolean(RuntimeActivity.SUSTAINED, sustained.isChecked())
                     .putBoolean("prime", primeCore.isChecked()).commit();  // on disk before a restart below
                 RuntimeActivity.nativeSetOption("cheat_hp", cheatHp.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("cheat_stamina", cheatStamina.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("cheat_wear", cheatWear.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("prime", primeCore.isChecked() ? "1" : "0");
+                if (sustainedSupported) activity.setSustainedPerformance(sustained.isChecked());
                 activity.setPerfOverlay(perfOverlay.isChecked());
                 if (companion != null) activity.applyCompanionSetting(companion.isChecked(), companionHide.isChecked());
                 RuntimeActivity.nativeSetOption("dof", depthOfField.isChecked() ? "1" : "0");

@@ -152,7 +152,8 @@ final class ProblemReport {
             + Build.VERSION.RELEASE;
         String gpu = (gpuModel != null ? gpuModel : profile.gpu) + ", "
             + (driver != null ? driver.metadata.name : GpuDriverStore.SYSTEM_DRIVER_NAME);
-        StringBuilder settings = new StringBuilder("GPU profile: ").append(profile);
+        StringBuilder settings = new StringBuilder("GPU profile: ").append(profile)
+            .append("\nsustained performance mode: ").append(RuntimeActivity.sustainedState);
         for (Map.Entry<String, ?> entry : new TreeMap<>(RuntimeActivity.renderPrefs(activity).getAll()).entrySet()) {
             if (DeviceProfile.KEY_PROFILE.equals(entry.getKey())) continue;
             String line = "\n" + entry.getKey() + "=" + entry.getValue();
