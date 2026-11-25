@@ -1,0 +1,43 @@
+name: Report a problem
+description: A crash, a graphics glitch, low fps, a controller problem or anything else that goes wrong.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! For a useful log, turn on **Debug logging** first (CTRL → Troubleshooting), restart the game and make the problem happen.
+        Newer versions have **CTRL → Troubleshooting → Report a problem on GitHub**, which saves your logs and fills in the version, phone, GPU and settings below. On older versions, use **CTRL → Save logs for a bug report** and attach the zip.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: What you did, what you saw and what you expected. Where in the game? Does it happen every time?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Attach the DS2-logs-….zip (the Report button saves it in Download; CTRL → Save logs for a bug report makes one too). GitHub takes files up to 25 MB. Screenshots or a short video help with graphics problems.
+  - type: input
+    id: version
+    attributes:
+      label: DS2 port version
+      description: The version of this port (0.5.4, ...), not of a launcher such as Recompa.
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Phone or handheld, chip and Android version
+      placeholder: e.g. POCO F6, SM8635, Android 15
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and GPU driver
+      placeholder: e.g. Adreno 735, Turnip / Mali-G615, system driver
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings
+      description: Resolution, frame rate and anything you changed in CTRL.
+      render: text

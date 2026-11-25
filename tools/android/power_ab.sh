@@ -44,7 +44,7 @@ EOF
   else
     echo "$label: no run (see $out/$label.run)"
   fi
-  other=$(adb shell "pidof com.lrrecomp.android com.ds2recomp.android" </dev/null 2>/dev/null | tr -d '\r')
+  other=$(adb shell "pidof com.lrrecomp.android com.ds2recomp.android com.ducvd89.bloodborne com.ds3recomp.android" </dev/null 2>/dev/null | tr -d '\r')
   [ -z "$other" ] && adb shell input keyevent KEYCODE_SLEEP </dev/null >/dev/null 2>&1
   sleep "$COOL_S"
 done

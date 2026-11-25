@@ -602,6 +602,15 @@ public final class RuntimeActivity extends SDLActivity {
      * owner's S25, 2026-11-21; ported from LR's public #4 fix).
      */
     void startLogExport() {
+        startLogExport(false);
+    }
+
+    /** True while the file picker is open for "Report a problem" (Android 9 and older): the issue form opens next. */
+    private boolean reportAfterLogExport;
+
+    /** thenReport: open the GitHub issue form after the zip is saved (ProblemReport, Android 9 and older). */
+    void startLogExport(boolean thenReport) {
+        reportAfterLogExport = thenReport;
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
             .setType("application/zip")
@@ -655,7 +664,9 @@ public final class RuntimeActivity extends SDLActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQUEST_EXPORT_LOGS) {
-            if (resultCode == RESULT_OK && data != null && data.getData() != null) exportLogs(data.getData());
+            boolean report = reportAfterLogExport;
+            reportAfterLogExport = false;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) exportLogs(data.getData(), report);
             return;
         }
         if (requestCode == REQUEST_SAVE_BACKUP_FOLDER) {
@@ -675,8 +686,8 @@ public final class RuntimeActivity extends SDLActivity {
         super.onActivityResult(requestCode, resultCode, data);
     }
 
-    private void exportLogs(android.net.Uri uri) {
-        java.util.List<File> files = PlayerLogs.exportable(PlayerLogs.directory(this));
+    /** device.txt of a log zip: the phone, the app, the GPU, its driver and every render setting. */
+    String logDeviceText() {
         String version;
         try {
             version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
@@ -689,11 +700,20 @@ public final class RuntimeActivity extends SDLActivity {
             + "\ngpu=" + GpuDriverStore.gpuModel()
             + "\ndriver=" + (driver != null ? driver.metadata.name : GpuDriverStore.SYSTEM_DRIVER_NAME)
             + "\nsettings=" + new java.util.TreeMap<>(prefs.getAll());
+        return device;
+    }
+
+    private void exportLogs(android.net.Uri uri, boolean thenReport) {
+        java.util.List<File> files = PlayerLogs.exportable(PlayerLogs.directory(this));
+        String device = logDeviceText();
         new Thread(() -> {
             String message;
+            String savedName = null;
             try (java.io.OutputStream output = getContentResolver().openOutputStream(uri, "w")) {
                 if (output == null) throw new java.io.IOException("the file could not be opened");
-                PlayerLogs.exportZip(files, device, output);
+                // A report (Android 9 and older) keeps the zip under GitHub's limit; Save logs takes everything.
+                boolean complete = PlayerLogs.exportZip(files, device, output,
+                    thenReport ? PlayerLogs.GITHUB_ATTACHMENT_BUDGET : Long.MAX_VALUE);
                 String name = null;
                 try (android.database.Cursor row = getContentResolver().query(uri,
                         new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
@@ -701,12 +721,18 @@ public final class RuntimeActivity extends SDLActivity {
                 } catch (RuntimeException ignored) {
                     // The name is only for the message.
                 }
-                message = getString(R.string.logs_saved, name != null ? name : "a zip");
+                message = getString(R.string.logs_saved, name != null ? name : "a zip")
+                    + (complete ? "" : " " + getString(R.string.report_capture_left_out));
+                savedName = name != null ? name : PlayerLogs.exportName(new java.util.Date());
             } catch (java.io.IOException | RuntimeException e) {
                 message = getString(R.string.logs_save_failed, String.valueOf(e.getMessage()));
             }
             final String shown = message;
-            runOnUiThread(() -> Toast.makeText(this, shown, Toast.LENGTH_LONG).show());
+            final String reportName = thenReport ? savedName : null;
+            runOnUiThread(() -> {
+                Toast.makeText(this, shown, Toast.LENGTH_LONG).show();
+                if (reportName != null) ProblemReport.openIssue(this, reportName);
+            });
         }, "DS2 log export").start();
     }
 

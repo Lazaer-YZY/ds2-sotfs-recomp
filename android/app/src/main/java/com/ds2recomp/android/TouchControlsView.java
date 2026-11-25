@@ -933,6 +933,12 @@ final class TouchControlsView extends View {
         CheckBox debugLog = option(toolsSec, strings.getString(R.string.touch_debug_log),
             strings.getString(R.string.touch_debug_log_help),
             render.getBoolean("debug_log", RuntimeActivity.DEFAULT_DEBUG_LOG));
+        // The log zip in Download plus the public repository's issue form, filled in (ProblemReport; the owner,
+        // 2026-11-25).
+        Button reportButton = new Button(activity);
+        reportButton.setText(strings.getString(R.string.touch_report_problem));
+        reportButton.setAllCaps(false);
+        toolsSec.addView(reportButton);
         // A zip of the game's logs through the system file picker, so a player can attach it to a bug report from the
         // phone (Android 11+ hides Android/data from file managers; LR's public #4, the owner's S25).
         Button logsButton = new Button(activity);
@@ -1114,6 +1120,10 @@ final class TouchControlsView extends View {
         logsButton.setOnClickListener(v -> {
             settingsDialog.dismiss();
             activity.startLogExport();
+        });
+        reportButton.setOnClickListener(v -> {
+            settingsDialog.dismiss();
+            ProblemReport.show(activity);
         });
         captureButton.setOnClickListener(v -> {
             settingsDialog.dismiss();

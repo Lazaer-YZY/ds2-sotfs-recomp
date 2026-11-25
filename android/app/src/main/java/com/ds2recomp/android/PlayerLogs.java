@@ -165,22 +165,73 @@ final class PlayerLogs {
      * up to the export.
      */
     static void exportZip(List<File> files, String device, OutputStream output) throws IOException {
-        ZipOutputStream zip = new ZipOutputStream(output);
+        exportZip(files, device, output, Long.MAX_VALUE);
+    }
+
+    /**
+     * GitHub takes attachments up to 25 MB: Report a problem keeps its zip under this. The logs zip to a few MB; a
+     * frame capture is ~25 MB on its own (the Thor's, 2026-11-25), so it is the part left out.
+     */
+    static final long GITHUB_ATTACHMENT_BUDGET = 23L << 20;
+
+    /**
+     * As above; the frame capture goes in only when the zip stays within maxBytes (its files' full size counted).
+     * Returns false when it was left out.
+     */
+    static boolean exportZip(List<File> files, String device, OutputStream output, long maxBytes) throws IOException {
+        long[] written = {0};
+        OutputStream counted = new java.io.FilterOutputStream(output) {
+            @Override public void write(int b) throws IOException {
+                out.write(b);
+                written[0]++;
+            }
+
+            @Override public void write(byte[] b, int off, int len) throws IOException {
+                out.write(b, off, len);
+                written[0] += len;
+            }
+        };
+        ZipOutputStream zip = new ZipOutputStream(counted);
         zip.putNextEntry(new ZipEntry("logs/device.txt"));
         zip.write((device + "\n").getBytes(StandardCharsets.UTF_8));
         zip.closeEntry();
         byte[] buffer = new byte[1 << 16];
+        List<File> captured = new ArrayList<>();
+        long capturedBytes = 0;
         for (File file : files) {
             File parent = file.getParentFile();
-            boolean captured = parent != null && parent.getName().equals(FRAME_CAPTURE);
-            zip.putNextEntry(new ZipEntry("logs/" + (captured ? FRAME_CAPTURE + "/" : "") + file.getName()));
-            try (InputStream input = new FileInputStream(file)) {
-                for (int n; (n = input.read(buffer)) > 0; ) zip.write(buffer, 0, n);
+            if (parent != null && parent.getName().equals(FRAME_CAPTURE)) {
+                captured.add(file);
+                capturedBytes += file.length();
+                continue;
             }
-            zip.closeEntry();
+            putFile(zip, file, "logs/" + file.getName(), buffer);
+        }
+        boolean complete = true;
+        if (!captured.isEmpty()) {
+            // Every entry so far is closed, so written[] counts all of it.
+            if (written[0] + capturedBytes <= maxBytes) {
+                for (File file : captured) putFile(zip, file, "logs/" + FRAME_CAPTURE + "/" + file.getName(), buffer);
+            } else {
+                complete = false;
+                zip.putNextEntry(new ZipEntry("logs/" + FRAME_CAPTURE + "_left_out.txt"));
+                zip.write(("A frame capture of " + (capturedBytes >> 20) + " MB was left out to keep this zip under "
+                    + "GitHub's attachment limit; CTRL -> Save logs for a bug report includes it.\n")
+                    .getBytes(StandardCharsets.UTF_8));
+                zip.closeEntry();
+            }
         }
         zip.finish();
         zip.flush();
+        return complete;
+    }
+
+    private static void putFile(ZipOutputStream zip, File file, String name, byte[] buffer) throws IOException {
+        zip.putNextEntry(new ZipEntry(name));
+        try (InputStream input = new FileInputStream(file)) {
+            for (int n; (n = input.read(buffer)) > 0; ) zip.write(buffer, 0, n);
+        }
+        zip.closeEntry();
     }
 
     /** Whether settings.ini turns on Settings -> System -> Debug log (info lines in the runtime log). */

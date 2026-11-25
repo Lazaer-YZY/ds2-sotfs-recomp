@@ -54,11 +54,11 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
 - Simple cheats in CTRL: infinite HP, infinite stamina, no equipment wear, and +10,000 souls.
 - Touch controls with an editable layout and optional drag-to-look, or any game controller with its own button
   mapping; save backups to a folder of your choice; a GPU driver manager, GPU compatibility options, a performance
-  overlay, and **Save logs** for bug reports straight from the phone.
+  overlay, and **Report a problem on GitHub** (logs and a prefilled issue form) straight from the phone.
 - Known issues: short frame-time dips while new areas stream in; the heaviest views (the burning gate in the Forest
   of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. At 1080p, rare single frames
-  of the wrong picture on the Adreno 830 (720p has none). One Adreno 660 report of GPU hangs a minute into play (#24).
-  See the issue list.
+  of the wrong picture on the Adreno 830 (720p has none). On the Adreno 660, 720p crashes with the bundled driver;
+  540p, its default, runs (#24). See the issue list.
 
 ## Second screen (AYN Thor and other dual-screen handhelds)
 
@@ -134,14 +134,17 @@ Controls (touch controls and their layout, the CTRL button, controller buttons),
 60 fps, the performance overlay), Image (render resolution, Fill screen, anti-aliasing, depth of field), Second screen,
 Game (language, save backups, cheats) and Troubleshooting (GPU driver, logs, GPU compatibility options).
 Settings marked * apply at the next start (CTRL offers to restart). If the game crashes, turn on **Debug logging** in
-CTRL → Troubleshooting, reproduce it, then use **Save logs for a bug report** in CTRL and attach the zip to an issue.
+CTRL → Troubleshooting, reproduce it, then use **Report a problem on GitHub** (CTRL → Troubleshooting): it saves the
+logs in your Download folder and opens an issue form with your phone, GPU and settings filled in; attach the logs file
+there. (**Save logs for a bug report** makes the same zip without opening GitHub.)
 
 You can also build the APK yourself (below).
 
 ## Help test
 
-The more devices it is played on, the sooner it gets to 1.0. Open an [issue](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues)
-with:
+The more devices it is played on, the sooner it gets to 1.0. The quickest way to report is **CTRL → Troubleshooting →
+Report a problem on GitHub**, which fills in your phone, GPU and settings and saves the logs to attach. Or open an
+[issue](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues) with:
 
 - your phone or handheld and its GPU (Adreno, Mali, ...), and the GPU driver (GPU driver page);
 - your CTRL settings: resolution, Fill screen, frame rate;

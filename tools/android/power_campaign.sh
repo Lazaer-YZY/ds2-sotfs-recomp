@@ -47,7 +47,7 @@ print("mode %-3s fps avg %.1f min %.1f | CPU %.1f/%.1f C  GPU %.1f/%.1f C (avg/p
 EOF
   # ab_run/build_android already force-stopped and slept the device if they ran; never send a key while another
   # game runs (a refused mode once put the screen to sleep under another session's LR test).
-  other=$(adb shell "pidof com.lrrecomp.android com.ds2recomp.android" </dev/null 2>/dev/null | tr -d '')
+  other=$(adb shell "pidof com.lrrecomp.android com.ds2recomp.android com.ducvd89.bloodborne com.ds3recomp.android" </dev/null 2>/dev/null | tr -d '')
   [ -z "$other" ] && adb shell input keyevent KEYCODE_SLEEP </dev/null >/dev/null 2>&1
   sleep "$COOL_S"
 done

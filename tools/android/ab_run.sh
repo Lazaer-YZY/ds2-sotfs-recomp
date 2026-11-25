@@ -72,7 +72,7 @@ push_save() {  # every <AB_SAVE>/<xuid>/465307E4 goes to the device's user/<xuid
     MSYS_NO_PATHCONV=1 adb push "$(cygpath -m "$prof/465307E4")"       "/sdcard/Android/data/com.ds2recomp.android/files/user/$(basename "$prof")/" </dev/null >/dev/null || return 1
   done
 }
-if MSYS_NO_PATHCONV=1 adb shell pidof com.ds2recomp.android com.lrrecomp.android </dev/null >/dev/null 2>&1; then
+if MSYS_NO_PATHCONV=1 adb shell pidof com.ds2recomp.android com.lrrecomp.android com.ducvd89.bloodborne com.ds3recomp.android </dev/null >/dev/null 2>&1; then
   echo "a game is running on the device: not touching it"; exit 1
 fi
 if MSYS_NO_PATHCONV=1 adb shell dumpsys power </dev/null | grep -q "mWakefulness=Awake" && [ "${DS2_DEVICE_OK:-0}" != 1 ]; then
