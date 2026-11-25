@@ -40,6 +40,8 @@ public final class RuntimeActivity extends SDLActivity {
     private SaveBackups.Worker saveBackups;
     /** Set when the SDL thread starts the game (getArguments): a restored save is put in place only before that. */
     private static volatile boolean gameStarted;
+    /** DeviceProfile.seedDefaults' result at this process's first onCreate, for the game log (DS2_GPU_PROFILE). */
+    private static volatile String gpuProfileLine = "";
 
     private PerfOverlayView perfOverlay;
     /** The bottom screen of dual-screen devices (CompanionScreen), null until the game's views exist. */
@@ -445,6 +447,9 @@ public final class RuntimeActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         PlayerLogs.installCrashHandler(this);
+        // This GPU's first-start resolution and frame rate, for settings the player has not saved (DeviceProfile);
+        // before anything below reads them.
+        if (!gameStarted) gpuProfileLine = DeviceProfile.seedDefaults(this);
         // A save backup restored from CTRL goes in place first, before SDL starts the game and it reads its save
         // (SaveBackups.applyPendingRestore; never under a game already running in this process).
         String restored = gameStarted ? null : SaveBackups.applyPendingRestore(this);
@@ -845,6 +850,7 @@ public final class RuntimeActivity extends SDLActivity {
         // Logs go where a PC can copy them over USB; the device line names the phone.
         nativeSetenv("DS2_LOG_DIR", logDir.getAbsolutePath());
         nativeSetenv("DS2_ANDROID_DEVICE", PlayerLogs.deviceDescription());
+        nativeSetenv("DS2_GPU_PROFILE", gpuProfileLine);
         // Mesa drivers (Turnip) keep compiled pipelines on disk only with a cache
         // directory; Android gives them none. Other drivers ignore these.
         nativeSetenv("MESA_SHADER_CACHE_DIR", new File(getCacheDir(), "mesa_shader_cache").getAbsolutePath());

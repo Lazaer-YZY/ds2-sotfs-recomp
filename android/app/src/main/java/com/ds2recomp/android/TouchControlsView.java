@@ -785,8 +785,16 @@ final class TouchControlsView extends View {
             preferences.edit().putBoolean("look_drag", lookDrag).putFloat("look_speed", lookSpeed).apply();
         };
 
-        // --- Frame rate and performance: 30 / 40 / 60 / 60 on the 120 Hz panel in one list
-        // (RuntimeActivity.applyFrameRate), then the performance overlay.
+        // --- Frame rate and performance: first what this GPU starts with (DeviceProfile; the owner, 2026-11-25: "set
+        // default for first launch tailored to what cpu/gpu player has"), with a button that selects it again; then
+        // 30 / 40 / 60 / 60 on the 120 Hz panel in one list (RuntimeActivity.applyFrameRate), then the overlay.
+        DeviceProfile.Profile gpuProfile = DeviceProfile.current();
+        hint(rateSec, strings.getString(R.string.touch_recommended, gpuProfile.gpu, gpuProfile.renderHeight,
+            gpuProfile.fps)).setPadding(0, 0, 0, Math.round(2f * getResources().getDisplayMetrics().density));
+        Button recommendedButton = new Button(activity);
+        recommendedButton.setText(strings.getString(R.string.touch_use_recommended));
+        recommendedButton.setAllCaps(false);
+        rateSec.addView(recommendedButton);
         String fps = render.getString("fps", RuntimeActivity.DEFAULT_FPS);
         RadioButton fpsChoice = radio(rateSec, strings.getString(R.string.touch_frame_rate),
             "30".equals(fps) ? 0 : "40".equals(fps) ? 1 : render.getBoolean("panel120", false) ? 3 : 2,
@@ -832,6 +840,15 @@ final class TouchControlsView extends View {
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
         });
         syncWide.run();
+        // The recommended button: this GPU's resolution and frame rate selected here; Apply keeps them.
+        recommendedButton.setOnClickListener(v -> {
+            int rateIndex = "30".equals(gpuProfile.fps) ? 0 : "40".equals(gpuProfile.fps) ? 1 : 2;
+            ((RadioButton) ((RadioGroup) fpsChoice.getParent()).getChildAt(rateIndex)).setChecked(true);
+            resolutionChoice.setSelection(Math.max(0,
+                java.util.Arrays.asList(RuntimeActivity.RENDER_HEIGHTS).indexOf(gpuProfile.renderHeight)));
+            android.widget.Toast.makeText(activity, strings.getString(R.string.touch_recommended_set),
+                android.widget.Toast.LENGTH_SHORT).show();
+        });
         CheckBox fsr = option(imageSec, strings.getString(R.string.touch_fsr),
             strings.getString(R.string.touch_fsr_help), render.getBoolean("fsr", false));
         // Anisotropic filtering (RuntimeActivity.addDisplayArguments), on by default.
@@ -972,8 +989,13 @@ final class TouchControlsView extends View {
         CheckBox compatNoUbwc = null, compatTuReserve = null;
         if (turnip) {
             int tuMode = java.util.Arrays.asList(tuModes).indexOf(render.getString("compat_tu_mode", ""));
+            // "Automatic" names what it means on GPUs where it is sysmem (GpuDriverStore.needsTurnipSysmem).
+            GpuDriverStore.Installed selected = GpuDriverStore.selectedDriver(activity);
+            boolean autoSysmem = selected != null && GpuDriverStore.isTurnip(selected)
+                && GpuDriverStore.needsTurnipSysmem(GpuDriverStore.gpuModel(), selected.metadata);
             compatTuMode = radio(advanced, strings.getString(R.string.touch_compat_tu_mode), Math.max(tuMode, 0),
-                strings.getString(R.string.touch_compat_tu_auto), strings.getString(R.string.touch_compat_tu_sysmem),
+                strings.getString(autoSysmem ? R.string.touch_compat_tu_auto_sysmem : R.string.touch_compat_tu_auto),
+                strings.getString(R.string.touch_compat_tu_sysmem),
                 strings.getString(R.string.touch_compat_tu_gmem));
             compatNoUbwc = option(advanced, strings.getString(R.string.touch_compat_tu_noubwc), null,
                 render.getBoolean("compat_tu_noubwc", false));

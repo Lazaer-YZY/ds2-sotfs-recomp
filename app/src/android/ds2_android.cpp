@@ -41,6 +41,7 @@
 #include <SDL3/SDL_system.h>
 
 #include <rex/cvar.h>
+#include <rex/input/device_assignment.h>
 #include <rex/input/input.h>
 #include <rex/input/input_driver.h>
 #include <rex/input/input_system.h>
@@ -403,6 +404,11 @@ void WrapTouchInput(rex::RuntimeConfig& config) {
       input->AddDriver(std::make_unique<TouchPad>());
       SetPadMap(EnvOr("DS2_PAD_MAP", ""));
       input->SetGamepadFilter(RemapGamepad);
+      // Every controller is player 1 (the SDK's default gives each physical pad the guest user of its connection
+      // order). The game is single-player offline and only user 0 has a profile: START pressed on a pad that came up
+      // second gave "The game cannot be started because you are not signed in" (public issue #28, 2026-11-25).
+      input->SetDeviceAssignment(std::make_unique<in::SharedAssignment>());
+      REXLOG_INFO("ds2 android: every controller is player 1 (shared device assignment)");
     }
     return system;
   };
@@ -482,6 +488,10 @@ void ApplyDefaults() {
     rex::cvar::SetFlagByName(name, value);
   }
   REXLOG_INFO("ds2 android: {} defaults applied", std::size(kDefaults));
+  // The app's GPU profile: this GPU's first-start resolution and frame rate (DeviceProfile.java).
+  if (const char* profile = std::getenv("DS2_GPU_PROFILE"); profile && *profile) {
+    REXLOG_INFO("ds2 android: {}", profile);
+  }
   // The kernel in every log: kernels before 4.17 behave differently in the guest memory code (issue #4).
   {
     struct utsname name {};

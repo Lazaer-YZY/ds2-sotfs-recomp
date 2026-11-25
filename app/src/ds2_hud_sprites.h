@@ -25,6 +25,8 @@ struct Slots {
   bool gauge;  // the HP gauge's layout was drawn in the last 0.5 s (the game shows its HUD: the player can act)
 };
 Slots ReadSlots();
+// The covenant icon the HP gauge's emblem drew in the last second (data hash of the 64x64 vi_*.tpf texture), 0 if none.
+uint64_t CovenantIcon();
 // Milliseconds since the game last drew an enemy's or the boss's HP bar (0xFFFFFFFF: never). The game shows one for
 // what the player hits; the second screen's damage figures count only HP drops while one shows.
 uint32_t FoeBarAgeMs();

@@ -66,12 +66,20 @@ import java.util.regex.Pattern;
  * copy that was cut short (the app closed, or the game saved during the copy) is never offered for restore and is
  * removed by a later clean-up.
  *
- * Kept: the newest 10, and the newest of each of the 7 most recent days with backups (at most 17, about 120 MB).
- * Only folders named like a backup are ever deleted.
+ * Kept: the newest 10, and the newest of each of the 7 most recent days with backups (at most 17), within 64 MB in
+ * all: the newest 3 whatever their size, then one per day, then the other recent ones (BUDGET_BYTES, KEEP_MIN; the
+ * LR port's rule, the owner, 2026-11-24: "Ensure backup save folder doesnt grow disproportionally", "can take it to
+ * ds2"). With the ~7 MB save that is 9: the newest 3 and 6 days back (17 used to take ~120 MB). Only folders
+ * named like a backup are ever deleted.
  *
  * Restoring: the backup is copied into save_restore_pending/ of the app folder, and the next start moves it into
  * user/ before the game runs (applyPendingRestore, first thing in RuntimeActivity.onCreate), never under a running
  * game. The save it replaces is moved to user_before_restore/<time>/ (the newest 3 are kept), not deleted.
+ *
+ * File times (from the LR port, 2026-11-24): a copy through the folder provider gets the time of the copy, so the
+ * marker lists each copied file's and folder's time ("time=<ms> <xuid>/465307E4/...") and a restore puts them back
+ * once the save is in place. LR's load screen shows a save's file time as its "Date saved"; for DS2 it keeps the
+ * save as the game wrote it.
  */
 final class SaveBackups {
     private static final String TAG = "ds2recomp";
@@ -96,10 +104,19 @@ final class SaveBackups {
     /** Written last into a backup: without it the backup is incomplete. */
     private static final String MARKER = "DS2 backup.txt";
     private static final Pattern MARKER_FILES = Pattern.compile("(?m)^files=(\\d+)$");
+    private static final Pattern MARKER_BYTES = Pattern.compile("(?m)^bytes=(\\d+)$");
+    /**
+     * The marker's "time=<ms> <profile>/465307E4/..." lines: each copied file's and folder's modification time. A copy
+     * through the folder provider cannot keep it, so a restore puts the recorded times back (from the LR port, whose
+     * load screen shows a save's file time as its "Date saved").
+     */
+    private static final Pattern MARKER_TIME = Pattern.compile("(?m)^time=(\\d+) (.+)$");
 
     static final String PENDING = "save_restore_pending";
     private static final String PENDING_STAGING = PENDING + ".tmp";
     private static final String PENDING_NAME = "restore.txt";
+    /** The backup's time lines, applied once the saves are in place (applyPendingRestore). */
+    private static final String PENDING_TIMES = "times.txt";
     static final String BEFORE_RESTORE = "user_before_restore";
 
     static final long CHECK_MS = 60_000;
@@ -108,6 +125,14 @@ final class SaveBackups {
     static final int KEEP_NEWEST = 10;
     static final int KEEP_DAYS = 7;
     static final int KEEP_BEFORE_RESTORE = 3;
+    /**
+     * The backups' total size (the markers' bytes=) stays within this (see retained(List, List)). 17 copies of the
+     * ~7 MB save took ~120 MB (the LR port, the owner, 2026-11-24: "Ensure backup save folder doesnt grow
+     * disproportionally"; "can take it to ds2").
+     */
+    static final long BUDGET_BYTES = 64L << 20;
+    /** Kept whatever their size (always a few to go back to). */
+    static final int KEEP_MIN = 3;
     /** An incomplete backup older than this was cut short (a copy takes seconds) and is removed. */
     private static final long ABANDONED_MS = 60 * 60_000;
 
@@ -350,18 +375,21 @@ final class SaveBackups {
             String name = PREFIX + stampFormat().format(new Date(now));
             Uri backup = create(resolver, rootDocument(tree), Document.MIME_TYPE_DIR, name);
             long[] totals = new long[2];  // files, bytes
+            StringBuilder times = new StringBuilder();
             try {
                 // A provider renames a folder whose name is taken ("... (1)"); such a folder would never be listed.
                 String created = displayName(resolver, backup);
                 if (created != null && !created.equals(name)) throw new IOException(name + " already exists");
                 byte[] buffer = new byte[1 << 16];
                 for (File save : saves) {
+                    String path = save.getParentFile().getName() + "/" + TITLE_ID;
+                    addTime(times, save, path);
                     Uri profile = create(resolver, backup, Document.MIME_TYPE_DIR, save.getParentFile().getName());
                     copyToTree(resolver, save, create(resolver, profile, Document.MIME_TYPE_DIR, TITLE_ID), true,
-                        buffer, totals);
+                        buffer, totals, path, times);
                 }
                 if (!before.equals(signature(user))) throw new SaveChanged();
-                writeMarker(context, resolver, backup, now, totals);
+                writeMarker(context, resolver, backup, now, totals, times);
             } catch (IOException | RuntimeException e) {
                 delete(resolver, tree, backup);
                 throw e;
@@ -374,15 +402,17 @@ final class SaveBackups {
     }
 
     private static void copyToTree(ContentResolver resolver, File from, Uri to, boolean top, byte[] buffer,
-                                   long[] totals) throws IOException {
+                                   long[] totals, String path, StringBuilder times) throws IOException {
         File[] files = from.listFiles();
         if (files == null) throw new IOException("cannot read " + from);
         Arrays.sort(files);
         for (File file : files) {
             if (top && file.getName().equals(MARKETPLACE)) continue;
+            String relative = path + "/" + file.getName();
+            addTime(times, file, relative);
             if (file.isDirectory()) {
                 copyToTree(resolver, file, create(resolver, to, Document.MIME_TYPE_DIR, file.getName()), false,
-                    buffer, totals);
+                    buffer, totals, relative, times);
             } else if (file.isFile()) {
                 // application/octet-stream: providers keep the name as it is (no extension added).
                 Uri target = create(resolver, to, "application/octet-stream", file.getName());
@@ -399,13 +429,44 @@ final class SaveBackups {
         }
     }
 
-    private static void writeMarker(Context context, ContentResolver resolver, Uri backup, long when, long[] totals)
-            throws IOException {
+    /** A "time=<ms> <path>" line for the marker (a file or folder of the copy, path from the profile). */
+    private static void addTime(StringBuilder times, File file, String path) {
+        long time = file.lastModified();
+        if (time > 0) times.append("time=").append(time).append(' ').append(path).append('\n');
+    }
+
+    /**
+     * Sets the recorded modification times (the marker's time lines) on the files and folders under {@code base}
+     * that exist, for the paths starting with {@code prefix} (a profile's "<xuid>/"); a line whose path leaves
+     * {@code base} is skipped. Returns how many were set.
+     */
+    static int applyTimes(File base, String text, String prefix) {
+        if (text == null) return 0;
+        int set = 0;
+        Matcher matcher = MARKER_TIME.matcher(text);
+        while (matcher.find()) {
+            String path = matcher.group(2);
+            if (!path.startsWith(prefix)) continue;
+            boolean valid = true;
+            for (String part : path.split("/", -1)) valid &= validName(part);
+            if (!valid) continue;
+            File file = new File(base, path);
+            try {
+                if (file.exists() && file.setLastModified(Long.parseLong(matcher.group(1)))) ++set;
+            } catch (RuntimeException ignored) {
+                // A time out of range: the copy's own time stays.
+            }
+        }
+        return set;
+    }
+
+    private static void writeMarker(Context context, ContentResolver resolver, Uri backup, long when, long[] totals,
+                                    CharSequence times) throws IOException {
         Uri marker = create(resolver, backup, "text/plain", MARKER);
         String text = "Dark Souls II (Android port): save backup of "
             + DateFormat.getDateTimeInstance(DateFormat.LONG, DateFormat.SHORT).format(new Date(when)) + ".\n"
             + "Restore it in the game: CTRL, Save backups. This file marks the backup as complete.\n"
-            + "files=" + totals[0] + "\nbytes=" + totals[1] + "\n";
+            + "files=" + totals[0] + "\nbytes=" + totals[1] + "\n" + times;
         try (OutputStream output = resolver.openOutputStream(marker, "w")) {
             if (output == null) throw new IOException("cannot write " + MARKER);
             output.write(text.getBytes(StandardCharsets.UTF_8));
@@ -421,13 +482,16 @@ final class SaveBackups {
         final String name;
         final long time;
         final boolean complete;
+        /** Its marker file (complete backups only). */
+        final Uri marker;
 
-        Backup(Uri tree, Uri uri, String name, long time, boolean complete) {
+        Backup(Uri tree, Uri uri, String name, long time, Uri marker) {
             this.tree = tree;
             this.uri = uri;
             this.name = name;
             this.time = time;
-            this.complete = complete;
+            this.complete = marker != null;
+            this.marker = marker;
         }
 
         String label() {
@@ -460,18 +524,18 @@ final class SaveBackups {
             } catch (ParseException e) {
                 continue;
             }
-            boolean complete = false;
+            Uri marker = null;
             try {
                 for (Entry child : children(resolver, tree, entry.uri)) {
                     if (!child.folder && MARKER.equals(child.name)) {
-                        complete = true;
+                        marker = child.uri;
                         break;
                     }
                 }
             } catch (IOException ignored) {
                 // Unreadable: treated as incomplete.
             }
-            if (complete || includeIncomplete) result.add(new Backup(tree, entry.uri, entry.name, time, complete));
+            if (marker != null || includeIncomplete) result.add(new Backup(tree, entry.uri, entry.name, time, marker));
         }
         // The names' stamps sort by time.
         result.sort((a, b) -> b.name.compareTo(a.name));
@@ -494,13 +558,61 @@ final class SaveBackups {
         return keep;
     }
 
+    /**
+     * retained(), within BUDGET_BYTES. The retained backups are taken in this order while their total stays within
+     * the budget: the newest KEEP_MIN (kept whatever their size), then the newest of each day (newest day first),
+     * then the rest of the newest KEEP_NEWEST. So a tight budget gives up minutes-apart copies before the days back
+     * in time (DS2's 7 MB backups: 9 fit, the newest 3 and 6 days). A size below 0 is unknown (a marker without
+     * bytes=) and counts as the largest known size. Sizes follow {@code newestFirst}.
+     */
+    static Set<String> retained(List<String> newestFirst, List<Long> sizes) {
+        int count = newestFirst.size();
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < Math.min(KEEP_MIN, count); ++i) order.add(i);
+        Set<String> days = new HashSet<>();
+        for (int i = 0; i < count; ++i) {
+            String name = newestFirst.get(i);
+            String day = name.substring(PREFIX.length(), PREFIX.length() + 10);
+            if (days.size() < KEEP_DAYS && days.add(day) && !order.contains(i)) order.add(i);
+        }
+        for (int i = 0; i < Math.min(KEEP_NEWEST, count); ++i) if (!order.contains(i)) order.add(i);
+        long largest = 0;
+        for (long size : sizes) largest = Math.max(largest, size);
+        Set<String> keep = new HashSet<>();
+        long total = 0;
+        for (int i : order) {
+            long size = sizes.get(i) >= 0 ? sizes.get(i) : largest;
+            // The rest come later in the order: once one does not fit, none of them is kept.
+            if (keep.size() >= KEEP_MIN && total + size > BUDGET_BYTES) break;
+            keep.add(newestFirst.get(i));
+            total += size;
+        }
+        return keep;
+    }
+
+    /** The byte count a marker records, or -1. */
+    static long markerBytes(String marker) {
+        if (marker == null) return -1;
+        Matcher matcher = MARKER_BYTES.matcher(marker);
+        try {
+            return matcher.find() ? Long.parseLong(matcher.group(1)) : -1;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     /** Deletes the backups beyond retained(), and incomplete ones that were cut short (COPY_LOCK held). */
     private static void prune(Context context, ContentResolver resolver, Uri tree) {
         try {
             List<Backup> all = list(context, tree, true);
             List<String> complete = new ArrayList<>();
-            for (Backup backup : all) if (backup.complete) complete.add(backup.name);
-            Set<String> keep = retained(complete);
+            List<Long> sizes = new ArrayList<>();
+            for (Backup backup : all) {
+                if (!backup.complete) continue;
+                complete.add(backup.name);
+                sizes.add(markerBytes(readMarker(resolver, backup.marker)));
+            }
+            Set<String> keep = retained(complete, sizes);
             long now = System.currentTimeMillis();
             for (Backup backup : all) {
                 boolean remove = backup.complete ? !keep.contains(backup.name) : now - backup.time > ABANDONED_MS;
@@ -541,20 +653,22 @@ final class SaveBackups {
             try {
                 if (!staging.mkdirs()) throw new IOException("cannot create " + staging);
                 long[] totals = new long[2];
-                long expected = -1;
+                String marker = null;
                 byte[] buffer = new byte[1 << 16];
                 for (Entry entry : children(resolver, backup.tree, backup.uri)) {
                     if (entry.folder && validName(entry.name)) {
                         copyFromTree(resolver, backup.tree, entry.uri, new File(staging, entry.name), buffer, totals);
                     } else if (!entry.folder && MARKER.equals(entry.name)) {
-                        expected = markerFiles(resolver, entry.uri);
+                        marker = readMarker(resolver, entry.uri);
                     }
                 }
                 if (saveFolders(staging).isEmpty()) throw new IOException(context.getString(R.string.backup_empty));
+                long expected = markerFiles(marker);
                 if (expected >= 0 && expected != totals[0]) {
                     throw new IOException("incomplete (" + totals[0] + " of " + expected + " files)");
                 }
                 writeText(new File(staging, PENDING_NAME), backup.name);
+                if (marker != null) writeText(new File(staging, PENDING_TIMES), marker);
                 File pending = new File(root, PENDING);
                 deleteRecursively(pending);
                 if (!staging.renameTo(pending)) throw new IOException("cannot move " + staging);
@@ -592,16 +706,26 @@ final class SaveBackups {
         }
     }
 
-    /** The file count the backup's marker records, or -1. */
-    private static long markerFiles(ContentResolver resolver, Uri marker) {
+    /** The backup's marker text (at most 1 MB: with its time lines it is a few KB), or null. */
+    private static String readMarker(ContentResolver resolver, Uri marker) {
         try (InputStream input = resolver.openInputStream(marker)) {
-            if (input == null) return -1;
+            if (input == null) return null;
             ByteArrayOutputStream text = new ByteArrayOutputStream();
             byte[] buffer = new byte[4096];
-            for (int n; (n = input.read(buffer)) > 0 && text.size() < 65536; ) text.write(buffer, 0, n);
-            Matcher matcher = MARKER_FILES.matcher(new String(text.toByteArray(), StandardCharsets.UTF_8));
-            return matcher.find() ? Long.parseLong(matcher.group(1)) : -1;
+            for (int n; (n = input.read(buffer)) > 0 && text.size() < (1 << 20); ) text.write(buffer, 0, n);
+            return new String(text.toByteArray(), StandardCharsets.UTF_8);
         } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** The file count a marker records, or -1. */
+    static long markerFiles(String marker) {
+        if (marker == null) return -1;
+        Matcher matcher = MARKER_FILES.matcher(marker);
+        try {
+            return matcher.find() ? Long.parseLong(matcher.group(1)) : -1;
+        } catch (NumberFormatException e) {
             return -1;
         }
     }
@@ -618,6 +742,7 @@ final class SaveBackups {
         File pending = new File(root, PENDING);
         if (!pending.isDirectory()) return null;
         String name = readText(new File(pending, PENDING_NAME));
+        String times = readText(new File(pending, PENDING_TIMES));
         File aside = new File(new File(root, BEFORE_RESTORE),
             new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()));
         File user = userRoot(context);
@@ -652,7 +777,10 @@ final class SaveBackups {
                 Log.w(TAG, "save restore: " + content + " stays aside");
             }
             ++restored;
-            Log.i(TAG, "save restore: profile " + profile + " from " + name
+            // The saves' own times, once they are in place (the copies have the time of the copy; the load screen
+            // (LR's) shows a save's file time as its "Date saved").
+            int timed = applyTimes(user, times, profile + "/");
+            Log.i(TAG, "save restore: profile " + profile + " from " + name + " (" + timed + " file and folder times)"
                 + (previous.exists() ? "; the previous save is in " + previous : ""));
         }
         deleteRecursively(pending);

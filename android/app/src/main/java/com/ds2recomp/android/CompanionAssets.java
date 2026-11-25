@@ -40,7 +40,7 @@ import java.util.zip.Inflater;
  */
 final class CompanionAssets {
     private static final String TAG = "ds2recomp";
-    private static final int VERSION = 2;  // 2: the title logo (the cover without a character)
+    private static final int VERSION = 3;  // 2: the title logo (the cover without a character); 3: covenant icons
     private static final AtomicInteger GENERATION = new AtomicInteger();
     private static volatile boolean running;
 
@@ -303,6 +303,7 @@ final class CompanionAssets {
         deleteTree(work);
         new File(work, "hud").mkdirs();
         new File(work, "effect").mkdirs();
+        new File(work, "vow").mkdirs();
         new File(work, "font").mkdirs();
 
         // Textures.
@@ -358,11 +359,25 @@ final class CompanionAssets {
             effectHashes.put(Long.toHexString(XenosTexture.fnv64(t.raw, 0x4000)), id);
         }
 
+        // Covenant icons ("vow"; the HP gauge's emblem shows the joined covenant's) and their data hashes.
+        JSONObject vowHashes = new JSONObject();
+        Pattern vi = Pattern.compile("^menu/tex/icon/vow/vi_(\\d+)\\.tpf$");
+        for (String n : new TreeSet<>(a.index.keySet())) {
+            Matcher m = vi.matcher(n);
+            if (!m.matches()) continue;
+            Tex t = tpf(a.get(n));
+            Bitmap bm = decode(t);
+            if (bm == null) continue;
+            int id = Integer.parseInt(m.group(1));
+            save(enlarge(bm), new File(work, String.format(java.util.Locale.US, "vow/%04d.png", id)));
+            vowHashes.put(Long.toHexString(XenosTexture.fnv64(t.raw, 0x4000)), id);
+        }
+
         // The HUD's font (a loose file in the game folder): CCM glyph table + DXT pages.
         JSONObject font = buildFont(new File(game, "font/English/FeFont_Small.fontbnd.dcx"), new File(work, "font"));
 
         write(new File(work, "hud.json"), new JSONObject().put("version", 2).put("pieces", pieces).put("effects", effects)
-            .put("effect_hashes", effectHashes).put("generated", true).toString(1));
+            .put("effect_hashes", effectHashes).put("vow_hashes", vowHashes).put("generated", true).toString(1));
         write(new File(work, "font.json"), font.toString());
         write(new File(work, "stamp.txt"), stamp(context));
         deleteTree(out);

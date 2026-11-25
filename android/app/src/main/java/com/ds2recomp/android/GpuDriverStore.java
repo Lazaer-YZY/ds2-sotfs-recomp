@@ -227,12 +227,17 @@ final class GpuDriverStore {
      *   picture on A830 (write page faults), disable it with TU_DEBUG=sysmem". The owner's S25 (Adreno 830) hung
      *   the GPU at 1080p in GMEM (KGSL "GPU hang detected" in our context, 2026-11-22: frames of the G-buffer
      *   normals, then VK_ERROR_DEVICE_LOST), and issue #2's Adreno 825 reported the same flashes and crash. The
-     *   other 8xx share the gen8 backend. CTRL -> GPU compatibility "gmem" still overrides this.
+     *   other 8xx share the gen8 backend.
+     * - Adreno 650 / 660 (2026-11-25, with their first-start 540p, DeviceProfile): issue #24's Adreno 660 flickered
+     *   and closed in GMEM and ran 30 min at 540p in sysmem; #8's Adreno 650 played in sysmem.
+     * The number comes from the sysfs name, else the chip (DeviceProfile.adrenoNumber). CTRL -> GPU compatibility
+     * "gmem" still overrides this.
      */
     static boolean needsTurnipSysmem(String model, Metadata metadata) {
-        if (model == null || metadata == null || metadata.isPanVk()) return false;
-        int number = GpuDriverCatalog.adrenoModel(model);
-        return number == 710 || number == 720 || number == 722 || (number >= 800 && number < 900);
+        if (metadata == null || metadata.isPanVk()) return false;
+        int number = DeviceProfile.adrenoNumber(model, DeviceProfile.socModel());
+        return number == 650 || number == 660 || number == 710 || number == 720 || number == 722
+            || (number >= 800 && number < 900);
     }
 
     /** DS2_VK_CUSTOM_DRIVER_MODE for a package: the player's choice, else its default. */

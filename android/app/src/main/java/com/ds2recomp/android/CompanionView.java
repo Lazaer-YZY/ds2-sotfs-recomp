@@ -74,6 +74,9 @@ final class CompanionView {
     // The equipment as last drawn by the game (kept while its HUD is hidden: menus, cutscenes).
     private final long[] slots = new long[5];  // left, right, spell, item, next
     private String itemCount = "", itemName = "";
+    // The covenant icon in the game's emblem (vi_*.tpf data hash, 0 = none), taken while its HP gauge shows and kept
+    // while it is hidden (menus, cutscenes).
+    private long covenant;
     private CompanionState state = new CompanionState();
     private String signature = "";
     private int width, height;
@@ -157,8 +160,10 @@ final class CompanionView {
             hpShown = hpTrail = stShown = -1;
             java.util.Arrays.fill(slots, 0);
             itemCount = itemName = "";
+            covenant = 0;
             signature = "";
         }
+        if (s.player && s.gauge) covenant = s.covenant;
         if (!s.player) shownPid = 0;
         if (s.player && !s.hud && !s.ui) {
             if (quietSince < 0) quietSince = now;
@@ -303,6 +308,14 @@ final class CompanionView {
         final float stW = Math.max(110, Math.min(IN_W, (ST_BASE + ST_PX * Math.max(1, s.staminaMax)) * BAR_K));
         if (art.ok()) {
             art.draw(c, "emblem", EMBLEM_X, EMBLEM_Y, 92 * S, 88 * S, 255);
+            // The covenant's icon where the game puts it: its 64x64 texture at 1:1, centred at (51.5, 43.5) of the
+            // emblem's 92x88 (fitted to an S10 screenshot after joining the Way of Blue, 2026-11-24).
+            Bitmap cov = art.covenant(covenant);
+            if (cov != null) {
+                float cx = EMBLEM_X + 51.5f * S, cy = EMBLEM_Y + 43.5f * S, half = 32 * S;
+                dst.set(cx - half, cy - half, cx + half, cy + half);
+                c.drawBitmap(cov, null, dst, bitmapPaint);
+            }
             frame(c, hpW, 0, SPLIT_ROW);
             frame(c, stW, SPLIT_ROW, 42);
         } else {

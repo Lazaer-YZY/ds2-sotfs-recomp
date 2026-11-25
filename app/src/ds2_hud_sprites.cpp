@@ -232,6 +232,9 @@ std::atomic<uint32_t> g_hud_ms{0};
 std::atomic<uint32_t> g_gauge_ms{0};  // the HP gauge's layout (the emblem) drawn: the game shows its HUD
 std::atomic<uint32_t> g_foe_bar_ms{0};  // an enemy's or the boss's HP bar drawn
 Seen g_small[12];
+// The covenant's icon (menu/tex/icon/vow/vi_*.tpf, 64x64): once the player has joined one, the HP gauge's layout draws
+// it inside its emblem as one more sprite of its walk (S10, 2026-11-24: the Way of Blue at Saulden in Majula).
+Seen g_covenant;
 
 void SeeSmall(uint64_t h, uint32_t now) {
   int free = -1, oldest = 0;
@@ -516,6 +519,7 @@ bool ClassifyAndHide(uint8_t* base, uint32_t tex, uint32_t m, float tx, float ty
   if (!t_root) return false;
   const uint32_t now = NowMs();
   uint32_t flag = 0, w = 0, h = 0;
+  uint64_t tex_hash = 0;
   if (tex >= 0x40000000u && tex < 0xC0000000u) {
     w = Load32(base, tex + 0x28);
     h = Load32(base, tex + 0x2C);
@@ -523,6 +527,7 @@ bool ClassifyAndHide(uint8_t* base, uint32_t tex, uint32_t m, float tx, float ty
     const uint32_t gpu = sig ? Load32(base, tex + 0x18) : 0;
     if (gpu >= 0xA0000000u) {
       const uint64_t hash = TextureHash(base, tex, gpu, 0x4000);
+      tex_hash = hash;
       if (hash == kHpGauge) {
         flag = kGaugeAny;
         ++t_walk_gauges;
@@ -559,6 +564,10 @@ bool ClassifyAndHide(uint8_t* base, uint32_t tex, uint32_t m, float tx, float ty
     r.flags = r.walk = r.sticky = 0;  // the root's signature stopped: its memory may hold another layout now
   }
   const uint32_t f = Flags(r);
+  if (tex_hash && w == 64 && h == 64 && (f & kEmblem)) {
+    g_covenant.hash.store(tex_hash, std::memory_order_relaxed);
+    g_covenant.ms.store(now, std::memory_order_relaxed);
+  }
   if ((f & kSlots) && !(f & kBoss) && now - r.ms < 1500) g_hud_ms.store(now, std::memory_order_relaxed);
   // The boss bar: the game shows it for what the player hits (the damage figures count only those hits). An enemy's
   // bar is noted when its walk ends (EndWalk): only then is it known not to be the player's gauge.
@@ -644,6 +653,11 @@ Slots ReadSlots() {
   s.ui = now - g_ui_ms.load(std::memory_order_relaxed) < 700 && now - g_loading_ms.load(std::memory_order_relaxed) >= 700;
   s.gauge = now - g_gauge_ms.load(std::memory_order_relaxed) < 500;
   return s;
+}
+
+uint64_t CovenantIcon() {
+  return NowMs() - g_covenant.ms.load(std::memory_order_relaxed) < 1000 ? g_covenant.hash.load(std::memory_order_relaxed)
+                                                                         : 0;
 }
 
 uint32_t FoeBarAgeMs() {

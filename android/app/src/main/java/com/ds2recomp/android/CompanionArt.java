@@ -39,6 +39,7 @@ final class CompanionArt {
     private final SparseArray<int[]> glyphs = new SparseArray<>();
     private final SparseArray<Bitmap> pages = new SparseArray<>();
     private final Map<Long, Integer> effectHashes = new HashMap<>();
+    private final Map<Long, Integer> vowHashes = new HashMap<>();  // covenant icons (menu/tex/icon/vow/vi_*.tpf)
     private java.util.Set<Long> iconHashes;  // the icon pack's entries (development APKs), listed on first use
     private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
     private final Rect src = new Rect();
@@ -66,6 +67,13 @@ final class CompanionArt {
                 for (java.util.Iterator<String> it = eh.keys(); it.hasNext(); ) {
                     String h = it.next();
                     effectHashes.put(Long.parseUnsignedLong(h, 16), eh.getInt(h));
+                }
+            }
+            JSONObject vh = hud.optJSONObject("vow_hashes");  // art built before covenant icons has none
+            if (vh != null) {
+                for (java.util.Iterator<String> it = vh.keys(); it.hasNext(); ) {
+                    String h = it.next();
+                    vowHashes.put(Long.parseUnsignedLong(h, 16), vh.getInt(h));
                 }
             }
             JSONObject font = new JSONObject(read("font.json"));
@@ -129,6 +137,12 @@ final class CompanionArt {
     }
 
     Bitmap effect(int id) { return ok ? load(String.format(java.util.Locale.US, "effect/%04d.png", id)) : null; }
+
+    /** The covenant icon for the data hash the HP gauge's emblem drew, null if unknown (or art without them). */
+    Bitmap covenant(long hash) {
+        Integer id = hash != 0 ? vowHashes.get(hash) : null;
+        return ok && id != null ? load(String.format(java.util.Locale.US, "vow/%04d.png", id)) : null;
+    }
 
     /**
      * The icon pack's upscaled version of an item icon the HUD draws (by its data hash; ds2_companion_assets.py

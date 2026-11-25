@@ -39,6 +39,7 @@ final class CompanionState {
     long eqLeft, eqRight, eqSpell, eqItem, eqNext;
     String itemCount = "", itemName = "";
     final List<Long> smallIcons = new ArrayList<>();
+    long covenant;  // the covenant icon in the HP gauge's emblem (vi_*.tpf data hash, 0 = none; meaningful while gauge)
     // Damage: the last hit on an enemy, ms since, the chain of hits, that enemy's HP now, the player's last loss.
     int hit, combo, targetHp = -1, targetMax, taken;
     long hitAge = -1;
@@ -78,6 +79,7 @@ final class CompanionState {
                     case "eqU": s.eqSpell = Long.parseUnsignedLong(v, 16); break;
                     case "eqD": s.eqItem = Long.parseUnsignedLong(v, 16); break;
                     case "eqN": s.eqNext = Long.parseUnsignedLong(v, 16); break;
+                    case "cov": s.covenant = Long.parseUnsignedLong(v, 16); break;
                     case "cnt": s.itemCount = v; break;
                     case "name": s.itemName = v; break;
                     case "fx":
@@ -118,6 +120,7 @@ final class CompanionState {
         b.append(' ').append(Long.toHexString(eqLeft)).append(Long.toHexString(eqRight)).append(Long.toHexString(eqSpell))
          .append(Long.toHexString(eqItem)).append(Long.toHexString(eqNext)).append(itemCount).append('|').append(itemName);
         for (Long h : smallIcons) b.append(' ').append(Long.toHexString(h));
+        b.append(" c").append(Long.toHexString(covenant));
         b.append(" d").append(hit).append('/').append(combo).append('/').append(targetHp).append('/').append(taken)
          .append('/').append(hitAge < 0 ? -1 : Math.min(hitAge / 2000, 6));  // fades in steps after a hit
         return b.toString();
@@ -146,7 +149,7 @@ final class CompanionState {
         if (bleed > 0) tol.append(tol.length() > 0 ? "," : "").append("toxic:").append(bleed).append(":100");
         tol.append(tol.length() > 0 ? "," : "").append("curse:35:120");
         if (tol.length() > 0) b.append(";tol=").append(tol);
-        b.append(";hud=1;cnt=12;name=Lifegem;hit=").append(87 + (int) (t * 7) % 50).append(";hitage=").append((long) (t * 1000) % 4000)
+        b.append(";hud=1;gauge=1;cov=1e8b702749527ed4;cnt=12;name=Lifegem;hit=")  // cov: the Way of Blue (vi_0004).append(87 + (int) (t * 7) % 50).append(";hitage=").append((long) (t * 1000) % 4000)
          .append(";combo=233;tgt=145:400;taken=37")
          .append(";fx=bafea98102e7c240,80c2959f32387a8a,10049de63c53eec0")  // attack up, the cat, a broken ring
          // An Iron Parma and a Club, armour, Ring of Blades+2 and Stone Ring (both attack up: the label lists both) and

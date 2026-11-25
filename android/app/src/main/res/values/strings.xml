@@ -47,6 +47,10 @@
     <string name="touch_fps_60">60 fps</string>
     <string name="touch_fps_60_smooth">60 fps, smoother (120 Hz screen) *</string>
     <string name="touch_fps_60_smooth_help">Smoother 60 uses the 120 Hz screen mode: a late frame shows after 25 ms instead of 33 ms.</string>
+    <!-- Recommended for this GPU (DeviceProfile): its first-start resolution and frame rate -->
+    <string name="touch_recommended">Recommended for %1$s: %2$sp, %3$s fps.</string>
+    <string name="touch_use_recommended">Use the recommended resolution and frame rate</string>
+    <string name="touch_recommended_set">Recommended values selected: press Apply to keep them.</string>
     <!-- Image -->
     <string name="touch_resolution">Resolution *</string>
     <string name="touch_resolution_360">360p (fastest, very soft; for slow GPUs)</string>
@@ -109,6 +113,7 @@
     <string name="touch_compat_dynrender_help">Classic Vulkan render passes. Already used with Arm\'s own Mali driver.</string>
     <string name="touch_compat_tu_mode">Turnip rendering mode * (Turnip drivers only)</string>
     <string name="touch_compat_tu_auto">Automatic</string>
+    <string name="touch_compat_tu_auto_sysmem">Automatic (direct to memory on this GPU)</string>
     <string name="touch_compat_tu_sysmem">Direct to memory (sysmem)</string>
     <string name="touch_compat_tu_gmem">Tiled (gmem)</string>
     <string name="touch_compat_tu_noubwc">Turnip image compression off * (Turnip drivers only)</string>
@@ -272,7 +277,7 @@ disc 2: no package found (DLC icons missing)
     <!-- Save backups (CTRL, Troubleshooting; SaveBackups.java) -->
     <string name="touch_save_backups">Save backups …</string>
     <string name="backup_title">Save backups</string>
-    <string name="backup_explain">Copies of your save in a folder you choose, outside the app, so uninstalling the game does not delete them. A copy is made when the game has saved, at most every 10 minutes. The latest 10 and one for each of the last 7 days played are kept.</string>
+    <string name="backup_explain">Copies of your save in a folder you choose, outside the app, so uninstalling the game does not delete them. A copy is made when the game has saved, at most every 10 minutes. The latest 10 and one for each of the last 7 days played are kept, up to 64 MB in all (the latest 3 always).</string>
     <string name="backup_folder">Folder: %1$s</string>
     <string name="backup_off">Off</string>
     <string name="backup_pick_hint">Choose or create a folder, for example Documents/DS2 saves.</string>

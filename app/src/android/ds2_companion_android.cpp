@@ -24,6 +24,8 @@
 //                             HUD draws them: FNV-1a 64 of the icon texture data in hex (0 = empty); the second
 //                             screen's icons.json maps them to icon / item ids (ds2_hud_sprites.cpp)
 //   fx=<hash>,...             64x64 textures drawn in the last 0.5 s (effect icons among them, mapped the same way)
+//   cov=<hash>                the covenant icon the HP gauge's emblem draws (vi_*.tpf data hash; 0 = none; only
+//                             meaningful while gauge=1)
 //   cnt, name                 the belt item's count and name as the HUD draws them (the game's language)
 //   gear=<id>:<dur>,...       the equipped items: six hands, four armour, four rings (item id, durability; -1 empty)
 //   hit, hitage, combo        the last hit on an enemy (HP lost between two polls while the game shows an enemy's or
@@ -338,11 +340,12 @@ std::string State() {
   AppendBuildups(p, out);
   AppendGear(p, out);
   const ds2::hud_sprites::Slots slots = ds2::hud_sprites::ReadSlots();
-  char eq[200];
-  std::snprintf(eq, sizeof(eq), ";hud=%d;ui=%d;gauge=%d;eqL=%llx;eqR=%llx;eqU=%llx;eqD=%llx;eqN=%llx", slots.hud ? 1 : 0,
-                slots.ui ? 1 : 0, slots.gauge ? 1 : 0,
+  char eq[240];
+  std::snprintf(eq, sizeof(eq), ";hud=%d;ui=%d;gauge=%d;eqL=%llx;eqR=%llx;eqU=%llx;eqD=%llx;eqN=%llx;cov=%llx",
+                slots.hud ? 1 : 0, slots.ui ? 1 : 0, slots.gauge ? 1 : 0,
                 (unsigned long long)slots.left, (unsigned long long)slots.right, (unsigned long long)slots.spell,
-                (unsigned long long)slots.item, (unsigned long long)slots.next);
+                (unsigned long long)slots.item, (unsigned long long)slots.next,
+                (unsigned long long)ds2::hud_sprites::CovenantIcon());
   out += eq;
   static std::string last_eq;
   if (CompanionProbe() && last_eq != eq) {

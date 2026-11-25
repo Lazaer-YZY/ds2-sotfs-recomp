@@ -5,7 +5,7 @@ game's font, decoded from the Xbox 360 archives and upscaled 4x (Real-ESRGAN, to
   out/venv/Scripts/python.exe -I tools/android/ds2_companion_assets.py --icons [...]   (development icon pack only)
     defaults: assets/game_root, assets/disc2, out/companion_assets
 
-Writes OUT_DIR/companion/{hud,effect,font}/*.png, hud.json (each piece's size in game pixels) and font.json (the
+Writes OUT_DIR/companion/{hud,effect,vow,font}/*.png, hud.json (each piece's size in game pixels) and font.json (the
 glyph table), plus OUT_DIR/raw/ (the unscaled pieces). build_android.sh's stage step copies OUT_DIR/companion into the
 debug APK's assets. Everything here is derived from the game: it never goes into git or a public APK.
 
@@ -488,6 +488,20 @@ def cut_effects(arc, raw_dir):
     return ids, hashes
 
 
+def cut_vows(arc, raw_dir):
+    """Covenant icons (menu/tex/icon/vow/vi_*.tpf, 64x64; the HP gauge's emblem shows the joined covenant's) as PNGs,
+    and {hash of their data: id} to recognise the one the game draws."""
+    os.makedirs(os.path.join(raw_dir, 'vow'), exist_ok=True)
+    hashes = {}
+    for name in arc.names(r'^menu/tex/icon/vow/vi_\d+\.tpf$'):
+        data = arc.get(name)
+        img = next(iter(tpf_textures(data).values()))
+        icon = int(re.search(r'vi_(\d+)', name).group(1))
+        Image.fromarray(img).save(os.path.join(raw_dir, 'vow', '%04d.png' % icon))
+        hashes['%x' % fnv64(tpf_raw(data)[2][:0x4000])] = icon
+    return hashes
+
+
 ICON_SIZE = (192, 384)  # the equipment card draws a 64x128 icon at ~188x376 on the Thor's 1240x1080 screen
 
 
@@ -566,15 +580,16 @@ def main():
         return
     raw, final = os.path.join(out, 'raw'), os.path.join(out, 'companion')
     shutil.rmtree(raw, ignore_errors=True)
-    for part in ('hud', 'effect', 'font', 'hud.json', 'font.json'):  # keeps an icon pack built with --icons
+    for part in ('hud', 'effect', 'vow', 'font', 'hud.json', 'font.json'):  # keeps an icon pack built with --icons
         q = os.path.join(final, part)
         shutil.rmtree(q, ignore_errors=True) if os.path.isdir(q) else (os.remove(q) if os.path.exists(q) else None)
     arc = Archives(game_root, disc2 if os.path.isdir(disc2) else None)
     sizes = cut_pieces(arc, raw)
     effects, effect_hashes = cut_effects(arc, raw)
+    vow_hashes = cut_vows(arc, raw)
     font = cut_font(game_root, raw)
     print(f'{len(sizes)} HUD pieces, {len(effects)} effect icons, font pages {font["pages"]}, {len(font["glyphs"])} glyphs')
-    for part in ('hud', 'effect', 'font'):
+    for part in ('hud', 'effect', 'vow', 'font'):
         upscale_assets.run(os.path.join(raw, part), os.path.join(final, part))
     for piece, side in MAX_SIDE.items():
         p = os.path.join(final, 'hud', piece + '.png')
@@ -586,7 +601,8 @@ def main():
     Image.fromarray(logo, 'RGBA').save(os.path.join(final, 'hud', 'title_logo.png'))
     sizes['title_logo'] = [logo.shape[1], logo.shape[0]]
     with open(os.path.join(final, 'hud.json'), 'w', newline='') as f:
-        json.dump({'version': 2, 'pieces': sizes, 'effects': effects, 'effect_hashes': effect_hashes}, f, indent=1)
+        json.dump({'version': 2, 'pieces': sizes, 'effects': effects, 'effect_hashes': effect_hashes,
+                   'vow_hashes': vow_hashes}, f, indent=1)
     with open(os.path.join(final, 'font.json'), 'w', newline='') as f:
         json.dump(font, f)
     print('wrote', final)
