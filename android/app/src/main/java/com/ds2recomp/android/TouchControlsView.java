@@ -1010,6 +1010,15 @@ final class TouchControlsView extends View {
             strings.getString(R.string.touch_compat_decode_bc_help), render.getBoolean("compat_decode_bc", false));
         CheckBox compatHdr = option(advanced, strings.getString(R.string.touch_compat_hdr),
             strings.getString(R.string.touch_compat_hdr_help), render.getBoolean("compat_hdr_r11g11b10", false));
+        // Mali tests: shown on Mali GPUs only (RuntimeActivity.addCompatArgumentsTo applies them only there too).
+        boolean mali = GpuDriverStore.vendor() == GpuDriverStore.Vendor.MALI;
+        final CheckBox maliRelaxed = !mali ? null : option(advanced,
+            strings.getString(R.string.touch_mali_relaxed_interpolators),
+            strings.getString(R.string.touch_mali_relaxed_interpolators_help),
+            render.getBoolean(RuntimeActivity.MALI_RELAXED_INTERPOLATORS, false));
+        final CheckBox maliNoRobust = !mali ? null : option(advanced,
+            strings.getString(R.string.touch_mali_no_robust), strings.getString(R.string.touch_mali_no_robust_help),
+            render.getBoolean(RuntimeActivity.MALI_NO_ROBUST, false));
 
         scroll.addView(content);
         // The title row with Exit at its right (the owner, 2026-11-22: "an exit button top right in the ctrl menu").
@@ -1065,6 +1074,10 @@ final class TouchControlsView extends View {
                     .putBoolean("compat_shader", compatShader.isChecked())
                     .putBoolean("compat_decode_bc", compatDecodeBc.isChecked())
                     .putBoolean("compat_hdr_r11g11b10", compatHdr.isChecked())
+                    .putBoolean(RuntimeActivity.MALI_RELAXED_INTERPOLATORS, maliRelaxed == null
+                        ? render.getBoolean(RuntimeActivity.MALI_RELAXED_INTERPOLATORS, false) : maliRelaxed.isChecked())
+                    .putBoolean(RuntimeActivity.MALI_NO_ROBUST, maliNoRobust == null
+                        ? render.getBoolean(RuntimeActivity.MALI_NO_ROBUST, false) : maliNoRobust.isChecked())
                     .putBoolean("prime", primeCore.isChecked()).commit();  // on disk before a restart below
                 RuntimeActivity.nativeSetOption("cheat_hp", cheatHp.isChecked() ? "1" : "0");
                 RuntimeActivity.nativeSetOption("cheat_stamina", cheatStamina.isChecked() ? "1" : "0");

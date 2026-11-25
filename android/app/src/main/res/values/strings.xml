@@ -126,6 +126,11 @@
     <string name="touch_frame_capture_help">Saves the images the GPU draws for one gameplay frame into the logs (about 100–200 MB on the phone, replaced by the next capture). Close this menu and stand in the game; then use Save logs for a bug report. The game pauses for a moment while it saves.</string>
     <string name="frame_capture_started">One frame is captured %1$d seconds from now. Then use CTRL → Save logs.</string>
     <string name="touch_compat_decode_bc_help">The game\'s compressed (BC / DXT) textures are unpacked before use instead of read by the GPU directly. Uses more memory.</string>
+    <!-- Mali tests (CTRL, Troubleshooting -> Advanced; Mali GPUs only) -->
+    <string name="touch_mali_relaxed_interpolators">Mali test: 16-bit vertex outputs *</string>
+    <string name="touch_mali_relaxed_interpolators_help">Less memory traffic for every vertex drawn. Textures may look a little softer or shimmer.</string>
+    <string name="touch_mali_no_robust">Mali test: buffer range checks off *</string>
+    <string name="touch_mali_no_robust_help">Skips the safety checks the driver does on buffer reads. Possibly faster; the game may crash.</string>
     <string name="touch_compat_tu_reserve">Turnip: keep its reserved descriptor set * (Turnip drivers only)</string>
     <!-- Second screen (CTRL, dual-screen devices only; CompanionScreen.java) -->
     <string name="touch_section_second_screen">Second screen</string>

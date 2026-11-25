@@ -27,6 +27,18 @@ REXCVAR_DEFINE_BOOL(vulkan_native_shader_features, false, "UI/Vulkan",
                     "Habilitar capacidades disponibles para los shaders nativos experimentales")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Mali tests (DS2 public issues #16 / #20 / #21 / #27, 2026-11-25). Arm's best-practice guide says robustBufferAccess
+// "causes loss in performance for accesses to uniform buffers and shader storage buffers"; the renderer reads guest
+// memory and the EDRAM through storage buffers. Off: out-of-bounds accesses are undefined (a crash is possible).
+REXCVAR_DEFINE_BOOL(vulkan_robust_buffer_access, true, "UI/Vulkan",
+                    "Enable robustBufferAccess when the driver has it; off: a performance test (Mali)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Diagnostics: VK_EXT_image_compression_control, to log whether the driver compresses each kind of render target
+// (AFBC on Mali: off for storage images and mutable-format images, Arm's documentation).
+REXCVAR_DEFINE_BOOL(vulkan_log_image_compression, false, "UI/Vulkan",
+                    "Enable VK_EXT_image_compression_control if available and log the compression of each "
+                    "kind of render target once (diagnostics)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
@@ -290,6 +302,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_custom_border_color)
       // Required for true null descriptors in bindless texture bindings.
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_robustness2)
+      if (REXCVAR_GET(vulkan_log_image_compression)) {
+        // #339. Diagnostics only.
+        XE_UI_VULKAN_STRUCT_EXTENSION(EXT_image_compression_control)
+      }
       if (REXCVAR_GET(vulkan_pipeline_statistics)) {
         // #270.
         XE_UI_VULKAN_STRUCT_EXTENSION(KHR_pipeline_executable_properties)
@@ -416,6 +432,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT>
       features_EXT_robustness2;
+  VulkanFeatures<VkPhysicalDeviceImageCompressionControlFeaturesEXT,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_COMPRESSION_CONTROL_FEATURES_EXT>
+      features_EXT_image_compression_control;
   VulkanFeatures<VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR>
       features_KHR_pipeline_executable_properties;
@@ -476,6 +495,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
     if (device->extensions_.ext_EXT_robustness2) {
       features_EXT_robustness2.Link(supported_features_2, device_create_info);
+    }
+    if (device->extensions_.ext_EXT_image_compression_control) {
+      features_EXT_image_compression_control.Link(supported_features_2, device_create_info);
     }
     if (device->extensions_.ext_EXT_extended_dynamic_state3) {
       features_EXT_extended_dynamic_state3.Link(supported_features_2, device_create_info);
@@ -743,6 +765,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
   if (with_gpu_emulation) {
     XE_UI_VULKAN_FEATURE(robustBufferAccess)
+    if (enabled_features.robustBufferAccess && !REXCVAR_GET(vulkan_robust_buffer_access)) {
+      enabled_features.robustBufferAccess = VK_FALSE;
+      device->properties_.robustBufferAccess = false;
+      REXLOG_INFO("  robustBufferAccess left off (vulkan_robust_buffer_access false)");
+    }
     XE_UI_VULKAN_FEATURE(fullDrawIndexUint32)
     XE_UI_VULKAN_FEATURE(independentBlend)
     XE_UI_VULKAN_FEATURE(geometryShader)
@@ -883,6 +910,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_FEATURE_2(features_EXT_robustness2, nullDescriptor)
     }
   }
+  if (device->extensions_.ext_EXT_image_compression_control) {
+    features_EXT_image_compression_control.enabled.imageCompressionControl =
+        features_EXT_image_compression_control.supported.imageCompressionControl;
+    REXLOG_INFO("* imageCompressionControl: {}",
+                bool(features_EXT_image_compression_control.supported.imageCompressionControl));
+  }
 
   if (device->extensions_.ext_EXT_extended_dynamic_state3) {
     if (with_gpu_emulation) {
@@ -997,6 +1030,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   }
   if (device->extensions_.ext_KHR_pipeline_executable_properties) {
 #include <rex/ui/vulkan/functions/device_khr_pipeline_executable_properties.inc>
+  }
+  if (device->extensions_.ext_EXT_image_compression_control) {
+#include <rex/ui/vulkan/functions/device_ext_image_compression_control.inc>
   }
   if (device->extensions_.ext_KHR_fragment_shading_rate) {
 #include <rex/ui/vulkan/functions/device_khr_fragment_shading_rate.inc>

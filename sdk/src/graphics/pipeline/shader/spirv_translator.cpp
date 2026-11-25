@@ -27,6 +27,13 @@
 #include <rex/string/buffer.h>
 #include <rex/cvar.h>
 
+// Mali test (DS2 public issues #16 / #20 / #21 / #27, 2026-11-25): interpolators as relaxed precision (mediump), which
+// lets Arm's driver keep the vertex outputs it writes to memory for every vertex as 16-bit values (Arm's guides
+// recommend mediump varyings). Precision of texture coordinates on large textures and of positions may suffer.
+REXCVAR_DEFINE_BOOL(vulkan_relaxed_precision_interpolators, false, "GPU/Vulkan",
+                    "Decorate the vertex shader interpolator outputs and pixel shader interpolator inputs "
+                    "RelaxedPrecision (16-bit varyings where the driver supports it; a Mali test)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(vulkan_shared_memory_texel_buffer, true, "GPU/Vulkan",
                     "Read guest memory in shaders (vertex fetch) through one R32_UINT uniform "
                     "texel buffer covering all 512 MB when storage buffers are limited to "
@@ -1831,6 +1838,9 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
           interpolator, spv::DecorationLocation,
           int(fixed_interpolator_locations_ ? interpolator_index : output_location));
       builder_->addDecoration(interpolator, spv::DecorationInvariant);
+      if (REXCVAR_GET(vulkan_relaxed_precision_interpolators)) {
+        builder_->addDecoration(interpolator, spv::DecorationRelaxedPrecision);
+      }
       main_interface_.push_back(interpolator);
       ++output_location;
     }
@@ -3036,6 +3046,9 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
         if (shader_modification.pixel.interpolators_centroid &
             (UINT32_C(1) << interpolator_index)) {
           builder_->addDecoration(interpolator, spv::DecorationCentroid);
+        }
+        if (REXCVAR_GET(vulkan_relaxed_precision_interpolators)) {
+          builder_->addDecoration(interpolator, spv::DecorationRelaxedPrecision);
         }
         main_interface_.push_back(interpolator);
         ++input_location;

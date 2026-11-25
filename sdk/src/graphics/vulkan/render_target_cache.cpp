@@ -19,6 +19,7 @@
 #include <cstring>
 #include <string>
 #include <memory>
+#include <mutex>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -3063,6 +3064,51 @@ uint32_t VulkanRenderTargetCache::GetMaxRenderTargetHeight() const {
   return std::min(device_properties.maxFramebufferHeight, device_properties.maxImageDimension2D);
 }
 
+// vulkan_log_image_compression (VK_EXT_image_compression_control enabled): the compression the driver gave each kind
+// of render target (format, usage, flags, samples), logged once. Arm's driver leaves AFBC off for storage and
+// mutable-format images (DS2 Mali tests, 2026-11-25).
+static void LogRenderTargetCompression(const ui::vulkan::VulkanDevice* vulkan_device, VkImage image,
+                                       const VkImageCreateInfo& info, bool is_depth, const char* format_name) {
+  if (!vulkan_device->extensions().ext_EXT_image_compression_control) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  if (!dfn.vkGetImageSubresourceLayout2EXT) {
+    return;
+  }
+  static std::mutex logged_mutex;
+  static std::unordered_set<uint64_t> logged;
+  uint64_t kind = uint64_t(info.format) ^ (uint64_t(info.usage) << 24) ^ (uint64_t(info.flags) << 40) ^
+                  (uint64_t(info.samples) << 56);
+  {
+    std::lock_guard<std::mutex> lock(logged_mutex);
+    if (!logged.insert(kind).second) {
+      return;
+    }
+  }
+  VkImageCompressionPropertiesEXT compression = {};
+  compression.sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT;
+  VkSubresourceLayout2EXT layout = {};
+  layout.sType = VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2_EXT;
+  layout.pNext = &compression;
+  VkImageSubresource2EXT subresource = {};
+  subresource.sType = VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2_EXT;
+  subresource.imageSubresource.aspectMask = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+  dfn.vkGetImageSubresourceLayout2EXT(vulkan_device->device(), image, &subresource, &layout);
+  const char* verdict =
+      (compression.imageCompressionFlags & VK_IMAGE_COMPRESSION_DISABLED_EXT) ? "not compressed"
+      : (compression.imageCompressionFlags &
+         (VK_IMAGE_COMPRESSION_FIXED_RATE_DEFAULT_EXT | VK_IMAGE_COMPRESSION_FIXED_RATE_EXPLICIT_EXT))
+          ? "fixed-rate compressed"
+          : "default (lossless) compression";
+  REXGPU_INFO(
+      "VulkanRenderTargetCache: image compression of {} {} (VkFormat {}, {}x MSAA, usage 0x{:X}, flags 0x{:X}): {} "
+      "(compression flags 0x{:X}, fixed-rate flags 0x{:X})",
+      is_depth ? "depth" : "color", format_name, uint32_t(info.format), uint32_t(info.samples),
+      uint32_t(info.usage), uint32_t(info.flags), verdict, uint32_t(compression.imageCompressionFlags),
+      uint32_t(compression.imageCompressionFixedRateFlags));
+}
+
 RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(RenderTargetKey key) {
   // How long creating a render target takes on the command thread (image, memory, views,
   // descriptors): logged per creation.
@@ -3138,6 +3184,7 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
         uint32_t(1) << uint32_t(key.msaa_samples), key.GetFormatName());
     return nullptr;
   }
+  LogRenderTargetCompression(vulkan_device, image, image_create_info, key.is_depth, key.GetFormatName());
 
   // Create the image views.
 

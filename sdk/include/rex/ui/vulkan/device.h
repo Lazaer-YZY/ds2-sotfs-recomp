@@ -247,6 +247,8 @@ class VulkanDevice {
     bool ext_1_3_KHR_dynamic_rendering = false;  // #55
     // Diagnostics only (vulkan_pipeline_statistics), with pipelineExecutableInfo.
     bool ext_KHR_pipeline_executable_properties = false;  // #270
+    // Diagnostics only (vulkan_log_image_compression).
+    bool ext_EXT_image_compression_control = false;  // #339
     // Diagnostics only (vulkan_fragment_shading_rate), with pipelineFragmentShadingRate.
     bool ext_KHR_fragment_shading_rate = false;  // #227
     // Has optional features not implied by this being true (see Properties).
@@ -283,6 +285,8 @@ class VulkanDevice {
 #include <rex/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc>
     // VK_KHR_pipeline_executable_properties (#270)
 #include <rex/ui/vulkan/functions/device_khr_pipeline_executable_properties.inc>
+    // VK_EXT_image_compression_control (#339)
+#include <rex/ui/vulkan/functions/device_ext_image_compression_control.inc>
     // VK_KHR_fragment_shading_rate (#227)
 #include <rex/ui/vulkan/functions/device_khr_fragment_shading_rate.inc>
     // VK_EXT_extended_dynamic_state(2) (promoted to 1.3; only loaded on 1.3+)

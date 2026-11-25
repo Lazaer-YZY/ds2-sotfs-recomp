@@ -286,7 +286,8 @@ public final class RuntimeActivity extends SDLActivity {
             + "|" + render.getBoolean("compat_shortcuts_transfers", false)
             + "|" + render.getBoolean("compat_shortcuts_resolves", false)
             + "|" + render.getBoolean("compat_feed_off", false) + "|" + render.getBoolean("compat_lazy_off", false)
-            + "|" + render.getBoolean("compat_7e3_resolve_off", false);
+            + "|" + render.getBoolean("compat_7e3_resolve_off", false)
+            + "|" + render.getBoolean(MALI_RELAXED_INTERPOLATORS, false) + "|" + render.getBoolean(MALI_NO_ROBUST, false);
     }
 
     /**
@@ -302,6 +303,10 @@ public final class RuntimeActivity extends SDLActivity {
     }
 
     /** The render target transfer shortcuts, switched off (CTRL's transfer group). */
+    /** CTRL Mali tests (Mali only, off by default): 16-bit interpolators; robustBufferAccess off. */
+    static final String MALI_RELAXED_INTERPOLATORS = "mali_relaxed_interpolators";
+    static final String MALI_NO_ROBUST = "mali_no_robust_buffer_access";
+
     static final String[] TRANSFER_SHORTCUTS_OFF = {
         "--gpu_skip_overwritten_color_transfers=false", "--gpu_constant_transfers_as_clears=false",
         "--gpu_redirect_msaa_depth_clears=false", "--gpu_ownership_from_first_row=false" };
@@ -351,6 +356,16 @@ public final class RuntimeActivity extends SDLActivity {
                                          "--vulkan_precompile_vertex_libraries=false");
         }
         if (render.getBoolean("compat_dynrender", false)) args.add("--vulkan_dynamic_rendering=false");
+        // Mali tests (the owner, 2026-11-25: "keep it just as a test for mali users, other cpus should have correct
+        // defaults even on test build"): only on a Mali GPU, whatever the stored settings say. The image compression
+        // line is diagnostics only (Arm's framebuffer compression per render target kind, in the log), with Debug
+        // logging on: its query could not be run on any device here (Turnip and Qualcomm's driver lack the extension).
+        if (GpuDriverStore.vendor() == GpuDriverStore.Vendor.MALI) {
+            if (render.getBoolean("debug_log", DEFAULT_DEBUG_LOG)) args.add("--vulkan_log_image_compression=true");
+            if (render.getBoolean(MALI_RELAXED_INTERPOLATORS, false))
+                args.add("--vulkan_relaxed_precision_interpolators=true");
+            if (render.getBoolean(MALI_NO_ROBUST, false)) args.add("--vulkan_robust_buffer_access=false");
+        }
     }
 
     /** Turnip's TU_DEBUG flags from CTRL's GPU compatibility choices ("" = none). */
