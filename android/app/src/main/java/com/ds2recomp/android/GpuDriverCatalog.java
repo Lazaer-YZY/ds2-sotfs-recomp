@@ -98,12 +98,14 @@ final class GpuDriverCatalog {
     static final String PANVK_RECOMMENDED_TAG = "panvk-kbase-v0.1.0-rc3";
 
     /**
-     * StevenMXZ's Turnip v27.0.0-R3 (release v40, 2026-11-23), recommended on the Adreno 650 / 660: players ran 720p
-     * with it where the bundled Stable Turnip v2 crashed (issue #30, Adreno 650, ~50 fps; issue #24, Adreno 660,
-     * 720p / 30 for 11 minutes at 29.8 fps with no crash, both 2026-11-25).
+     * StevenMXZ's Turnip v27.0.0-R3 (release v40, 2026-11-23), recommended on the Adreno 640 / 650 / 660 / 720: players
+     * ran 720p with it where the bundled Stable Turnip v2 crashed (issue #30, Adreno 650, ~50 fps; issue #24, Adreno
+     * 660, 720p / 30 for 11 minutes at 29.8 fps with no crash, both 2026-11-25); the Adreno 640 test phone lost the GPU
+     * at 720p / 30 with Stable Turnip v2 in 3 of 3 runs and never with R3 (2026-11-26); issue #34's Adreno 720 drew the
+     * ground in rainbow colours with Stable Turnip v2 and correctly with R3.
      */
     static final String STEVENMXZ_R3_TAG = "v40";
-    static final int[] STEVENMXZ_R3_ADRENO = { 650, 660 };
+    static final int[] STEVENMXZ_R3_ADRENO = { 640, 650, 660, 720 };
 
     private static int deviceAdreno = -1;
 
@@ -124,7 +126,7 @@ final class GpuDriverCatalog {
         new Source("Whitebelyash Turnip", "whitebelyash/freedreno_turnip-CI", false, true),
         // The GTA IV recomp port's driver on its Adreno 650 test device (Turnip v26.3.0-R6, release v37): offered to
         // the Adreno 6xx reporters (#8, #11). Releases also carry Gen8 (Adreno 8xx) and One UI zips.
-        // Turnip v27.0.0-R3 is the recommended release on the Adreno 650 / 660 (STEVENMXZ_R3_TAG). The repository
+        // Turnip v27.0.0-R3 is the recommended release on the Adreno 640 / 650 / 660 / 720 (STEVENMXZ_R3_TAG). The repository
         // also publishes Qualcomm builds; they are listed, and kept as "Not recommended" once installed.
         new Source("StevenMXZ Turnip", "StevenMXZ/Adreno-Tools-Drivers", false, true,
             GpuDriverStore.Vendor.ADRENO, ".zip", STEVENMXZ_R3_TAG, STEVENMXZ_R3_ADRENO),

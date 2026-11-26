@@ -113,7 +113,7 @@ public final class GpuDriverActivity extends Activity {
         // Adreno without a choice runs the bundled Turnip: the page starts on it, and "Back to game" (not "Apply and
         // restart") while it stays chosen.
         if (vendor == GpuDriverStore.Vendor.ADRENO && originalSelection.isEmpty()) {
-            originalSelection = GpuDriverStore.BUNDLED_TURNIP_ID;
+            originalSelection = GpuDriverStore.bundledTurnipId();
         }
         pendingSelection = originalSelection;
         GpuDriverStore.Installed active = GpuDriverStore.selectedDriver(this);
@@ -133,7 +133,7 @@ public final class GpuDriverActivity extends Activity {
     /** Adreno: what choosing a non-Turnip driver (a Qualcomm package or the phone's own driver) means. */
     private static final String NOT_RECOMMENDED_TEXT = "Qualcomm's drivers draw parts of this game wrong (for "
         + "example the text of the highlighted menu row), and the game's fixes and tests are for Turnip. Use it to "
-        + "compare or if Turnip does not run well on your GPU; the bundled Stable Turnip v2 is the tested choice.";
+        + "compare or if Turnip does not run well on your GPU; the bundled Turnip is the tested choice.";
 
     /** A non-Turnip package installed on Adreno: kept and listed under "Not recommended" (#22). */
     private boolean installedNotRecommended(GpuDriverStore.Installed installed) {
@@ -214,12 +214,9 @@ public final class GpuDriverActivity extends Activity {
                 // Eden's pick for Adreno 8xx is a Qualcomm build: not recommended for this game.
                 if (recommended.startsWith("GameHub")) about.append(" (a Qualcomm driver: not recommended here)");
             }
-            for (int r3 : GpuDriverCatalog.STEVENMXZ_R3_ADRENO) {
-                if (number == r3) {
-                    about.append("\nRecommended for the Adreno ").append(number)
-                        .append(" in this game: StevenMXZ Turnip v27.0.0-R3 (players ran 720p with it without the "
-                            + "crashes of the bundled driver)");
-                }
+            if (GpuDriverStore.bundledR3Default()) {
+                about.append("\nDefault on the Adreno ").append(number).append(" in this game: StevenMXZ Turnip "
+                    + "v27.0.0-R3 (bundled; Stable Turnip v2 crashes or draws wrong on this GPU, it stays available)");
             }
             about.append("\nVerified with this game on Adreno 750: ").append(GpuDriverStore.VERIFIED_DRIVER);
             page.addView(dim(about.toString()));
@@ -246,7 +243,7 @@ public final class GpuDriverActivity extends Activity {
         } else if (failedDriver != null) {
             notice = "The last start with \"" + failedDriver + "\" did not reach the game."
                 + (failedDriver.equals(GpuDriverStore.SYSTEM_DRIVER_NAME) ? ""
-                   : vendor == GpuDriverStore.Vendor.ADRENO ? " Stable Turnip v2 is selected again."
+                   : vendor == GpuDriverStore.Vendor.ADRENO ? " " + GpuDriverStore.bundledTurnipName() + " is selected again."
                                                             : " The system driver is selected again.")
                 + (isMali() && !failedDriver.equals(GpuDriverStore.SYSTEM_DRIVER_NAME)
                     ? " To try again, switch the driver's loading mode or pick another release." : "");
@@ -338,7 +335,7 @@ public final class GpuDriverActivity extends Activity {
                                        : pendingSelection.isEmpty();
         for (GpuDriverStore.Installed driver : installed) pendingExists |= driver.id().equals(pendingSelection);
         if (!pendingExists) {
-            pendingSelection = adreno ? GpuDriverStore.BUNDLED_TURNIP_ID : GpuDriverStore.SYSTEM_DRIVER;
+            pendingSelection = adreno ? GpuDriverStore.bundledTurnipId() : GpuDriverStore.SYSTEM_DRIVER;
         }
         if (!adreno) {
             addChoice(GpuDriverStore.SYSTEM_DRIVER, GpuDriverStore.SYSTEM_DRIVER_NAME,
@@ -417,7 +414,7 @@ public final class GpuDriverActivity extends Activity {
             remove.setOnClickListener(v -> {
                 GpuDriverStore.remove(this, driver);
                 if (pendingSelection.equals(driver.id())) {
-                    pendingSelection = vendor == GpuDriverStore.Vendor.ADRENO ? GpuDriverStore.BUNDLED_TURNIP_ID
+                    pendingSelection = vendor == GpuDriverStore.Vendor.ADRENO ? GpuDriverStore.bundledTurnipId()
                                                                                : GpuDriverStore.SYSTEM_DRIVER;
                 }
                 refreshInstalled();

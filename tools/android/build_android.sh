@@ -116,6 +116,16 @@ if has stage; then
   [ "$(sha256sum "$TURNIP_ZIP" | cut -d' ' -f1)" = "$TURNIP_SHA256" ] || die "$TURNIP_ZIP: checksum mismatch"
   mkdir -p "$REPO/android/app/src/main/assets/gpu_driver"
   cp -f "$TURNIP_ZIP" "$REPO/android/app/src/main/assets/gpu_driver/stable-turnip-V2.zip"
+  # The Adreno 640 / 650 / 660 / 720 default (GpuDriverStore.BUNDLED_R3_ASSET): StevenMXZ's Turnip v27.0.0-R3 (Mesa, MIT).
+  R3_URL=https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases/download/v40/Turnip_v27.0.0-R3.zip
+  R3_SHA256=3a3da776b614550fe8822363bfe7bacca8bc22a5e743d221c196333a54a07add
+  R3_ZIP=$REPO/out/drivers/r3/Turnip_v27.0.0-R3.zip
+  if [ ! -f "$R3_ZIP" ]; then
+    mkdir -p "$(dirname "$R3_ZIP")"
+    curl -fsSL -o "$R3_ZIP" "$R3_URL" || die "could not download $R3_URL"
+  fi
+  [ "$(sha256sum "$R3_ZIP" | cut -d' ' -f1)" = "$R3_SHA256" ] || die "$R3_ZIP: checksum mismatch"
+  cp -f "$R3_ZIP" "$REPO/android/app/src/main/assets/gpu_driver/turnip-v27.0.0-R3.zip"
   # The second screen's art (tools/android/ds2_companion_assets.py, cut from the owner's own discs): development APKs
   # only. build_release_apk.sh removes it again, and its asset check refuses an APK that carries it.
   COMPANION_ART=$REPO/out/companion_assets/companion

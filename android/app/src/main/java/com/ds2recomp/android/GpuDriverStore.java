@@ -56,6 +56,17 @@ final class GpuDriverStore {
     static final String BUNDLED_TURNIP_ASSET = "gpu_driver/stable-turnip-V2.zip";
     static final String BUNDLED_TURNIP_ID = "Stable_Turnip_v2";
     static final long BUNDLED_TURNIP_LIBRARY_BYTES = 14_300_664L;
+    /**
+     * The APK also carries StevenMXZ's Turnip v27.0.0-R3 (Mesa 27.0-devel, release v40; build_android.sh fetches and
+     * checks it), the default on the Adreno 640 / 650 / 660 / 720 (GpuDriverCatalog.STEVENMXZ_R3_ADRENO; the owner,
+     * 2026-11-26: "Yes. That sounds good."). Stable Turnip v2 crashes or draws wrong there (S10's 640 loses the GPU at
+     * 720p / 30, #24's 660 and #30's 650 crash, #34's 720 draws rainbow ground) and R3 does not; R3 draws the scene
+     * nearly black on the Adreno 740, so the other GPUs keep Stable Turnip v2. The directory is the slug of the
+     * release's zip, so a copy downloaded from the GPU driver page is the same package. A player's own choice stays.
+     */
+    static final String BUNDLED_R3_ASSET = "gpu_driver/turnip-v27.0.0-R3.zip";
+    static final String BUNDLED_R3_ID = "Turnip_v27.0.0-R3";
+    static final long BUNDLED_R3_LIBRARY_BYTES = 8_487_576L;
     static final String DIRECTORY = "gpu_driver";
     static final String META_FILE = "meta.json";
     static final long MAX_META_BYTES = 500_000L;
@@ -292,7 +303,7 @@ final class GpuDriverStore {
     /**
      * The selected package when it is still installed and complete, else null (the system driver). On Adreno: the
      * selection, Turnip or not (the page marks the others "not recommended"), null for SYSTEM_DRIVER_CHOSEN, and the
-     * bundled Stable Turnip v2 without a choice or when the chosen package is gone.
+     * bundled default Turnip (bundledTurnipId) without a choice or when the chosen package is gone.
      */
     static Installed selectedDriver(Context context) {
         String id = selected(context);
@@ -314,15 +325,39 @@ final class GpuDriverStore {
             || driver.metadata.name.toLowerCase(Locale.ROOT).contains("turnip"));
     }
 
-    /** The bundled Stable Turnip v2, extracted from the APK when missing; null without the asset. */
+    /** This device's default Turnip is the bundled R3 (Adreno 640 / 650 / 660 / 720), not Stable Turnip v2. */
+    static boolean bundledR3Default() {
+        if (vendor() != Vendor.ADRENO) return false;
+        int number = GpuDriverCatalog.deviceAdreno();
+        for (int r3 : GpuDriverCatalog.STEVENMXZ_R3_ADRENO) if (number == r3) return true;
+        return false;
+    }
+
+    /** The package id of this device's default Turnip (the one "no choice" runs). */
+    static String bundledTurnipId() { return bundledR3Default() ? BUNDLED_R3_ID : BUNDLED_TURNIP_ID; }
+
+    /** The name of this device's default Turnip, for the GPU driver page. */
+    static String bundledTurnipName() { return bundledR3Default() ? "Turnip v27.0.0-R3" : "Stable Turnip v2"; }
+
+    /**
+     * This device's default Turnip, extracted from the APK when missing; null without the asset. Where R3 is the
+     * default, Stable Turnip v2 is extracted too so the page lists it, and stands in when R3 cannot be installed.
+     */
     static synchronized Installed bundledTurnip(Context context) {
-        File directory = new File(root(context), BUNDLED_TURNIP_ID);
+        Installed stable = extractBundled(context, BUNDLED_TURNIP_ID, BUNDLED_TURNIP_ASSET, BUNDLED_TURNIP_LIBRARY_BYTES);
+        if (!bundledR3Default()) return stable;
+        Installed r3 = extractBundled(context, BUNDLED_R3_ID, BUNDLED_R3_ASSET, BUNDLED_R3_LIBRARY_BYTES);
+        return r3 != null ? r3 : stable;
+    }
+
+    private static Installed extractBundled(Context context, String id, String asset, long libraryBytes) {
+        File directory = new File(root(context), id);
         Installed driver = read(directory);
-        if (driver != null && driver.library().length() == BUNDLED_TURNIP_LIBRARY_BYTES) return driver;
-        try (InputStream input = context.getAssets().open(BUNDLED_TURNIP_ASSET)) {
+        if (driver != null && driver.library().length() == libraryBytes) return driver;
+        try (InputStream input = context.getAssets().open(asset)) {
             return installFromStream(input, directory);
         } catch (IOException e) {
-            android.util.Log.e("ds2recomp", "bundled Turnip could not be installed: " + e);
+            android.util.Log.e("ds2recomp", "bundled Turnip " + id + " could not be installed: " + e);
             return null;
         }
     }
@@ -373,7 +408,7 @@ final class GpuDriverStore {
             // choice that failed goes back to the bundled Turnip.
             Installed failed = read(new File(root(context), pending));
             SharedPreferences.Editor editor = preferences.edit().remove(KEY_BOOT_PENDING);
-            if (failed == null || !isTurnip(failed)) editor.putString(KEY_SELECTED, BUNDLED_TURNIP_ID);
+            if (failed == null || !isTurnip(failed)) editor.putString(KEY_SELECTED, bundledTurnipId());
             editor.commit();
         } else {
             preferences.edit().remove(KEY_BOOT_PENDING).putString(KEY_SELECTED, SYSTEM_DRIVER).commit();

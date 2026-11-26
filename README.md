@@ -4,7 +4,8 @@
 
 <p align="center">An unofficial native Android (arm64) port of the <b>Xbox 360</b> release, made by static recompilation.<br>
 Bring your own copy of the game. No game files are included.<br>
-On dual-screen handhelds such as the AYN Thor, the HUD can live on the second screen (<a href="#second-screen-ayn-thor-and-other-dual-screen-handhelds">see below</a>).</p>
+On dual-screen handhelds such as the AYN Thor, the HUD can live on the second screen (<a href="#second-screen-ayn-thor-and-other-dual-screen-handhelds">see below</a>).<br>
+How it runs on your phone's GPU: <a href="#phones-and-gpus-what-to-expect">phones and GPUs</a>.</p>
 
 <p align="center"><b>Beta:</b> playable, and looking for testers on more phones and handhelds (<a href="#help-test">help test</a>).</p>
 
@@ -28,6 +29,31 @@ cutscene in the witches' hut, rendered in real time. All captured on an AYN Thor
 
 <p align="center"><sub>Both screens of an AYN Thor: the game on top, its HUD (HP, stamina, equipment, effects, souls,
 damage figures) on the second screen.</sub></p>
+
+## Phones and GPUs: what to expect
+
+From our own devices and from players' reports and logs (linked). Frame rates depend on the place in the game, the
+settings and how warm the phone gets. Snapdragon (Adreno) runs best; Mali is slow so far; other GPUs are barely
+tested. Reports from more phones help ([help test](#help-test)).
+
+| GPU | Chip (phones reported) | How it runs | Notes |
+|---|---|---|---|
+| **Adreno 830 / 825** | Snapdragon 8 Elite (Galaxy S25), 8s Gen 4 (POCO F7) | **Good:** 60 fps at 720p; about 40 fps at 1080p with Fill screen (S25) | Rare one-frame flashes at 1080p (720p has none). A 40 fps cap keeps the phone cooler ([#22](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/22)) |
+| **Adreno 740** | Snapdragon 8 Gen 2 (AYN Thor, the development device) | **Good:** 60 fps at 720p (1% low 48-56, about 7.7 W); about 46 fps at 1080p | Keep the bundled Stable Turnip v2 (R3 draws the scene nearly black on this GPU) |
+| **Adreno 735** | Snapdragon 8s Gen 3 (POCO F6, HONOR tablet) | **Good:** 60 fps at 720p, 45-60 once hot; low 30s in the Cardinal Tower ([#26](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/26), [#31](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/31)) | "Smoother 60" helps on 120 / 144 Hz screens |
+| **Adreno 720** | Snapdragon 7 Gen 3 (Motorola Edge 50 Pro) | **Playable:** 45-48 fps at 540p ([#34](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/34)) | Use the R3 driver (the bundled one draws rainbow-coloured ground here) |
+| **Adreno 710** | Snapdragon 7s Gen 2 | **Slow:** about 23 fps at 720p, 25-30 at 540p / 30 fps ([#5](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/5)) | |
+| **Adreno 650 / 660** | Snapdragon 865 / 870 (Retroid Pocket 5, POCO F3), 888 (Xiaomi 11T Pro) | **Playable:** 30 fps at 720p / 30 fps; about 50 fps at 720p uncapped (650) ([#8](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/8), [#24](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/24), [#30](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/30)) | Use the R3 driver: the bundled one crashes at 720p on these GPUs |
+| **Adreno 640** | Snapdragon 855 (Galaxy S10) | **Playable:** 30 fps at 720p / 30 fps; about 42 fps at 720p / 60 fps | Use the R3 driver: the bundled one loses the GPU at 720p / 30 fps |
+| **Mali-G615** | Dimensity 8300 / 8350 (POCO X6 Pro, Tecno) | **Playable at low resolution:** a steady 30 fps at 432p, 24-26 at 540p ([#16](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/16), [#21](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/21)) | Use the phone's own (Arm) driver; PanVK is slower |
+| **Mali-G720** | Dimensity 8400 (POCO X7 Pro) | **Too slow so far:** 10-15 fps, even at 360p ([#27](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/27)) | Logs wanted |
+| **Mali-G68 / G57 / G52** | Dimensity 920, Exynos 1280, MT6789, Helio G85 | **Too slow, or does not start** ([#4](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/4), [#12](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/12), [#15](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/15), [#32](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/32)) | |
+| **PowerVR BXM-8-256** | Dimensity 7060 (Moto g56) | **Not working:** wrong colours, about 8 fps ([#25](https://github.com/Lazaer-YZY/ds2-sotfs-recomp/issues/25)) | |
+| Others | Xclipse (Exynos), Mali-G610 / G710 / Immortalis, ... | No reports yet | Reports welcome |
+
+**R3** is StevenMXZ's Turnip v27.0.0-R3, a newer build of the same open-source driver: CTRL → Troubleshooting → GPU
+driver lists it and marks it recommended on these GPUs. **Mali:** we have no Mali device, so Mali support improves only
+through players' tests and logs; a contributor with a Mali phone would be very welcome.
 
 ## What it is
 
@@ -57,8 +83,8 @@ which the app ships and loads by itself; also played on a Samsung Galaxy S25 (Sn
   overlay, and **Report a problem on GitHub** (logs and a prefilled issue form) straight from the phone.
 - Known issues: short frame-time dips while new areas stream in; the heaviest views (the burning gate in the Forest
   of Fallen Giants) run at 55-58 fps on the Thor, whose GPU is then at its top clock. At 1080p, rare single frames
-  of the wrong picture on the Adreno 830 (720p has none). On the Adreno 660, 720p crashes with the bundled driver;
-  540p, its default, runs (#24). See the issue list.
+  of the wrong picture on the Adreno 830 (720p has none). On the Adreno 640 / 650 / 660 / 720, use the R3 driver
+  ([phones and GPUs](#phones-and-gpus-what-to-expect)). See the issue list.
 
 ## Second screen (AYN Thor and other dual-screen handhelds)
 

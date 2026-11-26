@@ -99,7 +99,7 @@ assets=$(unzip -Z1 "$APK" | grep '^assets/' || true)
 extra=$(grep -vE '^assets/(gpu_driver|shader_seed|dexopt)/' <<<"$assets" || true)
 [ -z "$extra" ] || die "assets that must not ship:
 $extra"
-for need in gpu_driver/stable-turnip-V2.zip shader_seed/465307E4.xsh shader_seed/465307E4.fbo.vk.xpso shader_seed/stamp.txt; do
+for need in gpu_driver/stable-turnip-V2.zip gpu_driver/turnip-v27.0.0-R3.zip shader_seed/465307E4.xsh shader_seed/465307E4.fbo.vk.xpso shader_seed/stamp.txt; do
   grep -qx "assets/$need" <<<"$assets" || die "assets/$need missing"
 done
 badging=$("$BT/aapt2.exe" dump badging "$APK")
