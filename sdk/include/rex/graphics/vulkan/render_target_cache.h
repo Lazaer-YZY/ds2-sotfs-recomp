@@ -67,6 +67,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
       xenos::ColorRenderTargetFormat color_3_view_format
           : xenos::kColorRenderTargetFormatBits;    // 24
       uint32_t color_rts_use_transfer_formats : 1;  // 25
+      // Color attachments (bit i = color i) loaded with DONT_CARE instead of LOAD: a render pass instance whose
+      // first draw overwrites every pixel of its render area (vulkan_skip_overwritten_loads). Such a render pass is
+      // compatible with the LOAD one (only load ops differ), so its framebuffers and pipelines are shared.
+      uint32_t color_load_dont_care : xenos::kMaxColorRenderTargets;  // 29
     };
     uint32_t key = 0;
     struct Hasher {
@@ -136,6 +140,19 @@ class VulkanRenderTargetCache final : public RenderTargetCache,
               uint32_t normalized_color_mask, const Shader& vertex_shader) override;
   // Binding information for the last successful update.
   RenderPassKey last_update_render_pass_key() const { return last_update_render_pass_key_; }
+  // The guest pixels the last updated draw overwrites in every render target it uses
+  // (RenderTargetCache::last_update_draw_overwrite); false if not proven.
+  bool GetLastUpdateDrawOverwrite(uint32_t& x, uint32_t& y, uint32_t& width, uint32_t& height) const {
+    const Transfer::Rectangle* rect = last_update_draw_overwrite();
+    if (!rect) {
+      return false;
+    }
+    x = rect->x_pixels;
+    y = rect->y_pixels;
+    width = rect->width_pixels;
+    height = rect->height_pixels;
+    return true;
+  }
   VkRenderPass last_update_render_pass() const { return last_update_render_pass_; }
   const Framebuffer* last_update_framebuffer() const { return last_update_framebuffer_; }
   uint32_t last_update_framebuffer_pitch_tiles_at_32bpp() const {

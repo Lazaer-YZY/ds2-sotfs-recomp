@@ -830,6 +830,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   // clear with a rectangle drawn with depth ALWAYS) doesn't need the previous
   // contents of that rectangle: cut it out of the ownership transfers.
   last_update_transfer_cutout_valid_ = false;
+  last_update_draw_overwrite_valid_ = false;
   last_update_transfer_clear_ = false;
   last_update_transfer_clear_mask_ = 0;
   // Render targets drawn to now no longer hold a recorded constant (a new one
@@ -965,6 +966,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
           last_update_transfer_cutout_.width_pixels = uint32_t(right - left);
           last_update_transfer_cutout_.height_pixels = uint32_t(bottom - top);
           last_update_transfer_cutout_valid_ = true;
+          last_update_draw_overwrite_valid_ = true;
           // Record the constant left by a depth-only clear-like rectangle.
           if (REXCVAR_GET(gpu_constant_transfers_as_clears) &&
               (depth_and_color_rts_used_bits == 0b1 ||

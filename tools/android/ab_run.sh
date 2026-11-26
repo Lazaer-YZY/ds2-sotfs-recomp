@@ -89,10 +89,11 @@ for variant in "$@"; do
   cvars=${variant#*|}
   [ "$cvars" = "$variant" ] && cvars=""
   push_save || exit 1
-  # A variant may carry launch extras after a second '|': "label|cvars|--es DS2_GPU_DRIVER system".
+  # A variant may carry launch extras after a second '|': "label|cvars|--es DS2_GPU_DRIVER system". DS2_AM_EXTRAS from
+  # the environment applies to every variant (the S10 needs --es DS2_SHOW_WHEN_LOCKED 1; it was dropped until 2026-11-26).
   extras=""
   case "$cvars" in *"|"*) extras=${cvars#*|}; cvars=${cvars%%|*} ;; esac
-  DS2_AM_EXTRAS="--es DS2_SAVE_SNAPSHOTS 0 $extras" DS2_CVARS="--ds2_input_script=$AB_SCRIPT $cvars" tools/android/build_android.sh launch     </dev/null >"$out/$label.txt" 2>&1 ||
+  DS2_AM_EXTRAS="--es DS2_SAVE_SNAPSHOTS 0 ${DS2_AM_EXTRAS:-} $extras" DS2_CVARS="--ds2_input_script=$AB_SCRIPT $cvars" tools/android/build_android.sh launch     </dev/null >"$out/$label.txt" 2>&1 ||
     echo "$label: launch failed (see $out/$label.txt)"
   stamp=$(sed -n 's|^logs: .*/logcat_\(.*\)\.txt,.*|\1|p' "$out/$label.txt" | tail -1)
   for t in $DS2_SCREENSHOTS; do

@@ -287,7 +287,9 @@ public final class RuntimeActivity extends SDLActivity {
             + "|" + render.getBoolean("compat_shortcuts_resolves", false)
             + "|" + render.getBoolean("compat_feed_off", false) + "|" + render.getBoolean("compat_lazy_off", false)
             + "|" + render.getBoolean("compat_7e3_resolve_off", false)
-            + "|" + render.getBoolean(MALI_RELAXED_INTERPOLATORS, false) + "|" + render.getBoolean(MALI_NO_ROBUST, false);
+            + "|" + render.getBoolean(MALI_RELAXED_INTERPOLATORS, false) + "|" + render.getBoolean(MALI_NO_ROBUST, false)
+            + "|" + render.getBoolean(MALI_TRANSFER_SHORTCUTS, false) + "|" + render.getBoolean(MALI_FIXED_RATE, false)
+            + "|" + render.getBoolean(MALI_SKIP_LOADS, false);
     }
 
     /**
@@ -306,6 +308,14 @@ public final class RuntimeActivity extends SDLActivity {
     /** CTRL Mali tests (Mali only, off by default): 16-bit interpolators; robustBufferAccess off. */
     static final String MALI_RELAXED_INTERPOLATORS = "mali_relaxed_interpolators";
     static final String MALI_NO_ROBUST = "mali_no_robust_buffer_access";
+    /**
+     * CTRL Mali tests from the Mali-friendly recomps (2026-11-26, DECISIONS.md; ideas from Zandatsu, XenDroid Plus and
+     * dsr-native, reimplemented): fewer 4x -> 1x render target transfers; fixed-rate (lossy) compression of 1x color
+     * render targets; no load of render pass contents the first draw overwrites.
+     */
+    static final String MALI_TRANSFER_SHORTCUTS = "mali_transfer_shortcuts";
+    static final String MALI_FIXED_RATE = "mali_fixed_rate_compression";
+    static final String MALI_SKIP_LOADS = "mali_skip_overwritten_loads";
 
     static final String[] TRANSFER_SHORTCUTS_OFF = {
         "--gpu_skip_overwritten_color_transfers=false", "--gpu_constant_transfers_as_clears=false",
@@ -365,6 +375,12 @@ public final class RuntimeActivity extends SDLActivity {
             if (render.getBoolean(MALI_RELAXED_INTERPOLATORS, false))
                 args.add("--vulkan_relaxed_precision_interpolators=true");
             if (render.getBoolean(MALI_NO_ROBUST, false)) args.add("--vulkan_robust_buffer_access=false");
+            if (render.getBoolean(MALI_TRANSFER_SHORTCUTS, false)) {
+                java.util.Collections.addAll(args, "--gpu_constant_transfers_as_color_clears=true",
+                                             "--gpu_skip_slack_transfers=true");
+            }
+            if (render.getBoolean(MALI_FIXED_RATE, false)) args.add("--vulkan_fixed_rate_render_targets=true");
+            if (render.getBoolean(MALI_SKIP_LOADS, false)) args.add("--vulkan_skip_overwritten_loads=true");
         }
     }
 

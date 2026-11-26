@@ -304,6 +304,8 @@ class VulkanCommandProcessor : public CommandProcessor {
     // render areas (vulkan_render_area_restrict), summed over the instances.
     uint64_t render_area_passes = 0;
     uint64_t render_area_restricted_passes = 0;
+    // Guest render pass instances begun without loading their color attachments (vulkan_skip_overwritten_loads).
+    uint64_t render_area_load_skipped_passes = 0;
     uint64_t render_area_width = 0;
     uint64_t render_area_height = 0;
     uint64_t render_area_pixels = 0;
@@ -1143,6 +1145,17 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t y0 = UINT32_MAX;
     uint32_t x1 = 0;
     uint32_t y1 = 0;
+    // vulkan_skip_overwritten_loads: a guest draw render pass instance begun with vkCmdBeginRenderPass (the location
+    // of its render pass handle in the deferred command buffer and its key), whether its first draw has been seen,
+    // and the host pixels that first draw overwrites in every attachment (empty if not proven).
+    bool guest_render_pass = false;
+    size_t begin_render_pass_offset = SIZE_MAX;
+    VulkanRenderTargetCache::RenderPassKey render_pass_key;
+    bool first_draw_seen = false;
+    uint32_t overwrite_x0 = 0;
+    uint32_t overwrite_y0 = 0;
+    uint32_t overwrite_x1 = 0;
+    uint32_t overwrite_y1 = 0;
   };
   // Call after recording the begin command of a render target cache render
   // pass instance.

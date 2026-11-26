@@ -147,6 +147,7 @@ REXCVAR_DEFINE_BOOL(vulkan_direct_resolve_4x_as_1x, true, "GPU/Vulkan",
                     "are only the 4x clear rectangle, then a 1x resolve into the shadow atlas.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DECLARE(bool, vulkan_readback_resolve);
+REXCVAR_DECLARE(bool, vulkan_fixed_rate_render_targets);
 
 REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
                       "Vulkan render target implementation path")
@@ -2821,7 +2822,8 @@ VkRenderPass VulkanRenderTargetCache::GetHostRenderTargetsRenderPass(RenderPassK
                             ? GetColorOwnershipTransferVulkanFormat(color_format, key.msaa_samples)
                             : GetColorVulkanFormat(color_format);
     attachment.samples = samples;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachment.loadOp = (key.color_load_dont_care & (uint32_t(1) << i)) ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
+                                                                        : VK_ATTACHMENT_LOAD_OP_LOAD;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -3166,6 +3168,22 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
       image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     }
     image_create_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  }
+  // vulkan_fixed_rate_render_targets (a Mali test): fixed-rate compression for 1x color render targets that can be
+  // compressed at all (Arm's driver compresses neither mutable-format nor storage images).
+  VkImageCompressionControlEXT fixed_rate_compression = {};
+  if (REXCVAR_GET(vulkan_fixed_rate_render_targets) && !key.is_depth &&
+      image_create_info.samples == VK_SAMPLE_COUNT_1_BIT &&
+      !(image_create_info.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
+      !(image_create_info.usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+      vulkan_device->extensions().ext_EXT_image_compression_control &&
+      vulkan_device->properties().imageCompressionControl) {
+    fixed_rate_compression.sType = VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT;
+    fixed_rate_compression.pNext = nullptr;
+    fixed_rate_compression.flags = VK_IMAGE_COMPRESSION_FIXED_RATE_DEFAULT_EXT;
+    fixed_rate_compression.compressionControlPlaneCount = 0;
+    fixed_rate_compression.pFixedRateFlags = nullptr;
+    image_create_info.pNext = &fixed_rate_compression;
   }
   if (image_create_info.format == VK_FORMAT_UNDEFINED) {
     REXGPU_ERROR("VulkanRenderTargetCache: Unknown {} render target format {}",

@@ -39,6 +39,14 @@ REXCVAR_DEFINE_BOOL(vulkan_log_image_compression, false, "UI/Vulkan",
                     "Enable VK_EXT_image_compression_control if available and log the compression of each "
                     "kind of render target once (diagnostics)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Mali test (DS2, 2026-11-26; Zandatsu's renderer requests it on Mali-G615 and newer, reimplemented): ask the driver
+// for fixed-rate (lossy) compression of 1x color render targets through VK_EXT_image_compression_control (Arm's AFRC),
+// which needs less memory traffic than lossless AFBC. The driver may refuse it per format; with
+// vulkan_log_image_compression the log shows what each kind of render target got.
+REXCVAR_DEFINE_BOOL(vulkan_fixed_rate_render_targets, false, "UI/Vulkan",
+                    "Request fixed-rate (lossy) compression of 1x color render targets where "
+                    "VK_EXT_image_compression_control offers it (a Mali test)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
@@ -302,8 +310,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_custom_border_color)
       // Required for true null descriptors in bindless texture bindings.
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_robustness2)
-      if (REXCVAR_GET(vulkan_log_image_compression)) {
-        // #339. Diagnostics only.
+      if (REXCVAR_GET(vulkan_log_image_compression) || REXCVAR_GET(vulkan_fixed_rate_render_targets)) {
+        // #339. Diagnostics, and the fixed-rate render target test.
         XE_UI_VULKAN_STRUCT_EXTENSION(EXT_image_compression_control)
       }
       if (REXCVAR_GET(vulkan_pipeline_statistics)) {
@@ -913,6 +921,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   if (device->extensions_.ext_EXT_image_compression_control) {
     features_EXT_image_compression_control.enabled.imageCompressionControl =
         features_EXT_image_compression_control.supported.imageCompressionControl;
+    device->properties_.imageCompressionControl =
+        bool(features_EXT_image_compression_control.supported.imageCompressionControl);
     REXLOG_INFO("* imageCompressionControl: {}",
                 bool(features_EXT_image_compression_control.supported.imageCompressionControl));
   }

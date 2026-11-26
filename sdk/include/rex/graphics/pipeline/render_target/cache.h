@@ -540,6 +540,12 @@ class RenderTargetCache {
   const Transfer::Rectangle* last_update_transfer_cutout() const {
     return last_update_transfer_cutout_valid_ ? &last_update_transfer_cutout_ : nullptr;
   }
+  // Pixels (guest) that the current draw itself writes completely in every render target it uses, proven from its
+  // state and its vertex shader (the main path of the transfer cut-out only, not the constant-region cases) - or
+  // nullptr. A render pass whose first draw is this one needs no load of those pixels (vulkan_skip_overwritten_loads).
+  const Transfer::Rectangle* last_update_draw_overwrite() const {
+    return last_update_draw_overwrite_valid_ ? &last_update_transfer_cutout_ : nullptr;
+  }
   // Clear values for the render targets of the last update (index 0 = depth)
   // when the cut-out area is to be cleared instead of transferred (its source
   // held a constant, gpu_constant_transfers_as_clears) - or nullptr.
@@ -612,6 +618,8 @@ class RenderTargetCache {
   const Shader* update_pixel_shader_ = nullptr;
   Transfer::Rectangle last_update_transfer_cutout_ = {};
   bool last_update_transfer_cutout_valid_ = false;
+  // last_update_transfer_cutout_ comes from the draw's own overwrite proof (see last_update_draw_overwrite).
+  bool last_update_draw_overwrite_valid_ = false;
   uint64_t last_update_transfer_clear_values_[1 + xenos::kMaxColorRenderTargets] = {};
   bool last_update_transfer_clear_ = false;
   uint32_t last_update_transfer_clear_mask_ = 0;

@@ -37,6 +37,19 @@ class DeferredCommandBuffer {
   // or reset, so it can be shrunk to what the commands recorded in the render
   // pass instance have actually written once the instance has ended.
   size_t GetLastRenderAreaOffset() const { return last_render_area_offset_; }
+  // Location of the render pass handle of the last recorded CmdVkBeginRenderPass (SIZE_MAX after
+  // CmdVkBeginRendering). It may be replaced with SetRecordedRenderPass by a compatible render pass (one that differs
+  // only in load / store ops) until the buffer is executed or reset.
+  size_t GetLastRenderPassOffset() const { return last_render_pass_offset_; }
+  void SetRecordedRenderPass(size_t render_pass_offset, VkRenderPass render_pass) {
+    if (render_pass_offset == SIZE_MAX ||
+        render_pass_offset + sizeof(VkRenderPass) > command_stream_.size() * sizeof(uintmax_t)) {
+      assert_always();
+      return;
+    }
+    std::memcpy(reinterpret_cast<uint8_t*>(command_stream_.data()) + render_pass_offset, &render_pass,
+                sizeof(VkRenderPass));
+  }
   void SetRecordedRenderArea(size_t render_area_offset, const VkRect2D& render_area) {
     if (render_area_offset == SIZE_MAX ||
         render_area_offset + sizeof(VkRect2D) > command_stream_.size() * sizeof(uintmax_t)) {
@@ -66,6 +79,8 @@ class DeferredCommandBuffer {
     args.framebuffer = render_pass_begin->framebuffer;
     args.render_area = render_pass_begin->renderArea;
     last_render_area_offset_ = size_t(reinterpret_cast<const uint8_t*>(&args.render_area) -
+                                      reinterpret_cast<const uint8_t*>(command_stream_.data()));
+    last_render_pass_offset_ = size_t(reinterpret_cast<const uint8_t*>(&args.render_pass) -
                                       reinterpret_cast<const uint8_t*>(command_stream_.data()));
     args.clear_value_count = clear_value_count;
     args.contents = contents;
@@ -881,6 +896,8 @@ class DeferredCommandBuffer {
 
   // See GetLastRenderAreaOffset.
   size_t last_render_area_offset_ = SIZE_MAX;
+  // See GetLastRenderPassOffset.
+  size_t last_render_pass_offset_ = SIZE_MAX;
 };
 
 }  // namespace rex::graphics::vulkan

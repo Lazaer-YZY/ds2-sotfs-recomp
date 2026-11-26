@@ -397,6 +397,17 @@ REXCVAR_DEFINE_BOOL(vulkan_gpu_trace_frame, false, "GPU",
                     "uploads) every 10 s")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+// Mali test (DS2, 2026-11-26; the idea from Zandatsu's dbz3_discard_full_overwrite and dsr-native's load skipping,
+// reimplemented): a guest render pass instance whose first draw provably overwrites every pixel of every attachment in
+// the instance's whole render area (the render target cache's overwrite proof: opaque blending, full write mask, no
+// alpha test / kill / culling, depth and stencil overwritten or unused, a single rectangle proven by running the vertex
+// shader) begins with color loadOp DONT_CARE, and its render area becomes exactly the written rectangle (inside the
+// proven one). Tile-based GPUs then don't read the old contents into tile memory. vkCmdBeginRenderPass only (not
+// dynamic rendering); depth is always loaded.
+REXCVAR_DEFINE_BOOL(vulkan_skip_overwritten_loads, false, "GPU",
+                    "Begin guest render passes whose first draw overwrites the whole render area without loading "
+                    "their color attachments (render passes, not dynamic rendering)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(vulkan_render_area_restrict, false, "GPU",
                     "Restrict the render area of render target cache render passes (guest draws, "
                     "render target ownership transfers, resolve clears) to the EDRAM-tile-aligned "
@@ -3892,6 +3903,11 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   }
   in_render_pass_ = true;
   RenderPassAreaBegin(framebuffer->host_extent);
+  if (!use_dynamic_rendering) {
+    render_pass_area_.guest_render_pass = true;
+    render_pass_area_.begin_render_pass_offset = deferred_command_buffer_.GetLastRenderPassOffset();
+    render_pass_area_.render_pass_key = render_target_cache_->last_update_render_pass_key();
+  }
 }
 
 void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
@@ -4059,6 +4075,14 @@ void VulkanCommandProcessor::RenderPassAreaBegin(const VkExtent2D& framebuffer_e
   area.y0 = UINT32_MAX;
   area.x1 = 0;
   area.y1 = 0;
+  area.guest_render_pass = false;
+  area.begin_render_pass_offset = SIZE_MAX;
+  area.render_pass_key = VulkanRenderTargetCache::RenderPassKey();
+  area.first_draw_seen = false;
+  area.overwrite_x0 = 0;
+  area.overwrite_y0 = 0;
+  area.overwrite_x1 = 0;
+  area.overwrite_y1 = 0;
 }
 
 void VulkanCommandProcessor::RenderPassAreaEnd() {
@@ -4067,6 +4091,40 @@ void VulkanCommandProcessor::RenderPassAreaEnd() {
     return;
   }
   area.active = false;
+  // vulkan_skip_overwritten_loads: everything the instance wrote lies inside what its first draw overwrote in every
+  // attachment, so no pixel of that (unaligned) rectangle needs its old contents: begin with the color attachments
+  // DONT_CARE and the render area exactly that rectangle (pixels outside it are neither loaded nor stored).
+  if (area.guest_render_pass && area.overwrite_x0 < area.overwrite_x1 && area.overwrite_y0 < area.overwrite_y1 &&
+      area.x0 < area.x1 && area.y0 < area.y1 && area.x0 >= area.overwrite_x0 && area.y0 >= area.overwrite_y0 &&
+      area.x1 <= area.overwrite_x1 && area.y1 <= area.overwrite_y1 &&
+      area.begin_render_pass_offset != SIZE_MAX && area.begin_render_area_offset != SIZE_MAX &&
+      (area.render_pass_key.depth_and_color_used >> 1) != 0 && REXCVAR_GET(vulkan_skip_overwritten_loads)) {
+    VulkanRenderTargetCache::RenderPassKey dont_care_key = area.render_pass_key;
+    dont_care_key.color_load_dont_care = dont_care_key.depth_and_color_used >> 1;
+    VkRenderPass dont_care_pass = render_target_cache_->GetHostRenderTargetsRenderPass(dont_care_key);
+    if (dont_care_pass != VK_NULL_HANDLE) {
+      VkRect2D written;
+      written.offset.x = int32_t(area.x0);
+      written.offset.y = int32_t(area.y0);
+      written.extent.width = area.x1 - area.x0;
+      written.extent.height = area.y1 - area.y0;
+      deferred_command_buffer_.SetRecordedRenderPass(area.begin_render_pass_offset, dont_care_pass);
+      deferred_command_buffer_.SetRecordedRenderArea(area.begin_render_area_offset, written);
+      GpuTimingCounters& lc = gpu_timing_counters_;
+      uint64_t written_pixels = uint64_t(written.extent.width) * written.extent.height;
+      ++lc.render_area_passes;
+      ++lc.render_area_load_skipped_passes;
+      ++lc.render_area_restricted_passes;
+      lc.render_area_framebuffer_width += area.framebuffer_width;
+      lc.render_area_framebuffer_height += area.framebuffer_height;
+      lc.render_area_framebuffer_pixels += uint64_t(area.framebuffer_width) * area.framebuffer_height;
+      lc.render_area_touched_pixels += written_pixels;
+      lc.render_area_width += written.extent.width;
+      lc.render_area_height += written.extent.height;
+      lc.render_area_pixels += written_pixels;
+      return;
+    }
+  }
   // Align to whole EDRAM tiles of every attachment: a tile is 80x16 samples,
   // so 80x16 pixels is a whole number of tiles for any sample count and for
   // both 32bpp and 64bpp render targets (the framebuffer origin is the base
@@ -4378,14 +4436,17 @@ void VulkanCommandProcessor::GpuTimingOnSwap() {
     double framebuffer_pixels = double(std::max(c.render_area_framebuffer_pixels, uint64_t(1)));
     render_area_info = fmt::format(
         "; render area per pass {:.0f}x{:.0f} of {:.0f}x{:.0f} avg = {:.1f}% of framebuffer "
-        "pixels (writes need {:.1f}%), {:.1f} of {:.1f} passes restricted (restrict {})",
+        "pixels (writes need {:.1f}%), {:.1f} of {:.1f} passes restricted (restrict {}), {:.1f} begun "
+        "without loading color (skip overwritten loads {})",
         double(c.render_area_width) / area_passes, double(c.render_area_height) / area_passes,
         double(c.render_area_framebuffer_width) / area_passes,
         double(c.render_area_framebuffer_height) / area_passes,
         double(c.render_area_pixels) / framebuffer_pixels * 100.0,
         double(c.render_area_touched_pixels) / framebuffer_pixels * 100.0,
         double(c.render_area_restricted_passes) / frames, double(c.render_area_passes) / frames,
-        REXCVAR_GET(vulkan_render_area_restrict) ? "on" : "off");
+        REXCVAR_GET(vulkan_render_area_restrict) ? "on" : "off",
+        double(c.render_area_load_skipped_passes) / frames,
+        REXCVAR_GET(vulkan_skip_overwritten_loads) ? "on" : "off");
   }
   if (gpu_timing_support_ > 0) {
     const double* ns = gpu_timing_category_ns_;
@@ -6232,6 +6293,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
+
+  // The first draw of a guest render pass instance: the pixels it overwrites (vulkan_skip_overwritten_loads).
+  if (render_pass_area_.active && render_pass_area_.guest_render_pass && !render_pass_area_.first_draw_seen) {
+    render_pass_area_.first_draw_seen = true;
+    uint32_t ow_x, ow_y, ow_width, ow_height;
+    if (REXCVAR_GET(vulkan_skip_overwritten_loads) &&
+        render_target_cache_->GetLastUpdateDrawOverwrite(ow_x, ow_y, ow_width, ow_height)) {
+      uint32_t scale_x = render_target_cache_->draw_resolution_scale_x();
+      uint32_t scale_y = render_target_cache_->draw_resolution_scale_y();
+      render_pass_area_.overwrite_x0 = ow_x * scale_x;
+      render_pass_area_.overwrite_y0 = ow_y * scale_y;
+      render_pass_area_.overwrite_x1 = (ow_x + ow_width) * scale_x;
+      render_pass_area_.overwrite_y1 = (ow_y + ow_height) * scale_y;
+    }
+  }
 
   // The draw can't write outside its scissor (set in UpdateDynamicState). If
   // the dynamic scissor state is unknown, be conservative.

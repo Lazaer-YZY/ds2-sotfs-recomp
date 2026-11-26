@@ -31,6 +31,7 @@ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& comma
 void DeferredCommandBuffer::Reset() {
   command_stream_.clear();
   last_render_area_offset_ = SIZE_MAX;
+  last_render_pass_offset_ = SIZE_MAX;
 }
 
 void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
@@ -520,6 +521,7 @@ void DeferredCommandBuffer::CmdVkBeginRendering(const VkRenderingInfo* rendering
   args.render_area = rendering_info->renderArea;
   last_render_area_offset_ = size_t(reinterpret_cast<const uint8_t*>(&args.render_area) -
                                     reinterpret_cast<const uint8_t*>(command_stream_.data()));
+  last_render_pass_offset_ = SIZE_MAX;
   args.layer_count = rendering_info->layerCount;
   args.view_mask = rendering_info->viewMask;
   args.color_attachment_count = rendering_info->colorAttachmentCount;

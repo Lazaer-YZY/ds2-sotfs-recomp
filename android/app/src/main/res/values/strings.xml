@@ -145,6 +145,12 @@
     <string name="touch_mali_relaxed_interpolators_help">Less memory traffic for every vertex drawn. Textures may look a little softer or shimmer.</string>
     <string name="touch_mali_no_robust">Mali test: buffer range checks off *</string>
     <string name="touch_mali_no_robust_help">Skips the safety checks the driver does on buffer reads. Possibly faster; the game may crash.</string>
+    <string name="touch_mali_transfers">Mali test: fewer render target copies *</string>
+    <string name="touch_mali_transfers_help">Replaces most copies between the game\'s multisampled and normal render targets with clears. If something looks wrong, turn it off.</string>
+    <string name="touch_mali_fixed_rate">Mali test: fixed-rate compression *</string>
+    <string name="touch_mali_fixed_rate_help">Asks Arm\'s driver to compress the game\'s render targets at a fixed rate: less memory traffic, slightly lossy (colour banding is possible).</string>
+    <string name="touch_mali_skip_loads">Mali test: skip loads of overwritten images *</string>
+    <string name="touch_mali_skip_loads_help">Render passes that the first draw paints completely don\'t read the old image first. If something flickers or looks wrong, turn it off.</string>
     <string name="touch_compat_tu_reserve">Turnip: keep its reserved descriptor set * (Turnip drivers only)</string>
     <!-- Second screen (CTRL, dual-screen devices only; CompanionScreen.java) -->
     <string name="touch_section_second_screen">Second screen</string>

@@ -1031,6 +1031,15 @@ final class TouchControlsView extends View {
         final CheckBox maliNoRobust = !mali ? null : option(advanced,
             strings.getString(R.string.touch_mali_no_robust), strings.getString(R.string.touch_mali_no_robust_help),
             render.getBoolean(RuntimeActivity.MALI_NO_ROBUST, false));
+        final CheckBox maliTransfers = !mali ? null : option(advanced,
+            strings.getString(R.string.touch_mali_transfers), strings.getString(R.string.touch_mali_transfers_help),
+            render.getBoolean(RuntimeActivity.MALI_TRANSFER_SHORTCUTS, false));
+        final CheckBox maliFixedRate = !mali ? null : option(advanced,
+            strings.getString(R.string.touch_mali_fixed_rate), strings.getString(R.string.touch_mali_fixed_rate_help),
+            render.getBoolean(RuntimeActivity.MALI_FIXED_RATE, false));
+        final CheckBox maliSkipLoads = !mali ? null : option(advanced,
+            strings.getString(R.string.touch_mali_skip_loads), strings.getString(R.string.touch_mali_skip_loads_help),
+            render.getBoolean(RuntimeActivity.MALI_SKIP_LOADS, false));
 
         scroll.addView(content);
         // The title row with Exit at its right (the owner, 2026-11-22: "an exit button top right in the ctrl menu").
@@ -1090,6 +1099,12 @@ final class TouchControlsView extends View {
                         ? render.getBoolean(RuntimeActivity.MALI_RELAXED_INTERPOLATORS, false) : maliRelaxed.isChecked())
                     .putBoolean(RuntimeActivity.MALI_NO_ROBUST, maliNoRobust == null
                         ? render.getBoolean(RuntimeActivity.MALI_NO_ROBUST, false) : maliNoRobust.isChecked())
+                    .putBoolean(RuntimeActivity.MALI_TRANSFER_SHORTCUTS, maliTransfers == null
+                        ? render.getBoolean(RuntimeActivity.MALI_TRANSFER_SHORTCUTS, false) : maliTransfers.isChecked())
+                    .putBoolean(RuntimeActivity.MALI_FIXED_RATE, maliFixedRate == null
+                        ? render.getBoolean(RuntimeActivity.MALI_FIXED_RATE, false) : maliFixedRate.isChecked())
+                    .putBoolean(RuntimeActivity.MALI_SKIP_LOADS, maliSkipLoads == null
+                        ? render.getBoolean(RuntimeActivity.MALI_SKIP_LOADS, false) : maliSkipLoads.isChecked())
                     .putBoolean(RuntimeActivity.SUSTAINED, sustained.isChecked())
                     .putBoolean("prime", primeCore.isChecked()).commit();  // on disk before a restart below
                 RuntimeActivity.nativeSetOption("cheat_hp", cheatHp.isChecked() ? "1" : "0");

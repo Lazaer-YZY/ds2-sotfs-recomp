@@ -186,6 +186,9 @@ class VulkanDevice {
     // VK_EXT_robustness2
 
     bool nullDescriptor = false;
+    // VK_EXT_image_compression_control (enabled with vulkan_log_image_compression or
+    // vulkan_fixed_rate_render_targets).
+    bool imageCompressionControl = false;
 
     // Vulkan 1.3 core extended dynamic state (VK_EXT_extended_dynamic_state and
     // VK_EXT_extended_dynamic_state2 core subset). True when apiVersion >= 1.3; the
