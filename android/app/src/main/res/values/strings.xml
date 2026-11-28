@@ -67,8 +67,8 @@
     <string name="touch_aa_off">Off</string>
     <string name="touch_aa_fxaa">FXAA</string>
     <string name="touch_aa_fxaa_strong">FXAA, stronger (softer)</string>
-    <string name="touch_wide">Fill screen *</string>
-    <string name="touch_wide_help">Shows more to the sides on screens wider than 16:9; menus and HUD stay 16:9. At 1080p and 1440p it needs a fast GPU.</string>
+    <string name="touch_wide">Fill screen: wide and 4:3 screens *</string>
+    <string name="touch_wide_help">For screens that are not 16:9, wider or narrower. Wide screens (20:9 phones) show more to the sides; at 1080p and 1440p that needs a fast GPU. 4:3 screens (and 3:2, 5:3) fill top to bottom with the menus and HUD scaled to fit. Menus, HUD and movies keep their shape.</string>
     <string name="touch_wide_na">(this screen is 16:9)</string>
     <string name="touch_depth_of_field">Depth of field</string>
     <string name="touch_depth_of_field_help">Background blur. Off is sharper and faster.</string>
@@ -196,7 +196,6 @@
     <!-- The equipped items that give each effect icon (effect|item id|the game's English item name), from
          out/hudprobe/effect_sources.py: the label names the one that is equipped. -->
     <string-array name="companion_effect_sources">
-disc 2: no package found (DLC icons missing)
         <item>10|40020000|Chloranthy Ring</item>
         <item>10|40020001|Chloranthy Ring+1</item>
         <item>10|40020002|Chloranthy Ring+2</item>

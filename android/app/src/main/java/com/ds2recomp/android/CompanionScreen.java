@@ -53,7 +53,7 @@ final class CompanionScreen implements DisplayManager.DisplayListener {
     /** True when the device has a second screen the companion can use. */
     static boolean available(Activity activity) {
         DisplayManager dm = (DisplayManager) activity.getSystemService(Activity.DISPLAY_SERVICE);
-        return dm != null && target(dm) != null;
+        return dm != null && target(activity, dm) != null;
     }
 
     /** The setting; on by default (it only does something on dual-screen devices). */
@@ -90,7 +90,7 @@ final class CompanionScreen implements DisplayManager.DisplayListener {
     /** Applies the CTRL dialog's setting at once. */
     void update() {
         boolean want = resumed && (forced != null ? forced : enabled(RuntimeActivity.renderPrefs(activity)));
-        Display display = want && displays != null ? target(displays) : null;
+        Display display = want && displays != null ? target(activity, displays) : null;
         if (display == null) {
             dismiss();
             return;
@@ -103,11 +103,31 @@ final class CompanionScreen implements DisplayManager.DisplayListener {
         show(display);
     }
 
-    private static Display target(DisplayManager dm) {
+    /**
+     * The second screen: a presentation display other than the one the game is on, and only while the game is on the
+     * device's own screen (the Thor's top screen). Issue #35: in Samsung DeX the game runs on the external monitor,
+     * which is itself a presentation display, so the HUD "moved" to the game's own display and was hidden there.
+     */
+    private static Display target(Activity activity, DisplayManager dm) {
+        int gameDisplay = gameDisplayId(activity);
+        if (gameDisplay != Display.DEFAULT_DISPLAY) return null;
         for (Display d : dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)) {
-            if (d.getDisplayId() != Display.DEFAULT_DISPLAY && d.getState() != Display.STATE_OFF) return d;
+            if (d.getDisplayId() != Display.DEFAULT_DISPLAY && d.getDisplayId() != gameDisplay
+                    && d.getState() != Display.STATE_OFF) return d;
         }
         return null;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static int gameDisplayId(Activity activity) {
+        Display display = null;
+        try {
+            display = android.os.Build.VERSION.SDK_INT >= 30 ? activity.getDisplay()
+                : activity.getWindowManager().getDefaultDisplay();
+        } catch (RuntimeException ignored) {
+            // No display yet: treated as the device's own screen.
+        }
+        return display != null ? display.getDisplayId() : Display.DEFAULT_DISPLAY;
     }
 
     private void show(Display display) {

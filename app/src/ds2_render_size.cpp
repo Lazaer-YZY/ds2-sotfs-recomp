@@ -38,6 +38,7 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -55,7 +56,8 @@ REXCVAR_DEFINE_INT32(ds2_render_width, 0, "DS2",
                      "The game's screen width (0 = 16:9 of ds2_render_height). Takes effect on restart");
 REXCVAR_DEFINE_BOOL(ds2_ui_centre, true, "DS2",
                     "On a screen wider than 16:9, centre the 2D elements the game would stretch (HUD, menus, text) "
-                    "so they keep their 16:9 shape");
+                    "so they keep their 16:9 shape; on a narrower one (4:3), centre them vertically too, scaled to "
+                    "the width");
 REXCVAR_DEFINE_BOOL(ds2_ui_probe, false, "DS2",
                     "Diagnostic: log each distinct 2D sprite transform call (caller, anchor flags, the first matrix "
                     "rows) once");
@@ -117,7 +119,7 @@ void WantedScreen(uint32_t& width, uint32_t& height) {
   width = w > 0 ? (uint32_t(w) + 15) & ~15u : ((height * 16 / 9) + 15) & ~15u;
   if (width == kConsoleWidth && height == kConsoleHeight) {
     width = height = 0;
-  } else if (height < 360 || width < 640 || 2 * ScreenTiles(width, height) > EdramTiles() ||
+  } else if (height < 360 || width < 480 || 2 * ScreenTiles(width, height) > EdramTiles() ||
              (uint64_t(width) * height > uint64_t(kConsoleWidth) * kConsoleHeight && EdramTiles() == 2048)) {
     // More pixels than the console's need the larger EDRAM: with 2048 tiles the post-processing pool wraps onto the
     // main colour target and the top of the picture shows its contents (1600x720 on the Thor, 2026-11-21).
@@ -138,6 +140,17 @@ bool WideScreen() {
     return width && uint64_t(width) * 9 > uint64_t(height) * 16 + 16 * 9;
   }();
   return wide;
+}
+
+// Whether the screen is narrower than 16:9 (4:3, 3:2, 5:3: the 2D layer is scaled to the width and centred
+// vertically then).
+bool NarrowScreen() {
+  static const bool narrow = [] {
+    uint32_t width, height;
+    WantedScreen(width, height);
+    return width && uint64_t(width) * 9 + 16 * 9 < uint64_t(height) * 16;
+  }();
+  return narrow;
 }
 
 // A {width, height} pair at addr that is the console's 1280x720 becomes the wanted size.
@@ -345,11 +358,56 @@ REX_HOOK_RAW(sub_82EFE958) {
   __imp__sub_82EFE958(ctx, base);
 }
 
-// The 2D layer's transforms (anchor flags in r5): stretch (X flags 0) becomes centre on a wide screen.
+// The 2D layer's transforms (anchor flags in r5; sub_82F3DD70 for sprites): X in the low nibble (1 left, 2 right,
+// 4 centre, 8 unscaled, 0 stretch: width / 1280), Y in the high one (0x10 top, 0x20 bottom, 0x40 centre, 0x80
+// unscaled, 0 stretch: height / 720); left / right / top / bottom / centre scale by the smaller of the two. On a wide
+// screen stretch in X becomes centre (the 1280 canvas in the middle at the screen's height). On a narrower one (960x720
+// for 4:3: 0.75 across, 1.0 down) stretch in X and Y becomes centre: the canvas scaled to the width, in a centred
+// band (960x540 at y 90), so text and HUD keep their shape; elements the game anchors to an edge stay at that edge.
 namespace {
 inline void CentreX(PPCContext& ctx) {
   static const bool centre = REXCVAR_GET(ds2_ui_centre);
-  if (centre && WideScreen() && !(ctx.r5.u32 & 0x0F)) ctx.r5.u64 |= 4;
+  if (!centre) return;
+  if (WideScreen()) {
+    if (!(ctx.r5.u32 & 0x0F)) ctx.r5.u64 |= 4;
+  } else if (NarrowScreen()) {
+    if (!(ctx.r5.u32 & 0x0F)) ctx.r5.u64 |= 4;
+    if (!(ctx.r5.u32 & 0xF0)) ctx.r5.u64 |= 0x40;
+  }
+}
+
+// A large sprite that runs past an edge of the 1280x720 canvas (the logo screens' white frame: bars 48 x 8.6 above and
+// below, side pieces 16 x 16 left and right of the logo; the cinematic bars) is part of a full-screen frame: once
+// centred, it would no longer reach the screen's edge on a wide or narrow screen, and the pieces of the frame would
+// no longer meet (two black bands across the Bandai Namco logo at 4:3, the owner, 2026-11-28). Such a sprite is
+// extended far past that edge (the viewport clips it); its inner edges stay where they are. Plain-coloured quads only
+// have been seen doing this.
+void ExtendFrameSprite(uint8_t* base, uint32_t m) {
+  auto get = [&](uint32_t a) {
+    const uint32_t u = Load32(base, a);
+    float v;
+    std::memcpy(&v, &u, 4);
+    return v;
+  };
+  auto put = [&](uint32_t a, float v) {
+    uint32_t u;
+    std::memcpy(&u, &v, 4);
+    Store32(base, a, u);
+  };
+  // Row 0: scale x at +0, offset x at +12; row 1: scale y at +20, offset y at +28 (a 32-unit quad).
+  auto extend = [&](uint32_t scale_at, uint32_t offset_at, float size) {
+    const float scale = get(scale_at), offset = get(offset_at);
+    float lo = std::min(offset, offset + 32.0f * scale), hi = std::max(offset, offset + 32.0f * scale);
+    if (lo >= -1.0f && hi <= size + 1.0f) return;
+    if (lo < -1.0f) lo = -2000.0f;
+    if (hi > size + 1.0f) hi = size + 2000.0f;
+    put(offset_at, scale >= 0.0f ? lo : hi);
+    put(scale_at, (scale >= 0.0f ? 1.0f : -1.0f) * (hi - lo) / 32.0f);
+  };
+  // Large in either direction (the bars are 8.6 high and 48 wide).
+  if (std::max(std::fabs(get(m)), std::fabs(get(m + 20))) < 10.0f) return;
+  extend(m, m + 12, float(kConsoleWidth));
+  extend(m + 20, m + 28, float(kConsoleHeight));
 }
 
 // ds2_ui_probe: each distinct (2D function, caller, anchor flags) once, with its time (which 2D call draws what).
@@ -393,17 +451,32 @@ REX_HOOK_RAW(sub_82F3E4F0) {
     }
   }
   // Full-screen layers keep stretching across the whole screen: the fade / background layer (a 32-unit quad scaled
-  // 40 x 22.5 at 0,0 = 1280x720) and the cinematic bars (scale 48 from x -117); the probe showed no other sprite that
-  // starts at the left edge with a scale above 30 (2026-11-21).
+  // 40 x 22.5 at 0,0 = 1280x720) and, on wide screens, the cinematic bars (scale 48 from x -117); the probe showed no
+  // other sprite that starts at the left edge with a scale above 30 (2026-11-21). On a narrower screen only the fade
+  // layer stretches (the cinematic bars stretched down to the full height would not meet the centred pieces of the
+  // logo screens' frame); every other large sprite that runs past the canvas edge is extended (ExtendFrameSprite).
   if (uint32_t(ctx.lr) == 0x82F5147Cu) {
     const uint32_t m = ctx.r4.u32;
     ds2::hud_sprites::OnSpriteTransform(base, m);
-    float sx, tx;
+    float sx, tx, sy, ty;
     const uint32_t usx = Load32(base, m), utx = Load32(base, m + 12);
+    const uint32_t usy = Load32(base, m + 20), uty = Load32(base, m + 28);
     std::memcpy(&sx, &usx, 4);
     std::memcpy(&tx, &utx, 4);
-    const bool full_screen = tx <= 1.0f && (sx >= 30.0f || sx <= -30.0f);
-    if (!full_screen) CentreX(ctx);
+    std::memcpy(&sy, &usy, 4);
+    std::memcpy(&ty, &uty, 4);
+    static const bool centre = REXCVAR_GET(ds2_ui_centre);
+    const bool narrow = NarrowScreen();
+    const bool full_screen =
+        narrow ? std::fabs(tx) <= 1.0f && std::fabs(ty) <= 1.0f && std::fabs(sx * 32.0f - 1280.0f) <= 2.0f &&
+                     std::fabs(sy * 32.0f - 720.0f) <= 2.0f
+               : tx <= 1.0f && (sx >= 30.0f || sx <= -30.0f);
+    if (!full_screen) {
+      // Only stretch sprites (anchor flags 0, the ones centred here): the HUD's health and stamina fills are anchored
+      // (flags 11) quads parked thousands of units to the left and slid in; extending those emptied the bars.
+      if (centre && (narrow || WideScreen()) && !(ctx.r5.u32 & 0xFF)) ExtendFrameSprite(base, m);
+      CentreX(ctx);
+    }
   }
   __imp__sub_82F3E4F0(ctx, base);
 }

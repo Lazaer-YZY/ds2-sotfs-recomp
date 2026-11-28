@@ -176,6 +176,11 @@ public final class RuntimeActivity extends SDLActivity {
      * phones, 2026-11-22). At every resolution since 2026-11-22: 1080p wide had come out lavender (the game's Clear
      * dropped bit 12 of a post-processing target's EDRAM base, fixed in ds2_render_size.cpp); 1440p is 720p wide
      * scaled 2x. Returns the width, or 0 for the console's 16:9.
+     *
+     * Narrower screens (4:3 handhelds, 3:2, 5:3; the owner, 2026-11-28: "add 4:3 resolutions"): the same, narrower
+     * (960x720 at 4:3, 720x540, 1440x1080; at least 480 wide): fewer pixels than 16:9, so no larger EDRAM. The 3D view
+     * keeps its vertical field of view (less to the sides, as on a 4:3 TV), the HUD and menus are scaled to the width
+     * in a centred band, movies are letterboxed.
      */
     /** Whether Fill screen is offered at this CTRL resolution choice (all of them; see wideWidth). */
     static boolean wideSupported(String renderHeight) {
@@ -184,11 +189,21 @@ public final class RuntimeActivity extends SDLActivity {
     }
 
     static int wideWidth(SharedPreferences render, int height, float displayAspect) {
-        if (!render.getBoolean("wide", false) || displayAspect <= 16f / 9f + 0.01f) return 0;
+        if (!render.getBoolean("wide", false) || !fillableAspect(displayAspect)) return 0;
         int width = Math.round(height * displayAspect / 16f) * 16;
+        if (displayAspect < 16f / 9f) {
+            // Narrower than 16:9.
+            width = Math.max(width, 480);
+            return width < height * 16 / 9 - 15 ? width : 0;
+        }
         int max = height <= 540 ? 2400 : height <= 720 ? 1760 : 2400;
         width = Math.min(width, max);
         return width > (height * 16 / 9 + 15) / 16 * 16 ? width : 0;
+    }
+
+    /** Whether Fill screen changes anything on a display of this shape (not 16:9). */
+    static boolean fillableAspect(float displayAspect) {
+        return Math.abs(displayAspect - 16f / 9f) > 0.01f;
     }
 
     /** The display's long side over its short side (the game runs in landscape). */
@@ -228,8 +243,9 @@ public final class RuntimeActivity extends SDLActivity {
             args.add("--video_mode_height=" + gameHeight);
             // Colour, depth and the post-processing pool of a wider screen do not fit the console's 10 MB EDRAM
             // side by side: the emulated EDRAM is doubled, at 1080 quadrupled (ds2_render_size.cpp).
-            if (gameHeight <= 720) args.add("--gpu_edram_tiles=4096");
-            android.util.Log.i("ds2recomp", "display: wide screen " + wide + "x" + gameHeight + " (display aspect "
+            if (gameHeight <= 720 && wide > gameHeight * 16 / 9) args.add("--gpu_edram_tiles=4096");
+            android.util.Log.i("ds2recomp", "display: " + (wide > gameHeight * 16 / 9 ? "wide" : "narrow") + " screen "
+                + wide + "x" + gameHeight + " (display aspect "
                 + displayAspect + ")");
         }
         // Without FSR the swapchain is the game's height and the display hardware scales it to the screen (cheapest);
@@ -568,8 +584,34 @@ public final class RuntimeActivity extends SDLActivity {
         graphicsFailure = reason;
     }
 
+    /**
+     * Back (Select / View) + Start held together for a second open CTRL's settings (issue #35: with a controller, or in
+     * DeX with only a mouse, CTRL was out of reach). The presses still reach the game.
+     */
+    private static final long CTRL_SHORTCUT_MS = 1000;
+    private boolean padBackDown, padStartDown;
+    private final Runnable ctrlShortcut = () -> {
+        if (padBackDown && padStartDown && touchControls != null) {
+            android.util.Log.i("ds2recomp", "CTRL from the controller (Back + Start)");
+            touchControls.openSettingsFromController();
+        }
+    };
+
+    private void trackCtrlShortcut(KeyEvent event) {
+        int code = event.getKeyCode();
+        if (code != KeyEvent.KEYCODE_BUTTON_SELECT && code != KeyEvent.KEYCODE_BUTTON_START) return;
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() > 0) return;
+        boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
+        boolean wasBoth = padBackDown && padStartDown;
+        if (code == KeyEvent.KEYCODE_BUTTON_SELECT) padBackDown = down; else padStartDown = down;
+        boolean both = padBackDown && padStartDown;
+        if (both && !wasBoth) bootHandler.postDelayed(ctrlShortcut, CTRL_SHORTCUT_MS);
+        if (!both) bootHandler.removeCallbacks(ctrlShortcut);
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        trackCtrlShortcut(event);
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && touchControls != null && touchControls.ctrlGone()) {
             // CTRL removed after the start (CTRL option): Back opens Settings, and the key goes nowhere else.
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) touchControls.openSettingsFromBack();

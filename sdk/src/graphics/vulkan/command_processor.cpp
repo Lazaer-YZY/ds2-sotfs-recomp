@@ -5914,7 +5914,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // gpu_keep_aspect_pixel_shaders: these shaders' draws (a movie player's full-screen quad) keep the 16:9 shape when
   // their viewport is wider, so a movie is not stretched across a wide screen: by default the picture is scaled up to
   // the full width (clip-space Y scaled about the centre, the top and bottom cropped: a movie's letterbox bars), with
-  // gpu_keep_aspect_pillarbox a centred 16:9 viewport.
+  // gpu_keep_aspect_pillarbox a centred 16:9 viewport. In a narrower viewport (4:3) the picture is letterboxed.
   if (pixel_shader) {
     static const std::vector<uint64_t> pillarbox = [] {
       std::vector<uint64_t> hashes;
@@ -5941,6 +5941,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
           viewport_info.ndc_scale[1] *= zoom;
           viewport_info.ndc_offset[1] *= zoom;
         }
+      } else if (width && wanted > width + 1) {
+        // A narrower viewport (4:3): the 16:9 picture across the full width, letterboxed (clip-space Y scaled down
+        // about the centre).
+        const float zoom = float(width) * 9.0f / (16.0f * float(height));
+        viewport_info.ndc_scale[1] *= zoom;
+        viewport_info.ndc_offset[1] *= zoom;
       }
     }
   }

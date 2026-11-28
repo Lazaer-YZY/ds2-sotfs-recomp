@@ -275,6 +275,39 @@ final class TouchControlsView extends View {
     private float settingX() { return activeLayout().ctrlX * getWidth(); }
     private float settingY() { return activeLayout().ctrlY * getHeight(); }
     private float settingRadius() { return unit() * .45f; }
+    /** A mouse button press that went to CTRL (its release is consumed too). */
+    private boolean mouseOnCtrl;
+
+    private boolean onMouseClick(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action != MotionEvent.ACTION_DOWN) {
+            boolean ours = mouseOnCtrl;
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) mouseOnCtrl = false;
+            return ours;
+        }
+        if (layout == null || editing || settingsDialogOpen) return false;
+        float x = event.getX(), y = event.getY();
+        long now = SystemClock.uptimeMillis();
+        layoutCtrl(now);
+        boolean onTab = ctrl.retracted() && ctrl.hitTab(x, y);
+        if (!ctrl.visible(now) || !(onTab || (!ctrl.retracted() && onCtrl(x, y)))) return false;
+        mouseOnCtrl = true;
+        ctrl.activity(now);
+        syncCtrlPin();
+        showSettings();
+        return true;
+    }
+
+    /**
+     * The controller shortcut (Back + Start held for a second, issue #35): the settings, as CTRL opens them. Does
+     * nothing while they or the layout editor are open.
+     */
+    void openSettingsFromController() {
+        if (settingsDialogOpen || editing) return;
+        ctrl.activity(SystemClock.uptimeMillis());
+        showSettings();
+    }
+
     private boolean onCtrl(float x, float y) {
         return near(x, y, settingX(), settingY(), unit() * TouchControlLayout.CTRL_HIT_RADIUS);
     }
@@ -823,7 +856,7 @@ final class TouchControlsView extends View {
         // "if someone select unsupported resolution it should untick/grey automatically"), and on 16:9 displays.
         CheckBox wide = option(imageSec, strings.getString(R.string.touch_wide),
             strings.getString(R.string.touch_wide_help), render.getBoolean("wide", false));
-        final boolean wideDisplay = activity.displayAspect() > 16f / 9f + 0.01f;
+        final boolean wideDisplay = RuntimeActivity.fillableAspect(activity.displayAspect());
         if (!wideDisplay) {
             wide.setText(strings.getString(R.string.touch_wide) + " " + strings.getString(R.string.touch_wide_na));
         }
@@ -1334,7 +1367,12 @@ final class TouchControlsView extends View {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        // A mouse click belongs to SDL's pointer path, not to the virtual pad.
+        // A mouse click belongs to SDL's pointer path, not to the virtual pad; only a click on CTRL itself opens the
+        // settings (issue #35: in Samsung DeX a mouse is the only pointer, and CTRL could not be opened).
+        if (event.isFromSource(InputDevice.SOURCE_MOUSE)
+                || event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_MOUSE) {
+            return onMouseClick(event);
+        }
         if (!event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)
                 && !event.isFromSource(InputDevice.SOURCE_STYLUS)) return false;
         if (event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_MOUSE) return false;
